@@ -185,6 +185,13 @@ export class FakeAgent {
     this.ws.send(JSON.stringify(frame));
   }
 
+  /** Like a real agent, output produced after the socket closed is lost (no throw). */
+  trySend(frame: Record<string, unknown>): boolean {
+    if (!this.ws) return false;
+    this.ws.send(JSON.stringify(frame));
+    return true;
+  }
+
   sendRaw(text: string): void {
     if (!this.ws) throw new Error("not connected");
     this.ws.send(text);
@@ -231,8 +238,8 @@ export class FakeAgent {
     }
     const reply = await handler(body, this);
     if (!reply) return;
-    if (reply.ok) this.send({ t: "result", id: body.id, ts: Date.now(), ok: true, data: reply.data });
-    else this.send({ t: "result", id: body.id, ts: Date.now(), ok: false, error: { retryable: false, ...reply.error } });
+    if (reply.ok) this.trySend({ t: "result", id: body.id, ts: Date.now(), ok: true, data: reply.data });
+    else this.trySend({ t: "result", id: body.id, ts: Date.now(), ok: false, error: { retryable: false, ...reply.error } });
   }
 
   /**

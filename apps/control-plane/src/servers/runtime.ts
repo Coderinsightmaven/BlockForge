@@ -1,6 +1,6 @@
 import type { ArtifactPlan, CommandPayload, ConfigFileRule, PortBinding, ServerSoftware, Template, WorkloadStatus } from "@blockforge/contracts";
 import type { ResolvedArtifact } from "@blockforge/minecraft";
-import { applyConfigFileRule, buildEggEnvironment, createDoneMatcher, memoryMiB, type PlaceholderContext } from "@blockforge/eggs";
+import { applyConfigFileRule, buildEggEnvironment, createDoneMatcher, EggEnvironmentError, memoryMiB, type PlaceholderContext } from "@blockforge/eggs";
 import {
   buildLaunchSpec,
   buildMinecraftProvisioning,
@@ -152,18 +152,41 @@ export function minecraftLaunch(server: ServerRow, plan: ArtifactPlan): LaunchSp
   });
 }
 
+/**
+ * The egg environment from the server's STORED variable values. They were authorised and validated
+ * when written (user-editable ones by their users, locked ones only by servers.admin on the target),
+ * so locked values apply (`adminOverride`) instead of silently reverting to the template default.
+ */
 export function eggEnvironment(ctx: ServerRuntimeContext): Record<string, string> {
   const primary = primaryAllocation(ctx);
-  return buildEggEnvironment({
-    template: { startup: ctx.template.startup, variables: ctx.template.variables },
-    values: ctx.values,
-    memoryLimitBytes: ctx.server.memoryLimitBytes,
-    primary: { ip: primary.ip, port: primary.port },
-    serverId: ctx.server.id,
-    location: ctx.server.location,
-    allocationLimit: ctx.server.allocationLimit,
-    timezone: ctx.server.timezone,
-  });
+  try {
+    return buildEggEnvironment(
+      {
+        template: { startup: ctx.template.startup, variables: ctx.template.variables },
+        values: ctx.values,
+        memoryLimitBytes: ctx.server.memoryLimitBytes,
+        primary: { ip: primary.ip, port: primary.port },
+        serverId: ctx.server.id,
+        location: ctx.server.location,
+        allocationLimit: ctx.server.allocationLimit,
+        timezone: ctx.server.timezone,
+      },
+      { adminOverride: true },
+    );
+  } catch (err) {
+    // Write-time validation makes this unreachable for values stored by this version.
+    if (err instanceof EggEnvironmentError) throw new JobError("INVALID_ENVIRONMENT", `the server's environment is invalid: ${err.message}`);
+    throw err;
+  }
+}
+
+/** C0 control characters (TAB excepted) and DEL — refused in variable values, timezone and location (as by `@blockforge/eggs`). */
+export function hasControlChars(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f) return true;
+  }
+  return false;
 }
 
 export type WorkloadSpecInput = CommandPayload<"workload.ensure">;

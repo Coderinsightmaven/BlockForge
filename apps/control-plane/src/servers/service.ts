@@ -9,7 +9,7 @@ import {
   type ServerSubuser,
   type Template,
 } from "@blockforge/contracts";
-import { EggEnvironmentError, resolveStartupForDisplay, validateVariableValue } from "@blockforge/eggs";
+import { buildEggEnvironment, EggEnvironmentError, resolveStartupForDisplay, validateVariableValue } from "@blockforge/eggs";
 import { defaultHeapBytes, LaunchValidationError } from "@blockforge/minecraft";
 import { and, asc, count, desc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import type { Logger } from "pino";
@@ -46,7 +46,8 @@ import type { TemplatesService } from "../templates/service.js";
 import type { ServerAccess, ServerAccessService } from "./access.js";
 import { buildServerDtos } from "./dto.js";
 import { escalation, mergeSubuserPermissions } from "./permissions.js";
-import { eggEnvironment, minecraftLaunch, type ServerRuntimeContext } from "./runtime.js";
+import { eggEnvironment, hasControlChars, minecraftLaunch, type ServerRuntimeContext } from "./runtime.js";
+import { JobError } from "../jobs/types.js";
 import { SERVER_JOBS } from "./jobs.js";
 import type { ServerStateService } from "./state.js";
 
@@ -202,6 +203,11 @@ export class ServersService {
       const [net] = await this.d.db.select({ id: networks.id }).from(networks).where(eq(networks.id, req.networkId)).limit(1);
       if (!net) throw badRequest("Unknown network", validationDetails("unknown network", "networkId"));
     }
+    // Both end up in the workload environment / launch command: no line breaks or control characters.
+    const boundary: { path: string; message: string }[] = [];
+    if (hasControlChars(req.timezone)) boundary.push({ path: "timezone", message: "must not contain line breaks or control characters" });
+    if (req.location !== null && hasControlChars(req.location)) boundary.push({ path: "location", message: "must not contain line breaks or control characters" });
+    if (boundary.length) throw badRequest("Invalid server settings", { issues: boundary });
     const prepared = await this.prepareTemplateFields(template, req, principal);
 
     const candidates = await placementCandidates(this.d.db, this.d.tracker, this.d.clock, req);
@@ -336,8 +342,11 @@ export class ServersService {
       const value = egg.variables[v.envName] ?? v.defaultValue;
       const err = validateVariableValue(v, value);
       if (err) issues.push({ path: `egg.variables.${v.envName}`, message: err });
+      else if (hasControlChars(value)) issues.push({ path: `egg.variables.${v.envName}`, message: "must not contain line breaks or control characters" });
     }
     if (issues.length) throw badRequest("Invalid template variables", { issues });
+    // Final guard: what is stored now must build an environment later (provision, every start).
+    checkEggEnvironment(template, egg.variables, { memoryLimitBytes: req.memoryLimitBytes, allocationLimit: req.allocationLimit, timezone: req.timezone, location: req.location }, "egg.variables");
     return {
       kind: "game" as const,
       software: null,
@@ -664,7 +673,7 @@ export class ServersService {
       try {
         env = allocs.some((a) => a.isPrimary) ? eggEnvironment(rt) : values;
       } catch (err) {
-        if (!(err instanceof EggEnvironmentError)) throw err;
+        if (!(err instanceof JobError && err.code === "INVALID_ENVIRONMENT")) throw err;
       }
       resolved = resolveStartupForDisplay(template, env, isViewable);
     }
@@ -706,7 +715,10 @@ export class ServersService {
     if (!admin && !v.userEditable) throw forbidden("This variable is not editable");
     const err = validateVariableValue(v, value);
     if (err) throw badRequest(err, validationDetails(err, "value"));
-    if (value.includes("\0")) throw badRequest("NUL bytes are not allowed", validationDetails("NUL byte", "value"));
+    if (hasControlChars(value)) throw badRequest("Line breaks and control characters are not allowed", validationDetails("must not contain line breaks or control characters", "value"));
+    const stored = Object.fromEntries((await this.d.db.select().from(serverVariables).where(eq(serverVariables.serverId, access.server.id))).map((r) => [r.envName, r.value]));
+    const s = access.server;
+    checkEggEnvironment(template, { ...stored, [envName]: value }, { memoryLimitBytes: s.memoryLimitBytes, allocationLimit: s.allocationLimit, timezone: s.timezone, location: s.location }, "value");
     await this.d.db
       .insert(serverVariables)
       .values({ serverId: access.server.id, envName, value })
@@ -804,3 +816,35 @@ export class ServersService {
 }
 
 export const ServerIdParams = z.object({ id: z.uuid() });
+
+/**
+ * Builds the egg environment for values about to be stored (authorised by the caller, hence
+ * `adminOverride`) and turns an EggEnvironmentError into VALIDATION_FAILED at `path`.
+ */
+function checkEggEnvironment(
+  template: Template,
+  values: Record<string, string>,
+  s: { memoryLimitBytes: number; allocationLimit: number; timezone: string; location: string | null },
+  path: string,
+): void {
+  if (template.kind !== "egg") return;
+  try {
+    buildEggEnvironment(
+      {
+        template: { startup: template.startup, variables: template.variables },
+        values,
+        memoryLimitBytes: s.memoryLimitBytes,
+        // Placeholder allocation and id: only the variable values are under test here.
+        primary: { ip: "0.0.0.0", port: 25565 },
+        serverId: "00000000-0000-4000-8000-000000000000",
+        location: s.location,
+        allocationLimit: s.allocationLimit,
+        timezone: s.timezone,
+      },
+      { adminOverride: true },
+    );
+  } catch (err) {
+    if (err instanceof EggEnvironmentError) throw badRequest("Invalid template variables", validationDetails(err.message, path));
+    throw err;
+  }
+}

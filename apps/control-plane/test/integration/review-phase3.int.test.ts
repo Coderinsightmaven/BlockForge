@@ -105,9 +105,22 @@ describe("#2 non-editable egg variables need servers.admin on the target", () =>
     // Editable variables are fine for everyone.
     const editable = await alice.post("/servers", { ...eggBody(tpl.id), egg: { variables: { SERVER_JARFILE: "server.jar" }, acceptEula: true } });
     expect(editable.statusCode, editable.body).toBe(202);
-    // Startup edits use the effective permissions on the server itself.
+    // The admin-set locked value reaches the install and workload environments (stored values are
+    // authorised at write time: adminOverride when building the environment).
     const bobServer = onA.json().server.id as string;
+    expect((await waitJob(owner, onA.json().jobId)).status).toBe("succeeded");
+    const installEnv = (nodeA.sim.installs.find((c) => (c.payload as { workloadId: string }).workloadId === bobServer)!.payload as { env: Record<string, string> }).env;
+    expect(installEnv.VANILLA_VERSION).toBe("1.21.11");
+    const specEnv = () => nodeA.sim.ensured.filter((x) => x.workloadId === bobServer).at(-1)!.env;
+    expect(specEnv().VANILLA_VERSION).toBe("1.21.11");
+    // Startup edits use the effective permissions on the server itself, and apply on the next start.
     expect((await bob.put(`/servers/${bobServer}/startup/variables`, { envName: "VANILLA_VERSION", value: "1.21.10" })).statusCode).toBe(200);
+    const restart = await owner.post(`/servers/${bobServer}/actions`, { action: "restart", timeoutMs: 5000 });
+    expect((await waitJob(owner, restart.json().jobId)).status).toBe("succeeded");
+    expect(specEnv().VANILLA_VERSION).toBe("1.21.10");
+    // Alice (no servers.admin) cannot change the locked variable on her own server.
+    const aliceServer = editable.json().server.id as string;
+    expect((await alice.put(`/servers/${aliceServer}/startup/variables`, { envName: "VANILLA_VERSION", value: "1.21.10" })).statusCode).toBe(403);
   });
 });
 
@@ -317,5 +330,40 @@ describe("idempotency keys cover the query string (Grok web review)", () => {
     expect(replay.json().jobId).toBe(first.json().jobId);
     const { rows } = await testPool().query("SELECT input_data FROM jobs WHERE id = $1", [first.json().jobId]);
     expect(rows[0].input_data).toMatchObject({ deleteData: true });
+  });
+});
+
+describe("egg environment values are validated when written (eggs review adaptation)", () => {
+  it("refuses line breaks and control characters in variables, timezone and location", async () => {
+    const { t, owner } = await boot();
+    const node = await connectSimNode(t, owner, { agents, sim: { installCreates: { "server.jar": "x" } } });
+    const tpl = await importVanilla(owner, (x) => ({
+      variables: [...x.variables, { envName: "MOTD_TEXT", name: "MOTD", description: "", defaultValue: "hello", userViewable: true, userEditable: true, rules: "nullable|string|max:200", sortOrder: 9 }],
+    }));
+    const issuePath = (r: { json(): { error: { details?: { issues?: { path: string }[] } } } }) => r.json().error.details?.issues?.map((i) => i.path) ?? [];
+    for (const [variables, path] of [
+      [{ MOTD_TEXT: "line1\nstop" }, "egg.variables.MOTD_TEXT"],
+      [{ MOTD_TEXT: "a\rb" }, "egg.variables.MOTD_TEXT"],
+      [{ MOTD_TEXT: "bell\u0007" }, "egg.variables.MOTD_TEXT"],
+    ] as const) {
+      const r = await owner.post("/servers", eggBody(tpl.id, {}, variables));
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error.code).toBe("VALIDATION_FAILED");
+      expect(issuePath(r)).toContain(path);
+    }
+    const tz = await owner.post("/servers", eggBody(tpl.id, { timezone: "UTC\nX" }));
+    expect(tz.statusCode).toBe(400);
+    expect(issuePath(tz)).toEqual(["timezone"]);
+    const loc = await owner.post("/servers", eggBody(tpl.id, { location: "rack\r1" }));
+    expect(issuePath(loc)).toEqual(["location"]);
+    // Tabs are fine; a valid server is created and later edits are validated the same way.
+    const ok = await owner.post("/servers", eggBody(tpl.id, { startup: "manual" }, { MOTD_TEXT: "tab\tseparated" }));
+    expect(ok.statusCode, ok.body).toBe(202);
+    const id = ok.json().server.id as string;
+    expect((await waitJob(owner, ok.json().jobId)).status).toBe("succeeded");
+    const bad = await owner.put(`/servers/${id}/startup/variables`, { envName: "MOTD_TEXT", value: "x\ny" });
+    expect(bad.statusCode).toBe(400);
+    expect(issuePath(bad)).toEqual(["value"]);
+    expect(node.sim.ensured.filter((x) => x.workloadId === id).at(-1)!.env.MOTD_TEXT).toBe("tab\tseparated");
   });
 });

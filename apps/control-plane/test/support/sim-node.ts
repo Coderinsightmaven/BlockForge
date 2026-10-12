@@ -147,7 +147,7 @@ export class SimNode {
       const id = String(p.workloadId);
       const ts = Date.now();
       const lines = this.options.installLines ?? ["installing", "done"];
-      this.agent.send({ t: "logs", workloadId: id, source: "install", lines: lines.map((line) => ({ ts, stream: "stdout", line })) });
+      this.agent.trySend({ t: "logs", workloadId: id, source: "install", lines: lines.map((line) => ({ ts, stream: "stdout", line })) });
       for (const [path, content] of Object.entries(this.options.installCreates ?? {})) this.put(id, path, content);
       await sleep(20);
       return { exitCode: this.options.installExitCode ?? 0, durationMs: 1234, timedOut: false, logTail: lines };
@@ -173,11 +173,11 @@ export class SimNode {
       const ready = this.options.readyLine === undefined ? DEFAULT_READY_LINE : this.options.readyLine;
       const startup = this.options.startupLines ?? [];
       setTimeout(() => {
-        if (startup.length) this.agent.logs(id, startup.map((line) => ({ ts: Date.now(), stream: "stdout" as const, line })));
+        if (startup.length) this.agent.trySend({ t: "logs", workloadId: id, lines: startup.map((line) => ({ ts: Date.now(), stream: "stdout", line })) });
         if (crash !== null && crash !== undefined) {
           this.exit(id, crash, true, this.options.oomOnStart ?? false);
         } else if (ready) {
-          this.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: ready }]);
+          this.agent.trySend({ t: "logs", workloadId: id, lines: [{ ts: Date.now(), stream: "stdout", line: ready }] });
           if (this.options.slpAfterReady) this.sendSlp(id);
         }
       }, 30);
@@ -488,7 +488,7 @@ export class SimNode {
       w.finishedAt = Date.now();
     }
     const st = this.status(workloadId);
-    if (emit) this.agent.send({ t: "event", ts: Date.now(), event: "workload.state", data: st });
+    if (emit) this.agent.trySend({ t: "event", ts: Date.now(), event: "workload.state", data: st });
     return st;
   }
 
@@ -496,11 +496,11 @@ export class SimNode {
   sendSlp(workloadId: string): void {
     const frame = loadFixture<{ node: NodeMetricSample; workloads: WorkloadMetricSample[] }>("metrics.json");
     const ts = Date.now();
-    this.agent.metrics({ ...frame.node, ts }, [{ ...frame.workloads[0]!, workloadId, ts }]);
+    this.agent.trySend({ t: "metrics", ts, node: { ...frame.node, ts }, workloads: [{ ...frame.workloads[0]!, workloadId, ts }] });
   }
 
   /** Emits a `workload.state` event for the current status. */
   emitState(workloadId: string): void {
-    this.agent.send({ t: "event", ts: Date.now(), event: "workload.state", data: this.status(workloadId) });
+    this.agent.trySend({ t: "event", ts: Date.now(), event: "workload.state", data: this.status(workloadId) });
   }
 }
