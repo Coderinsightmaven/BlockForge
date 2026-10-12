@@ -81,7 +81,8 @@ export const OPERATION_ALLOWED_FROM: Record<ServerOperation, readonly ServerStat
   kill: ["starting", "running", "degraded", "stopping"],
   update: ["stopped", "crashed", "running", "degraded"],
   backup: ["running", "degraded", "stopped", "crashed"],
-  restore: ["stopped", "crashed"],
+  /** From running/degraded the restore job stops the server first (stopping → stopped → restoring). */
+  restore: ["stopped", "crashed", "running", "degraded"],
   migrate: ["stopped", "crashed"],
   /** `provisioning` only once its job is no longer active (e.g. an abandoned provision). */
   delete: ["stopped", "crashed", "provision_failed", "provisioning", "unreachable"],

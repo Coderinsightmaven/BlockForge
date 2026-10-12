@@ -103,6 +103,9 @@ export const CreateSshKeyRequest = z.object({
 /**
  * Personal API keys (`/account/api-keys`). `Authorization: Bearer bfk_<id>_<secret>`; no cookies, no CSRF.
  * Effective permissions = the owner's current effective permissions ∩ `permissions` (null = all of them),
+ * evaluated per resource: listing a server-scoped permission (e.g. `servers.files.read`) lets the key use
+ * it on every server where the owner holds it (via role, ownership or subuser grant). At creation a key may
+ * list any permission the owner holds anywhere (globally, scoped, as owner or as subuser).
  * re-evaluated on every request. Keys can never manage users, roles, API keys, SSH keys, passwords or MFA,
  * and requests from outside `allowedIps` are refused. Rate-limited per key. Audited as actor `api_token`.
  */

@@ -27,12 +27,25 @@ describe("server tab gating (myPermissions)", () => {
       "console",
       "stats",
       "files",
+      "backups",
+      "schedules",
       "startup",
       "network",
       "users",
       "activity",
       "settings",
     ]);
+  });
+
+  it("hides Backups when the limit is 0, except for administrators", () => {
+    const off = makeServer({ backupLimit: 0 });
+    expect(visibleServerTabs(off).map((t) => t.id)).not.toContain("backups");
+    expect(resolveServerTab(off, "backups")).toBe("console");
+    const admin = makeServer({
+      backupLimit: 0,
+      myPermissions: [...SERVER_OWNER_PERMISSIONS, "servers.admin"],
+    });
+    expect(visibleServerTabs(admin).map((t) => t.id)).toContain("backups");
   });
 
   it("a console-only subuser sees just the console", () => {

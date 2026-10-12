@@ -19,6 +19,27 @@ const itemBase = "flex h-8 items-center gap-2.5 rounded-md px-2 text-sm [&_svg]:
 function NavEntry({ item, me, onNavigate }: { item: NavItem; me: Me | undefined; onNavigate?: () => void }) {
   const Icon = item.icon;
   const availability = navAvailability(item, me);
+  if (item.perServer) {
+    // Per-server sections: point at the server list, where each server's page has the tab.
+    return (
+      <Tooltip content={item.perServer} side="right">
+        <Link
+          to="/servers"
+          onClick={onNavigate}
+          className={cn(itemBase, "text-muted-foreground hover:bg-accent hover:text-foreground")}
+          activeOptions={{ exact: true }}
+          activeProps={{}}
+        >
+          <Icon aria-hidden />
+          <span className="truncate">{item.label}</span>
+          <span className="ml-auto text-[10px] text-muted-foreground/80" aria-hidden>
+            per server
+          </span>
+          <span className="sr-only"> ({item.perServer}; opens Game Servers)</span>
+        </Link>
+      </Tooltip>
+    );
+  }
   if (availability.kind !== "available" || !item.to) {
     return (
       <Tooltip content={availability.kind === "available" ? null : availability.reason} side="right">

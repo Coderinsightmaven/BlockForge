@@ -197,6 +197,9 @@ expire after 2 hours. World upload at creation is not implemented yet (`world.mo
 
 Backup jobs hold the server's operation lock (`backup`/`restore` in `lifecycle.ts`), so they never overlap
 power actions; rotation deletes the oldest unlocked successful backup; deleting a server deletes its backups.
+`pending`/`running`/`uploading`/`completed` backups count toward `backupLimit` (`BACKUP_COUNTED_STATUSES`);
+failed ones don't. Restore may start from running/degraded: the job stops the server first. Responses:
+`CreateBackupResponse`, `BackupStorageTestResult`; realtime `backup.updated|deleted`, `schedule.updated|deleted`.
 
 ## Schedules (Phase 4) — see `api/schedules.ts`
 | Method | Path | Body → Response | Permission |

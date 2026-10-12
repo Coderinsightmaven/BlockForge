@@ -1,8 +1,15 @@
 /**
  * Contract-valid objects for unit tests only. Never imported by application code.
  */
-import { Me, Node, SERVER_OWNER_PERMISSIONS, Server } from "@blockforge/contracts";
-import type { Me as MeT, Node as NodeT, Permission, Server as ServerT } from "@blockforge/contracts";
+import { Backup, Me, Node, SERVER_OWNER_PERMISSIONS, Schedule, Server } from "@blockforge/contracts";
+import type {
+  Backup as BackupT,
+  Me as MeT,
+  Node as NodeT,
+  Permission,
+  Schedule as ScheduleT,
+  Server as ServerT,
+} from "@blockforge/contracts";
 
 export const USER_ID = "11111111-1111-4111-8111-111111111111";
 export const NODE_ID = "22222222-2222-4222-8222-222222222222";
@@ -126,6 +133,59 @@ export function makeServer(overrides: Partial<ServerT> = {}): ServerT {
     latest: null,
     myPermissions: [...SERVER_OWNER_PERMISSIONS],
     sftp: null,
+    ...overrides,
+  });
+}
+
+export const BACKUP_ID = "88888888-8888-4888-8888-888888888888";
+export const SCHEDULE_ID = "99999999-9999-4999-8999-999999999999";
+export const JOB_ID = "77777777-7777-4777-8777-777777777777";
+
+export function makeBackup(overrides: Partial<BackupT> = {}): BackupT {
+  return Backup.parse({
+    id: BACKUP_ID,
+    serverId: SERVER_ID,
+    name: "Before 1.21 update",
+    status: "completed",
+    locked: false,
+    storage: "local",
+    consistency: "save-flush",
+    sizeBytes: 512 * 1024 ** 2,
+    sha256: "a".repeat(64),
+    ignored: [],
+    skippedSymlinks: 0,
+    error: null,
+    createdBy: USER_ID,
+    scheduleId: null,
+    jobId: null,
+    createdAt: 1_760_000_000_000,
+    completedAt: 1_760_000_060_000,
+    ...overrides,
+  });
+}
+
+export function makeSchedule(overrides: Partial<ScheduleT> = {}): ScheduleT {
+  return Schedule.parse({
+    id: SCHEDULE_ID,
+    serverId: SERVER_ID,
+    name: "Nightly restart",
+    cron: { minute: "0", hour: "4", dayOfMonth: "*", month: "*", dayOfWeek: "*" },
+    timezone: "Europe/Berlin",
+    enabled: true,
+    onlyWhenOnline: false,
+    tasks: [
+      {
+        action: "command",
+        command: "say Restarting in 5 minutes",
+        offsetSeconds: 0,
+        continueOnFailure: true,
+      },
+      { action: "power", power: "restart", offsetSeconds: 300, continueOnFailure: false },
+    ],
+    nextRunAt: 1_760_234_400_000,
+    lastRunAt: null,
+    running: false,
+    createdAt: 1_760_000_000_000,
     ...overrides,
   });
 }

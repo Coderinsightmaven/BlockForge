@@ -41,7 +41,7 @@ export interface NavItem {
   permission?: Permission;
   /** Permission must be global (not just scoped somewhere). */
   globalOnly?: boolean;
-  /** Lives inside each server's page; the entry explains where instead of linking. */
+  /** Lives inside each server's page; the entry explains where and links to the server list. */
   perServer?: string;
   keywords?: string[];
 }
@@ -81,8 +81,12 @@ export const NAV_ITEMS: NavItem[] = [
   { label: "Players", icon: Users, phase: 4 },
   { label: "Plugins & Mods", icon: Puzzle, phase: 4 },
   { label: "Files", icon: FolderOpen, perServer: "Open a server's Files tab" },
-  { label: "Backups", icon: Archive, phase: 6 },
-  { label: "Schedules & Tasks", icon: CalendarClock, phase: 4 },
+  { label: "Backups", icon: Archive, perServer: "Available per server in the server page (Backups tab)" },
+  {
+    label: "Schedules & Tasks",
+    icon: CalendarClock,
+    perServer: "Available per server in the server page (Schedules tab)",
+  },
   {
     label: "Alerts",
     icon: Bell,

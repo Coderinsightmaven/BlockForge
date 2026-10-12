@@ -32,6 +32,8 @@ import {
 
 const FilesTab = lazy(() => import("./files/files-tab"));
 const StatsTab = lazy(() => import("./tabs/stats-tab"));
+const BackupsTab = lazy(() => import("./tabs/backups-tab"));
+const SchedulesTab = lazy(() => import("./tabs/schedules-tab"));
 const StartupTab = lazy(() => import("./tabs/startup-tab"));
 const NetworkTab = lazy(() => import("./tabs/network-tab"));
 const UsersTab = lazy(() => import("./tabs/users-tab"));
@@ -63,6 +65,8 @@ function activeInstallJob(server: Server): { jobId: string; title: string } | nu
     return { jobId: server.activeJobId, title: "Reinstalling server" };
   if (server.activeOperation === "delete" || server.state === "deleting")
     return { jobId: server.activeJobId, title: "Deleting server" };
+  if (server.activeOperation === "restore" || server.state === "restoring")
+    return { jobId: server.activeJobId, title: "Restoring backup" };
   return null;
 }
 
@@ -237,6 +241,8 @@ export function ServerPage({
                     onEditorDirty={onEditorDirty}
                   />
                 ) : null}
+                {tab === "backups" ? <BackupsTab server={server} me={me} /> : null}
+                {tab === "schedules" ? <SchedulesTab server={server} /> : null}
                 {tab === "startup" ? <StartupTab server={server} /> : null}
                 {tab === "network" ? <NetworkTab server={server} /> : null}
                 {tab === "users" ? <UsersTab server={server} /> : null}

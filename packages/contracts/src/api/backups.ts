@@ -34,7 +34,10 @@ export const Backup = z.object({
   /** Symlinks and other special files (FIFOs, sockets, devices) that were not archived. */
   skippedSymlinks: z.number().int().nonnegative().nullable(),
   error: z.string().nullable(),
-  createdBy: z.string().nullable(),
+  /** User id of the creator (null for schedule-created or system backups). */
+  createdBy: Id.nullable(),
+  /** Display name of the creator at read time (username), or null. */
+  createdByName: z.string().nullable(),
   /** Set when created by a schedule. */
   scheduleId: Id.nullable(),
   jobId: Id.nullable(),
@@ -42,6 +45,15 @@ export const Backup = z.object({
   completedAt: EpochMs.nullable(),
 });
 export type Backup = z.infer<typeof Backup>;
+
+/**
+ * Backup limit accounting: `pending`, `running`, `uploading` and `completed` backups count toward
+ * `Server.backupLimit`; `failed` ones do not (they are kept for diagnosis and can be deleted).
+ */
+export const BACKUP_COUNTED_STATUSES = ["pending", "running", "uploading", "completed"] as const;
+
+export const CreateBackupResponse = z.object({ backup: Backup, jobId: Id });
+export const BackupStorageTestResult = z.object({ ok: z.boolean(), error: z.string().nullable() });
 
 export const CreateBackupRequest = z.object({
   name: z.string().trim().max(120).optional(),

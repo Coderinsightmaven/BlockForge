@@ -1,13 +1,14 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Monitor, Moon, ShieldCheck, ShieldOff, Sun } from "lucide-react";
 import QRCode from "qrcode";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { ChangePasswordRequest, TotpCode } from "@blockforge/contracts";
 import type { Me } from "@blockforge/contracts";
 import { authApi } from "@/lib/api/endpoints";
 import { describeError, fieldErrorsFrom } from "@/lib/api/errors";
 import { formatTimestamp } from "@/lib/format";
+import { hasGlobal } from "@/lib/permissions";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
 import { useTheme } from "@/lib/theme";
@@ -21,11 +22,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { CopyButton } from "@/components/ui/copy-button";
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RoleBadges } from "@/features/users/user-dialogs";
 import { SshKeysCard } from "./ssh-keys";
+import type { SettingsTab } from "./settings-tabs";
 
-export type SettingsTab = "account" | "security" | "ssh" | "appearance";
+export type { SettingsTab } from "./settings-tabs";
+
+const ApiKeysCard = lazy(() => import("./api-keys"));
+const BackupStorageCard = lazy(() => import("./backup-storage"));
+
+function CardFallback() {
+  return <Skeleton className="h-48 w-full" />;
+}
 
 /** "JBSWY3DPEHPK3PXP" → "JBSW Y3DP EHPK 3PXP" for manual entry. */
 export function groupSecret(secret: string): string {
@@ -357,15 +367,19 @@ export function SettingsPage({
   tab: SettingsTab;
   onTabChange: (t: SettingsTab) => void;
 }) {
+  const canStorage = hasGlobal(me, "settings.manage");
+  const active = tab === "backups" && !canStorage ? "account" : tab;
   return (
     <>
       <PageHeader title="Settings" description="Your account, security and display preferences." />
-      <Tabs value={tab} onValueChange={(v) => onTabChange(v as SettingsTab)}>
+      <Tabs value={active} onValueChange={(v) => onTabChange(v as SettingsTab)}>
         <TabsList>
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
           <TabsTrigger value="ssh">SSH keys</TabsTrigger>
+          <TabsTrigger value="api-keys">API keys</TabsTrigger>
           <TabsTrigger value="appearance">Appearance</TabsTrigger>
+          {canStorage ? <TabsTrigger value="backups">Backup storage</TabsTrigger> : null}
         </TabsList>
         <TabsContent value="account" className="flex flex-col gap-3">
           <Card>
@@ -403,9 +417,21 @@ export function SettingsPage({
         <TabsContent value="ssh">
           <SshKeysCard mfaEnabled={me.user.mfaEnabled} />
         </TabsContent>
+        <TabsContent value="api-keys">
+          <Suspense fallback={<CardFallback />}>
+            <ApiKeysCard me={me} />
+          </Suspense>
+        </TabsContent>
         <TabsContent value="appearance">
           <Appearance />
         </TabsContent>
+        {canStorage ? (
+          <TabsContent value="backups">
+            <Suspense fallback={<CardFallback />}>
+              <BackupStorageCard />
+            </Suspense>
+          </TabsContent>
+        ) : null}
       </Tabs>
     </>
   );

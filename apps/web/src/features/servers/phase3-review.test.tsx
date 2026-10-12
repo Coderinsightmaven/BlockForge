@@ -234,7 +234,10 @@ describe("subuser permission matrix (#5, #16)", () => {
   it("labels permission groups whose pages don't exist yet as API-only", () => {
     render(<PermissionMatrix value={new Set()} onChange={() => {}} granter={granter} />);
     const pending = SUBUSER_PERMISSION_GROUPS.filter((g) => g.uiPhase);
-    expect(pending.map((g) => g.id)).toEqual(expect.arrayContaining(["backups", "schedules"]));
+    // Backups and schedules got their pages in Phase 4a; players/extensions/config are still API-only.
+    expect(pending.map((g) => g.id)).toEqual(expect.arrayContaining(["players", "extensions"]));
+    expect(pending.map((g) => g.id)).not.toContain("backups");
+    expect(pending.map((g) => g.id)).not.toContain("schedules");
     expect(screen.getAllByText(/^API only · UI in Phase \d$/)).toHaveLength(pending.length);
   });
 });

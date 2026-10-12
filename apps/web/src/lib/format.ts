@@ -98,6 +98,13 @@ export function formatDuration(ms: Maybe): string {
   return sign + parts.slice(0, 2).join(" ");
 }
 
+/** Round-trip latency: whole milliseconds, "< 1 ms" below one (a LAN status query), "—" when missing. */
+export function formatLatency(ms: Maybe): string {
+  if (!isNum(ms) || ms < 0) return MISSING;
+  if (ms < 1) return "< 1 ms";
+  return `${Math.round(ms)} ms`;
+}
+
 export function formatMilliseconds(ms: Maybe): string {
   if (!isNum(ms)) return MISSING;
   if (Math.abs(ms) >= 1000) return `${formatNumber(ms / 1000, 2)} s`;

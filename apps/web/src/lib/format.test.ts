@@ -8,6 +8,7 @@ import {
   formatDuration,
   formatMetricValue,
   formatMillicores,
+  formatLatency,
   formatMilliseconds,
   formatNumber,
   formatPercent,
@@ -87,6 +88,13 @@ describe("durations", () => {
   it("formats latency-style milliseconds", () => {
     expect(formatMilliseconds(4.567)).toBe("4.57 ms");
     expect(formatMilliseconds(1500)).toBe("1.5 s");
+    // SLP ping: sub-millisecond on a LAN must not read as "0 ms".
+    expect(formatLatency(0.4)).toBe("< 1 ms");
+    expect(formatLatency(0)).toBe("< 1 ms");
+    expect(formatLatency(12.6)).toBe("13 ms");
+    expect(formatLatency(null)).toBe("—");
+    expect(formatLatency(undefined)).toBe("—");
+    expect(formatLatency(Number.NaN)).toBe("—");
   });
 });
 

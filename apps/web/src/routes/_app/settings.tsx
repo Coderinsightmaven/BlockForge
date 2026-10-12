@@ -1,13 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMe } from "@/lib/use-me";
 import { SettingsPage } from "@/features/settings/settings-page";
-import type { SettingsTab } from "@/features/settings/settings-page";
+import { SETTINGS_TABS } from "@/features/settings/settings-tabs";
+import type { SettingsTab } from "@/features/settings/settings-tabs";
 
 export const Route = createFileRoute("/_app/settings")({
   validateSearch: (search: Record<string, unknown>): { tab?: SettingsTab } => ({
     tab:
-      search.tab === "security" || search.tab === "ssh" || search.tab === "appearance"
-        ? search.tab
+      typeof search.tab === "string" &&
+      search.tab !== "account" &&
+      SETTINGS_TABS.includes(search.tab as SettingsTab)
+        ? (search.tab as SettingsTab)
         : undefined,
   }),
   component: function Settings() {

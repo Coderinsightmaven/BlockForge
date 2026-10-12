@@ -24,19 +24,40 @@ export function serverActionable(
 }
 
 export type ServerTab =
-  "console" | "stats" | "files" | "startup" | "network" | "users" | "activity" | "settings";
+  | "console"
+  | "stats"
+  | "files"
+  | "backups"
+  | "schedules"
+  | "startup"
+  | "network"
+  | "users"
+  | "activity"
+  | "settings";
+
+/** What tab gating reads from a server (`backupLimit` may be absent in partial fixtures). */
+export type TabServer = Pick<Server, "myPermissions"> & Partial<Pick<Server, "backupLimit">>;
 
 export interface ServerTabDef {
   id: ServerTab;
   label: string;
   /** Shown when the user holds any of these. */
   anyOf: Permission[];
+  /** Extra condition on the server itself. */
+  visible?: (server: TabServer) => boolean;
+}
+
+/** Backups switched off (limit 0) are hidden except for administrators, who can raise the limit. */
+export function backupsTabVisible(server: TabServer): boolean {
+  return server.backupLimit !== 0 || serverCan(server, "servers.admin");
 }
 
 export const SERVER_TABS: ServerTabDef[] = [
   { id: "console", label: "Console", anyOf: ["servers.console.view"] },
   { id: "stats", label: "Stats", anyOf: ["monitoring.view"] },
   { id: "files", label: "Files", anyOf: ["servers.files.read"] },
+  { id: "backups", label: "Backups", anyOf: ["servers.backups.view"], visible: backupsTabVisible },
+  { id: "schedules", label: "Schedules", anyOf: ["schedules.view"] },
   { id: "startup", label: "Startup", anyOf: ["servers.startup.view"] },
   { id: "network", label: "Network", anyOf: ["servers.allocations.view"] },
   { id: "users", label: "Users", anyOf: ["servers.subusers.view"] },
@@ -54,15 +75,14 @@ export const SERVER_TABS: ServerTabDef[] = [
   },
 ];
 
-export function visibleServerTabs(server: Pick<Server, "myPermissions"> | null | undefined): ServerTabDef[] {
-  return SERVER_TABS.filter((t) => t.anyOf.some((p) => serverCan(server, p)));
+export function visibleServerTabs(server: TabServer | null | undefined): ServerTabDef[] {
+  return SERVER_TABS.filter(
+    (t) => t.anyOf.some((p) => serverCan(server, p)) && (!t.visible || (!!server && t.visible(server))),
+  );
 }
 
 /** The requested tab if visible, else the first visible one (or null when nothing is). */
-export function resolveServerTab(
-  server: Pick<Server, "myPermissions">,
-  requested: ServerTab | undefined,
-): ServerTab | null {
+export function resolveServerTab(server: TabServer, requested: ServerTab | undefined): ServerTab | null {
   const tabs = visibleServerTabs(server);
   if (requested && tabs.some((t) => t.id === requested)) return requested;
   return tabs[0]?.id ?? null;
@@ -134,7 +154,6 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "backups",
     label: "Backups",
-    uiPhase: 6,
     permissions: [
       P("servers.backups.view", "View", "See backups."),
       P("servers.backups.create", "Create", "Create backups."),
@@ -183,7 +202,6 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "schedules",
     label: "Schedules",
-    uiPhase: 4,
     permissions: [
       P("schedules.view", "View", "See scheduled tasks."),
       P("schedules.manage", "Manage", "Create, edit and run scheduled tasks."),

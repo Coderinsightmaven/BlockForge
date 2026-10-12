@@ -39,7 +39,17 @@ export const qk = {
     files: (path: string) => ["server", id, "files", path] as const,
     search: (path: string, q: string) => ["server", id, "files-search", path, q] as const,
     file: (path: string) => ["server", id, "file", path] as const,
+    backups: ["server", id, "backups"] as const,
+    schedules: ["server", id, "schedules"] as const,
+    scheduleRunsAll: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId] as const,
+    /** Keyed by the schedule's last run so a new run refetches it. */
+    scheduleLastRun: (scheduleId: string, lastRunAt: number | null, running: boolean) =>
+      ["server", id, "schedule-runs", scheduleId, "last", lastRunAt, running] as const,
+    scheduleRuns: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId, "history"] as const,
   }),
+  schedules: {
+    preview: (body: unknown) => ["schedules", "preview", body] as const,
+  },
   templates: {
     all: ["templates"] as const,
     list: ["templates", "list"] as const,
@@ -58,6 +68,10 @@ export const qk = {
   },
   account: {
     sshKeys: ["account", "ssh-keys"] as const,
+    apiKeys: ["account", "api-keys"] as const,
+  },
+  settings: {
+    backupStorage: ["settings", "backups.storage"] as const,
   },
   metrics: {
     all: ["metrics"] as const,

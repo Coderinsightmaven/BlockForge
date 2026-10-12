@@ -48,7 +48,9 @@ export const RealtimeEventType = z.enum([
   "alert.updated",
   "network.updated",
   "backup.updated",
+  "backup.deleted",
   "schedule.updated",
+  "schedule.deleted",
 ]);
 export type RealtimeEventType = z.infer<typeof RealtimeEventType>;
 
@@ -89,5 +91,9 @@ export const REALTIME_EVENT_PAYLOADS = {
   /** Published on `server:<id>`. */
   "backup.updated": Backup,
   /** Published on `server:<id>`. */
+  "backup.deleted": z.object({ serverId: z.uuid(), backupId: z.uuid() }),
+  /** Published on `server:<id>`. */
   "schedule.updated": Schedule,
+  /** Published on `server:<id>`. */
+  "schedule.deleted": z.object({ serverId: z.uuid(), scheduleId: z.uuid() }),
 } as const satisfies Record<RealtimeEventType, z.ZodType>;

@@ -89,7 +89,14 @@ describe("permissions", () => {
     expect(by("Game Servers").kind).toBe("available"); // everyone has a (possibly empty) server list
     expect(by("Files")).toEqual({ kind: "phase", reason: "Open a server's Files tab" });
     expect(by("Players")).toEqual({ kind: "phase", reason: "Available in Phase 4" });
-    expect(by("Backups")).toEqual({ kind: "phase", reason: "Available in Phase 6" });
+    expect(by("Backups")).toEqual({
+      kind: "phase",
+      reason: "Available per server in the server page (Backups tab)",
+    });
+    expect(by("Schedules & Tasks")).toMatchObject({
+      kind: "phase",
+      reason: expect.stringMatching(/per server/),
+    });
     expect(by("Audit Logs").kind).toBe("forbidden");
     expect(by("Settings").kind).toBe("available");
   });

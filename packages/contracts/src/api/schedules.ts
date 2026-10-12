@@ -56,6 +56,8 @@ export const Schedule = z.object({
   tasks: z.array(ScheduleTask).max(20),
   nextRunAt: EpochMs.nullable(),
   lastRunAt: EpochMs.nullable(),
+  /** Status of the most recent finished run (null before the first run). */
+  lastRunStatus: z.enum(["succeeded", "failed", "skipped"]).nullable(),
   /** A run is currently executing. */
   running: z.boolean(),
   createdAt: EpochMs,

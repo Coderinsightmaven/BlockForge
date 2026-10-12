@@ -12,6 +12,7 @@ import { templateQuery, templatesQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/common/page-header";
+import { PatternHelp, linesToList } from "@/components/common/pattern-help";
 import { EmptyState, ErrorState, NoPermission, TableSkeleton } from "@/components/common/states";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -326,13 +327,6 @@ function ImportDialog({
   );
 }
 
-function linesToList(s: string): string[] {
-  return s
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-}
-
 function EditDialog({ id, onClose }: { id: string | null; onClose: () => void }) {
   const queryClient = useQueryClient();
   const q = useQuery({ ...templateQuery(id ?? ""), enabled: !!id });
@@ -491,18 +485,21 @@ function EditDialog({ id, onClose }: { id: string | null; onClose: () => void })
                       className="font-mono text-xs"
                     />
                   </Field>
-                  <Field
-                    label="Files users may not touch"
-                    error={errors.fileDenylist}
-                    hint="One path or pattern per line."
-                  >
-                    <Textarea
-                      value={form.fileDenylist ?? ""}
-                      onChange={(e) => set("fileDenylist")(e.target.value)}
-                      rows={3}
-                      className="font-mono text-xs"
-                    />
-                  </Field>
+                  <div className="flex flex-col gap-1.5">
+                    <Field
+                      label="Files users may not touch"
+                      error={errors.fileDenylist}
+                      hint="One path or pattern per line. Non-administrators still see these entries but cannot open or change them."
+                    >
+                      <Textarea
+                        value={form.fileDenylist ?? ""}
+                        onChange={(e) => set("fileDenylist")(e.target.value)}
+                        rows={3}
+                        className="font-mono text-xs"
+                      />
+                    </Field>
+                    <PatternHelp />
+                  </div>
                   <Field
                     label="Stop"
                     error={errors.stop}

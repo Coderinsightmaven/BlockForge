@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type { Server, WorkloadMetricSample } from "@blockforge/contracts";
 import { qk } from "../query-keys";
+import { applyBackupEvent, applyScheduleEvent } from "../phase4-cache";
 import { applyServerEvent, applyServerSample, type ServerBroadcast } from "../server-cache";
 import { useThrottledInvalidate } from "./handlers";
 import { useRealtimeClient, useRealtimeTopic } from "./provider";
@@ -25,6 +26,8 @@ export function useServerRealtime(serverId: string, enabled: boolean): void {
   const queryClient = useQueryClient();
   const invalidate = useThrottledInvalidate(qk.servers.detail(serverId), 2000);
   const invalidateSub = useThrottledInvalidate(qk.server(serverId).all, 3000);
+  const invalidateBackups = useThrottledInvalidate(qk.server(serverId).backups, 2000);
+  const invalidateSchedules = useThrottledInvalidate(qk.server(serverId).schedules, 2000);
   useRealtimeTopic(enabled ? `server:${serverId}` : null, (event) => {
     if (event.type === "server.metrics") {
       const sample = parseServerMetrics(event.data, serverId);
@@ -48,6 +51,16 @@ export function useServerRealtime(serverId: string, enabled: boolean): void {
           invalidateSub();
         }
       } else invalidate();
+    } else if (event.type === "backup.updated") {
+      // Status/progress/size of one backup (creation, upload, rotation, lock).
+      const parsed = REALTIME_EVENT_PAYLOADS["backup.updated"].safeParse(event.data);
+      if (parsed.success && parsed.data.serverId === serverId) applyBackupEvent(queryClient, parsed.data);
+      else invalidateBackups();
+    } else if (event.type === "schedule.updated") {
+      // Next/last run, running flag, edits from another session.
+      const parsed = REALTIME_EVENT_PAYLOADS["schedule.updated"].safeParse(event.data);
+      if (parsed.success && parsed.data.serverId === serverId) applyScheduleEvent(queryClient, parsed.data);
+      else invalidateSchedules();
     }
   });
 }

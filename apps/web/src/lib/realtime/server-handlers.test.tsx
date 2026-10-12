@@ -2,9 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InfiniteData } from "@tanstack/react-query";
-import type { Page, Server } from "@blockforge/contracts";
+import type { Backup, Page, Schedule, Server } from "@blockforge/contracts";
 import { makeClient } from "@/test/fake-socket";
-import { SERVER_ID, makeServer } from "@/test/fixtures";
+import { SERVER_ID, makeBackup, makeSchedule, makeServer } from "@/test/fixtures";
 import { qk } from "../query-keys";
 import { RealtimeProvider } from "./provider";
 import { useServerListRealtime, useServerRealtime } from "./server-handlers";
@@ -118,5 +118,39 @@ describe("useServerRealtime", () => {
       ([f]) => JSON.stringify(f?.queryKey) === JSON.stringify(qk.servers.detail(SERVER_ID)),
     );
     expect(detailCalls).toHaveLength(1);
+  });
+});
+
+describe("useServerRealtime Phase 4 events", () => {
+  it("applies backup.updated and schedule.updated to the open tabs' lists", () => {
+    const { client, last } = makeClient();
+    const qc = new QueryClient();
+    qc.setQueryData(qk.servers.detail(SERVER_ID), makeServer());
+    qc.setQueryData<Backup[]>(qk.server(SERVER_ID).backups, [makeBackup({ status: "running" })]);
+    qc.setQueryData<Schedule[]>(qk.server(SERVER_ID).schedules, [makeSchedule()]);
+    function Live() {
+      useServerRealtime(SERVER_ID, true);
+      return null;
+    }
+    render(
+      <QueryClientProvider client={qc}>
+        <RealtimeProvider client={client}>
+          <Live />
+        </RealtimeProvider>
+      </QueryClientProvider>,
+    );
+    act(() => last().open());
+    const send = (type: string, data: unknown) =>
+      act(() => last().receive({ op: "event", topic: `server:${SERVER_ID}`, type, ts: 1, data }));
+    send("backup.updated", makeBackup({ status: "completed", sizeBytes: 99 }));
+    send("schedule.updated", makeSchedule({ running: true, lastRunAt: 5 }));
+    // Another server's backup on this topic is ignored.
+    send("backup.updated", makeBackup({ id: OTHER, serverId: OTHER }));
+    const backups = qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)!;
+    expect(backups.map((b) => [b.status, b.sizeBytes])).toEqual([["completed", 99]]);
+    expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)![0]).toMatchObject({
+      running: true,
+      lastRunAt: 5,
+    });
   });
 });

@@ -15,7 +15,7 @@ import { REALTIME_EVENT_PAYLOADS, SERVER_JOB_ERROR_CODES, canStartOperation } fr
 import type { JobLogLine, Server, ServerOperation } from "@blockforge/contracts";
 import { jobsApi, serversApi } from "@/lib/api/servers-api";
 import { describeError } from "@/lib/api/errors";
-import { formatBytes, formatBytesPerSecond, formatDuration } from "@/lib/format";
+import { formatBytes, formatBytesPerSecond, formatDuration, formatLatency } from "@/lib/format";
 import { useIdempotencyKeys } from "@/lib/idempotency";
 import { useApiMutation } from "@/lib/mutations";
 import { jobQuery } from "@/lib/queries";
@@ -239,8 +239,8 @@ export function ServerLiveStats({ server, className }: { server: Server; classNa
           value={`↓ ${formatBytesPerSecond(s?.netRxBytesPerSec)} · ↑ ${formatBytesPerSecond(s?.netTxBytesPerSec)}`}
         />
         {players ? <StatRow label="Players" value={`${players.online} / ${players.max}`} /> : null}
-        {s?.minecraft?.latencyMs !== undefined ? (
-          <StatRow label="Ping (status query)" value={`${Math.round(s.minecraft.latencyMs)} ms`} />
+        {server.game !== "other" ? (
+          <StatRow label="Ping (status query)" value={formatLatency(s?.minecraft?.latencyMs)} />
         ) : null}
       </CardContent>
     </Card>
