@@ -52,6 +52,17 @@ export type Backup = z.infer<typeof Backup>;
  */
 export const BACKUP_COUNTED_STATUSES = ["pending", "running", "uploading", "completed"] as const;
 
+/** Classified error codes of the backup create/restore/delete jobs (`Job.error.code`), with a description. */
+export const BACKUP_JOB_ERROR_CODES = {
+  SAVE_OFF_TIMEOUT: "The server did not confirm that automatic saving was turned off",
+  SAVE_TIMEOUT: "The server did not confirm the world save in time",
+  SAVE_FAILED: "The server could not save the world (is there enough disk space?)",
+  STORAGE_ERROR: "The backup storage could not be reached or refused the request",
+  UPLOAD_FAILED: "The archive could not be uploaded to the backup storage",
+  BACKUP_UNAVAILABLE: "The backup is not complete or its archive is missing",
+  BACKUP_LOCKED: "The backup was locked while it was being deleted",
+} as const;
+
 export const CreateBackupResponse = z.object({ backup: Backup, jobId: Id });
 export const BackupStorageTestResult = z.object({ ok: z.boolean(), error: z.string().nullable() });
 
