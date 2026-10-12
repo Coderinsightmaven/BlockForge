@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/blockforge/node-agent/internal/protocol"
@@ -32,7 +33,17 @@ type Sandbox struct {
 	UID, GID int
 	// Chown sets ownership of created files/dirs to UID:GID (only possible when running as root).
 	Chown bool
+	// CopyMaxBytes bounds fs.copy (default DefaultCopyMaxBytes).
+	CopyMaxBytes int64
+	// FreeSpace reports free bytes on the filesystem holding dir (nil = not checked).
+	FreeSpace func(dir string) (int64, error)
 }
+
+// DefaultCopyMaxBytes is the fs.copy limit when none is configured.
+const DefaultCopyMaxBytes = 10 << 30
+
+// CopyFreeReserve is kept free on the data filesystem by fs.copy.
+const CopyFreeReserve = 1 << 30
 
 // NewSandbox builds a sandbox; chown is enabled automatically when the agent runs as root.
 func NewSandbox(dataRoot string, uid, gid int) *Sandbox {
@@ -79,13 +90,21 @@ func (s *Sandbox) Open(id string) (*Root, error) {
 		}
 		return nil, protocol.Errorf(protocol.CodeInternal, "open data root: %v", err)
 	}
-	return &Root{r: r, s: s}, nil
+	return &Root{r: r, s: s, info: &rootInfo{dir: s.DataDir(id)}}, nil
 }
 
 // Root is an opened workload sandbox.
 type Root struct {
-	r *os.Root
-	s *Sandbox
+	r    *os.Root
+	s    *Sandbox
+	deny Matcher // nil = no denylist (see WithDenylist)
+	info *rootInfo
+}
+
+type rootInfo struct {
+	dir  string
+	once sync.Once
+	real string
 }
 
 // OSRoot exposes the underlying *os.Root (read-only helpers in other packages).

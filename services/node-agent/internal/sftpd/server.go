@@ -24,6 +24,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/blockforge/node-agent/internal/denylist"
 	"github.com/blockforge/node-agent/internal/fileutil"
 	"github.com/blockforge/node-agent/internal/fsops"
 	"github.com/blockforge/node-agent/internal/protocol"
@@ -39,6 +40,8 @@ const (
 	maxUnauthPerIP        = 16
 	maxConnections        = 512
 	maxListEntries        = 100_000
+	// maxAuthTries per SSH connection (each attempt may cost a control-plane request).
+	maxAuthTries = 3
 )
 
 // ErrDenied is returned by an Authenticator when the control plane refused the login.
@@ -100,6 +103,13 @@ type Options struct {
 	SessionsPerKey int
 	FailuresPerIP  int
 	Now            func() time.Time
+	// AuthConcurrency bounds control-plane verifications in flight (default 16); AuthRate and
+	// AuthBurst bound their rate per second (defaults 20 / 40).
+	AuthConcurrency int
+	// HandshakeTimeout is the absolute pre-authentication deadline (default 30 s).
+	HandshakeTimeout time.Duration
+	AuthRate         float64
+	AuthBurst        float64
 }
 
 // Server is the SFTP service.
@@ -114,6 +124,10 @@ type Server struct {
 	sessions map[string]int
 	conns    map[*conn]struct{}
 	total    int
+
+	authSem    chan struct{}
+	authTokens float64
+	authLast   time.Time
 }
 
 // LoadOrCreateHostKey reads the Ed25519 host key or generates it (0600) on first start.
@@ -157,12 +171,25 @@ func New(o Options) (*Server, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.HandshakeTimeout <= 0 {
+		o.HandshakeTimeout = handshakeTimeout
+	}
+	if o.AuthConcurrency <= 0 {
+		o.AuthConcurrency = 16
+	}
+	if o.AuthRate <= 0 {
+		o.AuthRate = 20
+	}
+	if o.AuthBurst <= 0 {
+		o.AuthBurst = 40
+	}
 	signer, err := LoadOrCreateHostKey(o.HostKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("sftp host key: %w", err)
 	}
 	return &Server{o: o, signer: signer, failures: map[string][]time.Time{}, unauth: map[string]int{},
-		sessions: map[string]int{}, conns: map[*conn]struct{}{}}, nil
+		sessions: map[string]int{}, conns: map[*conn]struct{}{}, authSem: make(chan struct{}, o.AuthConcurrency),
+		authTokens: o.AuthBurst, authLast: o.Now()}, nil
 }
 
 // Fingerprint is the OpenSSH-style SHA256 fingerprint of the host key.
@@ -262,14 +289,24 @@ func (s *Server) recordFailure(ip string) {
 	s.mu.Unlock()
 }
 
-// idleConn closes connections without traffic for the timeout (handshake: a shorter limit).
+// idleConn enforces an absolute deadline before authentication (traffic cannot extend it, so a
+// slow client cannot hold a pre-auth slot) and an idle timeout afterwards.
 type idleConn struct {
 	net.Conn
 	mu      sync.Mutex
-	timeout time.Duration
+	timeout time.Duration // 0 = absolute deadline mode
 }
 
-func (c *idleConn) setTimeout(d time.Duration) {
+// setAbsoluteDeadline fixes the deadline at now+d; reads and writes do not extend it.
+func (c *idleConn) setAbsoluteDeadline(d time.Duration) {
+	c.mu.Lock()
+	c.timeout = 0
+	c.mu.Unlock()
+	_ = c.Conn.SetDeadline(time.Now().Add(d))
+}
+
+// setIdleTimeout switches to idle mode: every read/write moves the deadline to now+d.
+func (c *idleConn) setIdleTimeout(d time.Duration) {
 	c.mu.Lock()
 	c.timeout = d
 	c.mu.Unlock()
@@ -280,7 +317,9 @@ func (c *idleConn) extend() {
 	c.mu.Lock()
 	d := c.timeout
 	c.mu.Unlock()
-	_ = c.Conn.SetDeadline(time.Now().Add(d))
+	if d > 0 {
+		_ = c.Conn.SetDeadline(time.Now().Add(d))
+	}
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
@@ -294,6 +333,32 @@ func (c *idleConn) Read(b []byte) (int, error) {
 func (c *idleConn) Write(b []byte) (int, error) {
 	c.extend()
 	return c.Conn.Write(b)
+}
+
+// authSlot takes a token from the global rate limiter and a slot from the concurrency cap. It
+// never blocks for long: when the budget is exhausted the attempt is refused locally.
+func (s *Server) authSlot() (func(), bool) {
+	s.mu.Lock()
+	now := s.o.Now()
+	if now.After(s.authLast) {
+		s.authTokens += now.Sub(s.authLast).Seconds() * s.o.AuthRate
+		if s.authTokens > s.o.AuthBurst {
+			s.authTokens = s.o.AuthBurst
+		}
+		s.authLast = now
+	}
+	if s.authTokens < 1 {
+		s.mu.Unlock()
+		return nil, false
+	}
+	s.authTokens--
+	s.mu.Unlock()
+	select {
+	case s.authSem <- struct{}{}:
+		return func() { <-s.authSem }, true
+	case <-time.After(2 * time.Second):
+		return nil, false
+	}
 }
 
 var reUsername = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{2,31}\.[0-9a-f]{8}$`)
@@ -310,7 +375,7 @@ type conn struct {
 	pending map[string]*credential
 	cred    *credential
 	resp    *protocol.SftpAuthResponse
-	deny    *Denylist
+	deny    *denylist.List
 	sshConn *ssh.ServerConn
 	closed  bool
 }
@@ -332,6 +397,14 @@ func (c *conn) authCallback(meta ssh.ConnMetadata, req protocol.SftpAuthRequest)
 		return nil, ErrDenied
 	}
 	req.Username, req.ClientIP, req.SessionID = user, c.ip, c.sessionID
+	// Bound what unauthenticated clients can make the control plane do: a global rate and a
+	// global number of verifications in flight; excess attempts are refused locally.
+	release, ok := c.s.authSlot()
+	if !ok {
+		c.s.o.Logger.Warn("sftp auth: control-plane verification budget exhausted; refusing attempt", "ip", c.ip)
+		return nil, ErrDenied
+	}
+	defer release()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	resp, err := c.s.o.Auth.Authenticate(ctx, req)
@@ -402,11 +475,11 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 	}()
 
 	nc := &idleConn{Conn: raw}
-	nc.setTimeout(handshakeTimeout)
+	nc.setAbsoluteDeadline(s.o.HandshakeTimeout)
 	c := &conn{s: s, nc: nc, ip: ip, pending: map[string]*credential{}}
 	cfg := &ssh.ServerConfig{
 		ServerVersion: "SSH-2.0-BlockForge",
-		MaxAuthTries:  6,
+		MaxAuthTries:  maxAuthTries,
 		PasswordCallback: func(meta ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
 			c.sessionID = sessionIDOf(meta)
 			return c.authCallback(meta, protocol.SftpAuthRequest{Method: "password", Password: string(pw)})
@@ -439,7 +512,7 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 	c.mu.Lock()
 	c.cred = c.pending[sc.Permissions.Extensions["bf-token"]]
 	c.pending = nil
-	c.resp, c.deny, c.sshConn = &resp, NewDenylist(resp.Denylist), sc
+	c.resp, c.deny, c.sshConn = &resp, denylist.New(resp.Denylist), sc
 	c.mu.Unlock()
 	if c.cred == nil {
 		return
@@ -476,7 +549,7 @@ func (s *Server) handle(ctx context.Context, raw net.Conn) {
 		return
 	}
 	defer root.Close()
-	nc.setTimeout(s.o.IdleTimeout)
+	nc.setIdleTimeout(s.o.IdleTimeout)
 	act := newActivity(s.o.Emit, resp.WorkloadID, resp.UserID, c.sessionID, ip)
 	defer act.close()
 	sctx, cancel := context.WithCancel(ctx)
@@ -577,7 +650,7 @@ func (c *conn) reauth() error {
 		return errors.New("re-authentication resolved to a different user or server")
 	}
 	c.mu.Lock()
-	c.resp, c.deny = resp, NewDenylist(resp.Denylist)
+	c.resp, c.deny = resp, denylist.New(resp.Denylist)
 	c.mu.Unlock()
 	return nil
 }
@@ -598,7 +671,7 @@ func (c *conn) close() {
 }
 
 // access returns the current permissions; expired logins are re-authenticated first.
-func (c *conn) access() (perms map[string]bool, deny *Denylist, ok bool) {
+func (c *conn) access() (perms map[string]bool, deny *denylist.List, ok bool) {
 	c.mu.Lock()
 	expired := c.s.o.Now().UnixMilli() >= c.resp.ExpiresAt
 	c.mu.Unlock()

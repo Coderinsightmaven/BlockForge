@@ -74,37 +74,37 @@ func display(r string) string {
 	return r
 }
 
-// check resolves the path and enforces permission + denylist.
-func (h *handler) check(p, need string, mutate bool) (string, error) {
+// check resolves the path, enforces the permission and returns a sandbox view that enforces the
+// session's denylist on requested AND symlink-resolved paths (and on directory contents for tree
+// operations). Every setstat-like or write operation passes mutate=true, so the data root itself can
+// never be modified.
+func (h *handler) check(p, need string, mutate bool) (*fsops.Root, string, error) {
 	perms, deny, ok := h.c.access()
 	if !ok {
-		return "", denied("session expired")
+		return nil, "", denied("session expired")
 	}
 	if !perms[need] {
-		return "", denied("permission denied")
+		return nil, "", denied("permission denied")
 	}
 	r, err := rel(p)
 	if err != nil {
-		return "", toSFTP("access", p, err)
+		return nil, "", toSFTP("access", p, err)
 	}
 	if mutate && r == "." {
-		return "", denied("the server root cannot be modified")
+		return nil, "", denied("the server root cannot be modified")
 	}
-	if deny.Denied(r) {
-		return "", denied("access to this file is denied by the server template")
-	}
-	return r, nil
+	return h.root.WithDenylist(deny), r, nil
 }
 
 // --- reads -------------------------------------------------------------------------------
 
 // Fileread opens a regular file for reading (FIFOs/devices are refused without blocking).
 func (h *handler) Fileread(req *sftp.Request) (io.ReaderAt, error) {
-	r, err := h.check(req.Filepath, "read", false)
+	root, r, err := h.check(req.Filepath, "read", false)
 	if err != nil {
 		return nil, err
 	}
-	f, _, err := h.root.OpenRegular(r)
+	f, _, err := root.OpenForRead(r)
 	if err != nil {
 		return nil, toSFTP("open", display(r), err)
 	}
@@ -126,7 +126,7 @@ func (w *writeFile) Close() error {
 }
 
 func (h *handler) openWrite(req *sftp.Request, needRead bool) (*writeFile, error) {
-	r, err := h.check(req.Filepath, "write", true)
+	root, r, err := h.check(req.Filepath, "write", true)
 	if err != nil {
 		return nil, err
 	}
@@ -134,6 +134,9 @@ func (h *handler) openWrite(req *sftp.Request, needRead bool) (*writeFile, error
 		if perms, _, _ := h.c.access(); !perms["read"] {
 			return nil, denied("permission denied")
 		}
+	}
+	if err := root.CheckDenied(r); err != nil {
+		return nil, toSFTP("open", display(r), err)
 	}
 	or := h.root.OSRoot()
 	fi, statErr := or.Stat(r)
@@ -145,15 +148,14 @@ func (h *handler) openWrite(req *sftp.Request, needRead bool) (*writeFile, error
 		return nil, denied("not a regular file")
 	}
 	pf := req.Pflags()
+	// O_TRUNC is applied only after the opened file has been verified, so a symlink swapped in after
+	// the denylist check can never truncate a protected file.
 	flags := os.O_WRONLY
 	if needRead || pf.Read {
 		flags = os.O_RDWR
 	}
 	if pf.Creat {
 		flags |= os.O_CREATE
-	}
-	if pf.Trunc {
-		flags |= os.O_TRUNC
 	}
 	if pf.Excl {
 		flags |= os.O_EXCL
@@ -168,6 +170,19 @@ func (h *handler) openWrite(req *sftp.Request, needRead bool) (*writeFile, error
 	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
 		f.Close()
 		return nil, denied("not a regular file")
+	}
+	if err := root.VerifyOpen(f, r); err != nil {
+		f.Close()
+		if !exists {
+			_ = or.Remove(r)
+		}
+		return nil, toSFTP("open", display(r), err)
+	}
+	if pf.Trunc {
+		if err := f.Truncate(0); err != nil {
+			f.Close()
+			return nil, toSFTP("open", display(r), err)
+		}
 	}
 	if !exists {
 		_ = h.root.ChownNew(r)
@@ -197,7 +212,7 @@ func (h *handler) Filecmd(req *sftp.Request) error {
 	case "Rename":
 		return h.rename(req, false)
 	case "Remove", "Rmdir":
-		r, err := h.check(req.Filepath, "write", true)
+		root, r, err := h.check(req.Filepath, "write", true)
 		if err != nil {
 			return err
 		}
@@ -211,15 +226,18 @@ func (h *handler) Filecmd(req *sftp.Request) error {
 			}
 			return &sftpError{code: sftp.ErrSSHFxFailure, msg: "not a directory"}
 		}
-		if err := h.root.Delete(r, false); err != nil {
+		if err := root.Delete(r, false); err != nil {
 			return toSFTP("delete", display(r), err)
 		}
 		h.act.add("delete", display(r), "")
 		return nil
 	case "Mkdir":
-		r, err := h.check(req.Filepath, "write", true)
+		root, r, err := h.check(req.Filepath, "write", true)
 		if err != nil {
 			return err
+		}
+		if err := root.CheckDenied(r); err != nil {
+			return toSFTP("mkdir", display(r), err)
 		}
 		if err := h.root.OSRoot().Mkdir(r, 0o755); err != nil {
 			return toSFTP("mkdir", display(r), err)
@@ -235,11 +253,11 @@ func (h *handler) Filecmd(req *sftp.Request) error {
 func (h *handler) PosixRename(req *sftp.Request) error { return h.rename(req, true) }
 
 func (h *handler) rename(req *sftp.Request, overwrite bool) error {
-	from, err := h.check(req.Filepath, "write", true)
+	root, from, err := h.check(req.Filepath, "write", true)
 	if err != nil {
 		return err
 	}
-	to, err := h.check(req.Target, "write", true)
+	_, to, err := h.check(req.Target, "write", true)
 	if err != nil {
 		return err
 	}
@@ -248,6 +266,12 @@ func (h *handler) rename(req *sftp.Request, overwrite bool) error {
 			if fi.IsDir() {
 				return &sftpError{code: sftp.ErrSSHFxFailure, msg: "target is a directory"}
 			}
+			if err := root.CheckDeniedTree(from); err != nil {
+				return toSFTP("rename", display(from), err)
+			}
+			if err := root.CheckDenied(to); err != nil {
+				return toSFTP("rename", display(to), err)
+			}
 			if err := h.root.OSRoot().Rename(from, to); err != nil {
 				return toSFTP("rename", display(from), err)
 			}
@@ -255,7 +279,8 @@ func (h *handler) rename(req *sftp.Request, overwrite bool) error {
 			return nil
 		}
 	}
-	if err := h.root.Rename(from, to); err != nil {
+	// fsops.Rename enforces the denylist on both names and on everything below `from`.
+	if err := root.Rename(from, to); err != nil {
 		return toSFTP("rename", display(from), err)
 	}
 	h.act.add("rename", display(from), display(to))
@@ -263,7 +288,7 @@ func (h *handler) rename(req *sftp.Request, overwrite bool) error {
 }
 
 // setstat applies permission bits (masked to 0777) and timestamps; ownership and size changes
-// are refused (use a truncating open to shorten a file).
+// are refused (use a truncating open to shorten a file). It is always a mutation: never on the root.
 func (h *handler) setstat(req *sftp.Request) error {
 	fl := req.AttrFlags()
 	attrs := req.Attributes()
@@ -273,23 +298,27 @@ func (h *handler) setstat(req *sftp.Request) error {
 	if fl.Size {
 		return denied("truncate via setstat is not supported")
 	}
-	r, err := h.check(req.Filepath, "write", fl.Permissions)
+	root, r, err := h.check(req.Filepath, "write", true)
 	if err != nil {
 		return err
 	}
 	if fl.Permissions {
-		if err := h.root.Chmod(r, attrs.Mode&0o777); err != nil {
+		if err := root.Chmod(r, attrs.Mode&0o777); err != nil {
 			return toSFTP("chmod", display(r), err)
 		}
 		h.act.add("chmod", display(r), "")
 	}
 	if fl.Acmodtime {
+		if err := root.CheckDenied(r); err != nil {
+			return toSFTP("chtimes", display(r), err)
+		}
 		if fi, err := h.root.OSRoot().Lstat(r); err != nil || fi.Mode()&fs.ModeSymlink != 0 {
 			return denied("not a regular file or directory")
 		}
 		if err := h.root.OSRoot().Chtimes(r, attrs.AccessTime(), attrs.ModTime()); err != nil {
 			return toSFTP("chtimes", display(r), err)
 		}
+		h.act.add("utime", display(r), "")
 	}
 	return nil
 }
@@ -352,7 +381,7 @@ func (h *handler) Filelist(req *sftp.Request) (sftp.ListerAt, error) {
 	case "Readlink":
 		return nil, &sftpError{code: sftp.ErrSSHFxOpUnsupported, msg: "readlink is not supported"}
 	case "List":
-		r, err := h.check(req.Filepath, "read", false)
+		_, r, err := h.check(req.Filepath, "read", false)
 		if err != nil {
 			return nil, err
 		}

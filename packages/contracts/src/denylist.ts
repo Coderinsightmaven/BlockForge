@@ -8,6 +8,12 @@
  * any path component; a trailing `/` is ignored; `!` re-allows; `#` starts a comment. A match on a
  * directory covers everything below it. The last matching pattern wins. Malformed globs never match.
  * Denied entries still appear in listings (as in Pterodactyl Wings); reading/writing them is refused.
+ *
+ * Symlinks (enforced by the agent, which can see them): a path is refused when the requested path, ANY
+ * symlink it traverses (including intermediate links of a chain), or its resolved location inside the
+ * sandbox is denied; tree operations (recursive delete, rename, copy, compress, extract) also refuse when
+ * any entry below the source/destination is denied. The control plane's own check on the requested path
+ * is only a fast first layer.
  */
 
 interface DenyRule {

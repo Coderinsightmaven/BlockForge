@@ -1,19 +1,19 @@
-// Package sftpd is the agent's built-in SFTP server (agent-protocol.md "SFTP service"). Logins are
-// verified by the control plane; each session is confined to one workload data dir through the same
-// os.Root sandbox as the fs.* commands.
-package sftpd
+// Package denylist implements template `fileList` matching, shared by the fs.* commands and the
+// SFTP server. Semantics are defined in packages/contracts/src/denylist.ts and pinned by
+// packages/contracts/fixtures/denylist.json (tested in this package).
+package denylist
 
 import (
 	"path"
 	"strings"
 )
 
-// Denylist matches sandbox-relative paths against egg `file_denylist` patterns, a gitignore subset:
+// List matches sandbox-relative paths against egg `file_denylist` patterns, a gitignore subset:
 // `*`, `?`, `[...]` within a segment, `**` across segments, a leading or inner `/` anchors the
 // pattern at the data root, patterns without `/` match any path component, a trailing `/` is
 // ignored, `!` re-allows, `#` starts a comment. A match on a directory covers everything below it.
 // The last matching pattern wins.
-type Denylist struct{ rules []denyRule }
+type List struct{ rules []denyRule }
 
 type denyRule struct {
 	negate   bool
@@ -21,9 +21,10 @@ type denyRule struct {
 	segs     []string
 }
 
-// NewDenylist compiles patterns (invalid glob syntax never matches).
-func NewDenylist(patterns []string) *Denylist {
-	d := &Denylist{}
+// New compiles patterns (invalid glob syntax never matches). An empty list returns nil, which
+// denies nothing.
+func New(patterns []string) *List {
+	d := &List{}
 	for _, p := range patterns {
 		p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
 		if p == "" || strings.HasPrefix(p, "#") {
@@ -48,11 +49,14 @@ func NewDenylist(patterns []string) *Denylist {
 		r.segs = strings.Split(p, "/")
 		d.rules = append(d.rules, r)
 	}
+	if len(d.rules) == 0 {
+		return nil
+	}
 	return d
 }
 
 // Denied reports whether rel (clean, "/"-separated, "." = root) or one of its parents is denied.
-func (d *Denylist) Denied(rel string) bool {
+func (d *List) Denied(rel string) bool {
 	if d == nil || len(d.rules) == 0 || rel == "" || rel == "." {
 		return false
 	}
@@ -112,3 +116,6 @@ func globSegs(pat, segs []string) bool {
 	}
 	return globSegs(pat[1:], segs[1:])
 }
+
+// Active reports whether the list has any rule (nil-safe).
+func (d *List) Active() bool { return d != nil && len(d.rules) > 0 }

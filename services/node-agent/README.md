@@ -189,13 +189,31 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
   created on first start; fingerprint in `NodeFacts.sftp`). Username `<username>.<serverShortId>` is checked
   locally, then password or public key is verified by `POST <cp>/agent/v1/sftp/auth` (BFAgent header). Each
   session gets an `os.Root` on its workload data dir with the same path rules as `fs.*`; `read`/`write`
-  permissions and the template denylist (gitignore subset) are enforced; symlink/hardlink creation,
-  ownership and size setstat are refused (permission bits masked to 0777 and timestamps are allowed); no
-  shell, exec or port forwarding. Re-authentication at `expiresAt` (failure closes the session),
-  10 sessions per user+server, 3 failed logins per IP per minute (then refused locally), 10 min idle
-  timeout, 30 s handshake timeout, packet sizes bounded by pkg/sftp (256 KiB). Mutations are reported as
+  permissions and the template denylist are enforced (see "Denylist" below); symlink/hardlink creation,
+  ownership and size setstat are refused (permission bits masked to 0777 and timestamps are allowed,
+  never on the data root; timestamp changes are reported as `utime`); no shell, exec or port forwarding. Re-authentication at `expiresAt` (failure closes the session),
+  10 sessions per user+server, 3 failed logins per IP per minute (then refused locally, without asking the
+  control plane), at most 3 auth attempts per connection, at most 16 control-plane verifications in flight
+  and 20/s (burst 40) node-wide, 10 min idle timeout, an absolute 30 s pre-auth deadline that traffic
+  cannot extend, packet sizes bounded by pkg/sftp (256 KiB). Mutations are reported as
   `sftp.activity` events (≤ 1 s, ≤ 100 actions). It is the agent's only inbound port: open `2022/tcp` in the
   host firewall only for the clients that need it.
+
+## Denylist (template `fileDenylist`)
+
+Semantics: `packages/contracts/src/denylist.ts` (gitignore subset), implemented in `internal/denylist` and
+pinned by `packages/contracts/fixtures/denylist.json` (both implementations run it). Enforced by SFTP
+sessions and by `fs.read/write/mkdir/rename/delete/copy/compress/chmod/extract/transfer.push/transfer.pull`
+when the payload carries `denylist`: a path is refused (`PATH_FORBIDDEN`, `details.reason: "denylist"`) if
+the requested path, any symlink it passes through, or its symlink-resolved location inside the sandbox is
+denied; recursive delete, rename, copy and compress also refuse if any entry below the source is denied;
+extract refuses archives whose entries would land on a denied path (also through symlinks in the
+destination). On Linux, opened files are re-checked by their real location (`/proc/self/fd`), so a symlink
+swapped in after the check is caught, and truncation happens only after that check. Listings
+(`fs.list/stat/find/du`, SFTP readdir/stat) still show denied entries, as in Wings.
+
+`fs.copy` is bounded by `copyMaxBytes` (default 10 GiB) and by free space minus 1 GiB, checked up front
+and on the bytes actually copied; a refused copy leaves nothing behind.
 
 ## Security model (summary)
 

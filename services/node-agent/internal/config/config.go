@@ -97,8 +97,10 @@ type Config struct {
 	MetricsIntervalMs     int64 `json:"metricsIntervalMs,omitempty"`
 	MaxConcurrentCommands int   `json:"maxConcurrentCommands,omitempty"`
 
-	ArtifactCacheMaxBytes int64      `json:"artifactCacheMaxBytes,omitempty"`
-	SFTP                  SFTPConfig `json:"sftp"`
+	ArtifactCacheMaxBytes int64 `json:"artifactCacheMaxBytes,omitempty"`
+	// CopyMaxBytes bounds fs.copy (default 10 GiB; also bounded by free space minus 1 GiB).
+	CopyMaxBytes int64      `json:"copyMaxBytes,omitempty"`
+	SFTP         SFTPConfig `json:"sftp"`
 }
 
 // DefaultConfigDir is the platform default config directory, overridable with BLOCKFORGE_CONFIG_DIR.
@@ -138,6 +140,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.ArtifactCacheMaxBytes <= 0 {
 		c.ArtifactCacheMaxBytes = DefaultArtifactCacheMaxBytes
+	}
+	if c.CopyMaxBytes <= 0 {
+		c.CopyMaxBytes = 10 << 30
 	}
 	if c.SFTP.Listen == "" {
 		c.SFTP.Listen = "0.0.0.0:2022"

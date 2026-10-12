@@ -97,7 +97,10 @@ func (r *Root) Extract(p protocol.FsExtractPayload) (*ExtractResult, error) {
 	if _, err := r.r.Stat(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, MapError("extract", p.DestPath, err)
 	}
-	f, fi, err := r.OpenRegular(archive)
+	if _, err := r.checkDeny(dest); err != nil {
+		return nil, err
+	}
+	f, fi, err := r.OpenForRead(archive)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +183,11 @@ func (ex *extractor) planZip(zr *zip.Reader) error {
 		return ex.quota("archive has %d entries (limit %d)", len(zr.File), ex.maxEntries)
 	}
 	for _, zf := range zr.File {
-		if _, _, err := archiveEntryName(zf.Name); err != nil {
+		name, ok, err := archiveEntryName(zf.Name)
+		if err != nil {
+			return err
+		}
+		if err := ex.checkEntryDeny(name, ok); err != nil {
 			return err
 		}
 		m := zf.Mode()
@@ -261,10 +268,14 @@ func (ex *extractor) planTar(tr *tar.Reader) error {
 		if entries > ex.maxEntries {
 			return ex.quota("archive has more than %d entries", ex.maxEntries)
 		}
-		if _, _, err := archiveEntryName(h.Name); err != nil {
+		name, ok, err := archiveEntryName(h.Name)
+		if err != nil {
 			return err
 		}
 		if err := tarTypeOK(h); err != nil {
+			return err
+		}
+		if err := ex.checkEntryDeny(name, ok); err != nil {
 			return err
 		}
 		if h.Size < 0 {
@@ -358,4 +369,14 @@ func (ex *extractor) cleanup() {
 	for i := len(ex.created) - 1; i >= 0; i-- {
 		_ = ex.r.r.Remove(ex.created[i])
 	}
+}
+
+// checkEntryDeny refuses archives that would write a denied path (resolved through existing
+// symlinks in the destination, like the extraction itself would).
+func (ex *extractor) checkEntryDeny(name string, ok bool) error {
+	if !ok || ex.r.deny == nil {
+		return nil
+	}
+	_, err := ex.r.checkDeny(path.Join(ex.dest, name))
+	return err
 }

@@ -238,7 +238,7 @@ func TestPasswordLoginAndMutations(t *testing.T) {
 	for _, a := range acts {
 		names = append(names, a.Action+":"+a.Path+">"+a.To)
 	}
-	want := "upload:server.properties>,mkdir:plugins>,rename:server.properties>plugins/x.properties,chmod:plugins/x.properties>,delete:plugins/x.properties>,delete:plugins>"
+	want := "upload:server.properties>,mkdir:plugins>,rename:server.properties>plugins/x.properties,chmod:plugins/x.properties>,utime:plugins/x.properties>,delete:plugins/x.properties>,delete:plugins>"
 	if strings.Join(names, ",") != want {
 		t.Fatalf("activity\n got %s\nwant %s", strings.Join(names, ","), want)
 	}

@@ -331,7 +331,7 @@ func (t *Transfers) Push(ctx context.Context, root *fsops.Root, p *protocol.FsTr
 	if err != nil {
 		return nil, err
 	}
-	f, fi, err := root.OpenRegular(name)
+	f, fi, err := root.OpenForRead(name)
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +369,9 @@ func (t *Transfers) Push(ctx context.Context, root *fsops.Root, p *protocol.FsTr
 func (t *Transfers) Pull(ctx context.Context, root *fsops.Root, p *protocol.FsTransferPullPayload) (*Result, error) {
 	name, err := fsops.CleanPath(p.Path, true)
 	if err != nil {
+		return nil, err
+	}
+	if err := root.CheckDenied(name); err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.URL(p.TransferID), nil)

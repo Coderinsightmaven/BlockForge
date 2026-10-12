@@ -129,7 +129,9 @@ type WorkloadInstallResult struct {
 }
 
 type FsCompressPayload struct {
-	WorkloadID    string   `json:"workloadId"`
+	WorkloadID string `json:"workloadId"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist      []string `json:"denylist,omitempty"`
 	Root          string   `json:"root"`
 	Paths         []string `json:"paths"`
 	Format        string   `json:"format"`
@@ -139,8 +141,10 @@ type FsCompressPayload struct {
 
 type FsChmodPayload struct {
 	WorkloadID string `json:"workloadId"`
-	Path       string `json:"path"`
-	Mode       uint32 `json:"mode"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist []string `json:"denylist,omitempty"`
+	Path     string   `json:"path"`
+	Mode     uint32   `json:"mode"`
 }
 
 type FsFindPayload struct {
@@ -184,13 +188,17 @@ type WorkloadLogsTailPayload struct {
 
 type FsPathPayload struct {
 	WorkloadID string `json:"workloadId"`
-	Path       string `json:"path"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist []string `json:"denylist,omitempty"`
+	Path     string   `json:"path"`
 }
 
 type FsReadPayload struct {
 	WorkloadID string `json:"workloadId"`
-	Path       string `json:"path"`
-	MaxBytes   int64  `json:"maxBytes"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist []string `json:"denylist,omitempty"`
+	Path     string   `json:"path"`
+	MaxBytes int64    `json:"maxBytes"`
 }
 
 // OptionalNullableString distinguishes a missing key, an explicit null and a value.
@@ -217,7 +225,9 @@ func (o OptionalNullableString) MarshalJSON() ([]byte, error) {
 }
 
 type FsWritePayload struct {
-	WorkloadID    string                 `json:"workloadId"`
+	WorkloadID string `json:"workloadId"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist      []string               `json:"denylist,omitempty"`
 	Path          string                 `json:"path"`
 	Content       string                 `json:"content"`
 	Encoding      string                 `json:"encoding"`
@@ -227,14 +237,18 @@ type FsWritePayload struct {
 
 type FsRenamePayload struct {
 	WorkloadID string `json:"workloadId"`
-	From       string `json:"from"`
-	To         string `json:"to"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist []string `json:"denylist,omitempty"`
+	From     string   `json:"from"`
+	To       string   `json:"to"`
 }
 
 type FsDeletePayload struct {
 	WorkloadID string `json:"workloadId"`
-	Path       string `json:"path"`
-	Recursive  bool   `json:"recursive"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist  []string `json:"denylist,omitempty"`
+	Path      string   `json:"path"`
+	Recursive bool     `json:"recursive"`
 }
 
 type FsDuPayload struct {
@@ -245,24 +259,30 @@ type FsDuPayload struct {
 }
 
 type FsExtractPayload struct {
-	WorkloadID    string `json:"workloadId"`
-	ArchivePath   string `json:"archivePath"`
-	DestPath      string `json:"destPath"`
-	MaxTotalBytes int64  `json:"maxTotalBytes"`
-	MaxEntries    int64  `json:"maxEntries"`
+	WorkloadID string `json:"workloadId"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist      []string `json:"denylist,omitempty"`
+	ArchivePath   string   `json:"archivePath"`
+	DestPath      string   `json:"destPath"`
+	MaxTotalBytes int64    `json:"maxTotalBytes"`
+	MaxEntries    int64    `json:"maxEntries"`
 }
 
 type FsTransferPushPayload struct {
 	WorkloadID string `json:"workloadId"`
-	Path       string `json:"path"`
-	TransferID string `json:"transferId"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist   []string `json:"denylist,omitempty"`
+	Path       string   `json:"path"`
+	TransferID string   `json:"transferId"`
 }
 
 type FsTransferPullPayload struct {
 	WorkloadID string `json:"workloadId"`
-	Path       string `json:"path"`
-	TransferID string `json:"transferId"`
-	MaxBytes   int64  `json:"maxBytes"`
+	// Denylist is the template fileDenylist the agent enforces (requested + resolved paths).
+	Denylist   []string `json:"denylist,omitempty"`
+	Path       string   `json:"path"`
+	TransferID string   `json:"transferId"`
+	MaxBytes   int64    `json:"maxBytes"`
 }
 
 type Checksum struct {
@@ -306,6 +326,7 @@ var (
 	mib             = float64(1 << 20)
 	uuidSchema      = Str().Regex(ReUUID)
 	bytesSchema     = Int().Min(0)
+	denylistSchema  = Optional(Arr(Str().Max(512), -1, 256))
 	portSchema      = Int().Min(1).Max(65535)
 	argSchema       = Str().Min(1).Max(4096).Regex(`^[^\x00\r\n]*$`)
 	relativePath    = Str().Max(1024).Refine(refineNoNUL).Refine(refineRelative).Refine(refineNoDotDot)
@@ -358,6 +379,9 @@ func emptyArr() any             { return []any{} }
 func constAny(v any) func() any { return func() any { return v } }
 
 var workloadRef = Obj(F("workloadId", uuidSchema))
+
+// denyRef is WorkloadRef + the optional template denylist (commands.ts DenyRef).
+var denyRef = workloadRef.Extend(F("denylist", denylistSchema))
 
 var portBindingSchema = Obj(
 	F("containerPort", portSchema),
@@ -443,16 +467,16 @@ var Commands = map[string]CommandDef{
 		F("cpuLimitMillicores", Nullable(Int().Min(100))),
 		F("timeoutMs", Default(Int().Min(60_000).Max(3*3600_000), constAny(int64(30*60_000)))),
 	), New: func() any { return &WorkloadInstallPayload{} }},
-	CmdFsCopy: {Schema: workloadRef.Extend(F("path", mutableRelative)),
+	CmdFsCopy: {Schema: denyRef.Extend(F("path", mutableRelative)),
 		New: func() any { return &FsPathPayload{} }, Mutating: true},
-	CmdFsCompress: {Schema: workloadRef.Extend(
+	CmdFsCompress: {Schema: denyRef.Extend(
 		F("root", relativePath),
 		F("paths", Arr(mutableRelative, 1, 1000)),
 		F("format", Str().Enum("tar.gz", "zip")),
 		F("destPath", Optional(mutableRelative)),
 		F("maxTotalBytes", bytesSchema.Max(64*gib)),
 	), New: func() any { return &FsCompressPayload{} }, Mutating: true},
-	CmdFsChmod: {Schema: workloadRef.Extend(F("path", mutableRelative), F("mode", Int().Min(0).Max(0o777))),
+	CmdFsChmod: {Schema: denyRef.Extend(F("path", mutableRelative), F("mode", Int().Min(0).Max(0o777))),
 		New: func() any { return &FsChmodPayload{} }, Mutating: true},
 	CmdFsFind: {Schema: workloadRef.Extend(
 		F("path", relativePath),
@@ -485,37 +509,37 @@ var Commands = map[string]CommandDef{
 	), New: func() any { return &WorkloadLogsTailPayload{} }},
 	CmdFsList: {Schema: workloadRef.Extend(F("path", relativePath)), New: func() any { return &FsPathPayload{} }},
 	CmdFsStat: {Schema: workloadRef.Extend(F("path", relativePath)), New: func() any { return &FsPathPayload{} }},
-	CmdFsRead: {Schema: workloadRef.Extend(
+	CmdFsRead: {Schema: denyRef.Extend(
 		F("path", relativePath),
 		F("maxBytes", Int().Min(1).Max(5*mib)),
 	), New: func() any { return &FsReadPayload{} }},
-	CmdFsWrite: {Schema: workloadRef.Extend(
+	CmdFsWrite: {Schema: denyRef.Extend(
 		F("path", mutableRelative),
 		F("content", Str().Max(7*1024*1024)),
 		F("encoding", Str().Enum("utf8", "base64")),
 		F("ifMatchSha256", Optional(Nullable(Str()))),
 		F("createParents", Default(Bool(), constAny(false))),
 	), New: func() any { return &FsWritePayload{} }, Mutating: true},
-	CmdFsMkdir: {Schema: workloadRef.Extend(F("path", mutableRelative)),
+	CmdFsMkdir: {Schema: denyRef.Extend(F("path", mutableRelative)),
 		New: func() any { return &FsPathPayload{} }, Mutating: true},
-	CmdFsRename: {Schema: workloadRef.Extend(F("from", mutableRelative), F("to", mutableRelative)),
+	CmdFsRename: {Schema: denyRef.Extend(F("from", mutableRelative), F("to", mutableRelative)),
 		New: func() any { return &FsRenamePayload{} }, Mutating: true},
-	CmdFsDelete: {Schema: workloadRef.Extend(F("path", mutableRelative), F("recursive", Bool())),
+	CmdFsDelete: {Schema: denyRef.Extend(F("path", mutableRelative), F("recursive", Bool())),
 		New: func() any { return &FsDeletePayload{} }, Mutating: true},
 	CmdFsDu: {Schema: workloadRef.Extend(
 		F("path", relativePath),
 		F("depth", Default(Int().Min(0).Max(3), constAny(int64(1)))),
 		F("top", Default(Int().Min(1).Max(50), constAny(int64(20)))),
 	), New: func() any { return &FsDuPayload{} }},
-	CmdFsExtract: {Schema: workloadRef.Extend(
+	CmdFsExtract: {Schema: denyRef.Extend(
 		F("archivePath", mutableRelative),
 		F("destPath", relativePath),
 		F("maxTotalBytes", bytesSchema.Max(64*gib)),
 		F("maxEntries", Int().Min(1).Max(1_000_000)),
 	), New: func() any { return &FsExtractPayload{} }, Mutating: true},
-	CmdFsTransferPush: {Schema: workloadRef.Extend(F("path", mutableRelative), F("transferId", uuidSchema)),
+	CmdFsTransferPush: {Schema: denyRef.Extend(F("path", mutableRelative), F("transferId", uuidSchema)),
 		New: func() any { return &FsTransferPushPayload{} }},
-	CmdFsTransferPull: {Schema: workloadRef.Extend(
+	CmdFsTransferPull: {Schema: denyRef.Extend(
 		F("path", mutableRelative), F("transferId", uuidSchema), F("maxBytes", bytesSchema),
 	), New: func() any { return &FsTransferPullPayload{} }, Mutating: true},
 	CmdArtifactFetch: {Schema: workloadRef.Extend(

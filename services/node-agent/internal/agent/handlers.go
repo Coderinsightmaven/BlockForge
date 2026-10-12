@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blockforge/node-agent/internal/denylist"
 	"github.com/blockforge/node-agent/internal/fsops"
 	"github.com/blockforge/node-agent/internal/metrics"
 	"github.com/blockforge/node-agent/internal/minecraft"
@@ -14,12 +15,17 @@ import (
 type empty struct{}
 
 func (a *Agent) withRoot(id string, fn func(*fsops.Root) (any, error)) (any, error) {
+	return a.withRootDeny(id, nil, fn)
+}
+
+// withRootDeny opens the sandbox with the template denylist from the payload enforced.
+func (a *Agent) withRootDeny(id string, deny []string, fn func(*fsops.Root) (any, error)) (any, error) {
 	root, err := a.sandbox.Open(id)
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	return fn(root)
+	return fn(root.WithDenylist(denylist.New(deny)))
 }
 
 // ProbeResult is the node.probe result.
@@ -77,7 +83,7 @@ func (a *Agent) handlers() map[string]Handler {
 		},
 		protocol.CmdFsCopy: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsPathPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) {
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) {
 				dst, err := r.Copy(p.Path)
 				if err != nil {
 					return nil, err
@@ -87,11 +93,11 @@ func (a *Agent) handlers() map[string]Handler {
 		},
 		protocol.CmdFsCompress: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsCompressPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Compress(*p, time.Now()) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return r.Compress(*p, time.Now()) })
 		},
 		protocol.CmdFsChmod: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsChmodPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return empty{}, r.Chmod(p.Path, p.Mode) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return empty{}, r.Chmod(p.Path, p.Mode) })
 		},
 		protocol.CmdFsFind: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsFindPayload)
@@ -167,23 +173,23 @@ func (a *Agent) handlers() map[string]Handler {
 		},
 		protocol.CmdFsRead: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsReadPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Read(p.Path, p.MaxBytes) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return r.Read(p.Path, p.MaxBytes) })
 		},
 		protocol.CmdFsWrite: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsWritePayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Write(*p) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return r.Write(*p) })
 		},
 		protocol.CmdFsMkdir: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsPathPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return empty{}, r.Mkdir(p.Path) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return empty{}, r.Mkdir(p.Path) })
 		},
 		protocol.CmdFsRename: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsRenamePayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return empty{}, r.Rename(p.From, p.To) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return empty{}, r.Rename(p.From, p.To) })
 		},
 		protocol.CmdFsDelete: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsDeletePayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return empty{}, r.Delete(p.Path, p.Recursive) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return empty{}, r.Delete(p.Path, p.Recursive) })
 		},
 		protocol.CmdFsDu: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsDuPayload)
@@ -191,15 +197,15 @@ func (a *Agent) handlers() map[string]Handler {
 		},
 		protocol.CmdFsExtract: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsExtractPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Extract(*p) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return r.Extract(*p) })
 		},
 		protocol.CmdFsTransferPush: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsTransferPushPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return a.transfers.Push(ctx, r, p) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return a.transfers.Push(ctx, r, p) })
 		},
 		protocol.CmdFsTransferPull: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsTransferPullPayload)
-			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return a.transfers.Pull(ctx, r, p) })
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return a.transfers.Pull(ctx, r, p) })
 		},
 		protocol.CmdArtifactFetch: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.ArtifactFetchPayload)

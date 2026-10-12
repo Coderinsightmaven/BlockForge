@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -120,5 +121,63 @@ func TestAgentSFTPAndFileCommands(t *testing.T) {
 		}
 	} else if errCode(r) != "RUNTIME_ERROR" {
 		t.Fatalf("node.ports off Linux: %v", r)
+	}
+}
+
+// The optional `denylist` payload field (contract c523d8a) is enforced by the agent and reported as
+// PATH_FORBIDDEN with details.reason "denylist"; without it nothing changes.
+func TestFsDenylistOverTheWire(t *testing.T) {
+	cp := newFakeCP(t)
+	dir, cfg := enrollAgent(t, cp)
+	sb := fsops.NewSandbox(cfg.DataRoot, 1000, 1000)
+	if err := sb.EnsureDataDir(testWID); err != nil {
+		t.Fatal(err)
+	}
+	data := sb.DataDir(testWID)
+	os.WriteFile(filepath.Join(data, "server.properties"), []byte("secret=1\n"), 0o644)
+	symlinked := os.Symlink("server.properties", filepath.Join(data, "public.properties")) == nil
+	startAgent(t, cp, dir)
+	cp.waitFrame(30*time.Second, func(m map[string]any) bool { return m["t"] == "hello" })
+	run := func(typ string, payload map[string]any) map[string]any {
+		t.Helper()
+		frame := cp.signCmd(nextID(), typ, payload, time.Now(), time.Minute)
+		var b struct{ ID string }
+		json.Unmarshal([]byte(frame.Body), &b)
+		cp.send(frame)
+		return cp.result(b.ID, 20*time.Second)
+	}
+	deny := []string{"server.properties"}
+	isDenied := func(r map[string]any) bool {
+		e, _ := r["error"].(map[string]any)
+		d, _ := e["details"].(map[string]any)
+		return errCode(r) == "PATH_FORBIDDEN" && d["reason"] == "denylist"
+	}
+	if r := run("fs.read", map[string]any{"workloadId": testWID, "path": "server.properties", "maxBytes": 100, "denylist": deny}); !isDenied(r) {
+		t.Fatalf("fs.read denied path: %v", r)
+	}
+	if r := run("fs.read", map[string]any{"workloadId": testWID, "path": "server.properties", "maxBytes": 100}); r["ok"] != true {
+		t.Fatalf("fs.read without denylist: %v", r)
+	}
+	if r := run("fs.copy", map[string]any{"workloadId": testWID, "path": "server.properties", "denylist": deny}); !isDenied(r) {
+		t.Fatalf("fs.copy: %v", r)
+	}
+	if r := run("fs.transfer.push", map[string]any{"workloadId": testWID, "path": "server.properties", "transferId": "11111111-2222-4333-8444-555555555555", "denylist": deny}); !isDenied(r) {
+		t.Fatalf("fs.transfer.push: %v", r)
+	}
+	if symlinked {
+		if r := run("fs.read", map[string]any{"workloadId": testWID, "path": "public.properties", "maxBytes": 100, "denylist": deny}); !isDenied(r) {
+			t.Fatalf("fs.read through a symlink: %v", r)
+		}
+		if r := run("fs.write", map[string]any{"workloadId": testWID, "path": "public.properties", "content": "x", "encoding": "utf8", "denylist": deny}); !isDenied(r) {
+			t.Fatalf("fs.write through a symlink: %v", r)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(data, "server.properties")); string(b) != "secret=1\n" {
+		t.Fatal("protected file changed")
+	}
+	// fs.list still shows it.
+	r := run("fs.list", map[string]any{"workloadId": testWID, "path": "", "denylist": deny})
+	if r["ok"] != true || !strings.Contains(fmt.Sprint(r["data"]), "server.properties") {
+		t.Fatalf("fs.list: %v", r)
 	}
 }

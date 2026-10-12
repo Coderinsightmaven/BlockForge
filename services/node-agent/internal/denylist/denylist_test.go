@@ -1,9 +1,9 @@
-package sftpd
+package denylist
 
 import "testing"
 
-func TestDenylist(t *testing.T) {
-	d := NewDenylist([]string{
+func TestLocalCases(t *testing.T) {
+	d := New([]string{
 		"# comment", "", "*.secret", "/config/private/", "plugins/**/token.yml", "logs", "!logs/keep.log", `\windows\style`,
 	})
 	cases := map[string]bool{
@@ -33,10 +33,10 @@ func TestDenylist(t *testing.T) {
 			t.Errorf("%s: got %v want %v", p, got, want)
 		}
 	}
-	if NewDenylist(nil).Denied("anything") {
+	if New(nil).Denied("anything") {
 		t.Fatal("empty list denies")
 	}
-	if NewDenylist([]string{"[invalid"}).Denied("[invalid") {
+	if New([]string{"[invalid"}).Denied("[invalid") {
 		t.Fatal("invalid glob must never match")
 	}
 }

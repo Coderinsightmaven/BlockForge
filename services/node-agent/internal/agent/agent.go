@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/disk"
+
 	"github.com/blockforge/node-agent/internal/artifact"
 	"github.com/blockforge/node-agent/internal/auth"
 	"github.com/blockforge/node-agent/internal/config"
@@ -255,6 +257,14 @@ func (a *Agent) Setup(ctx context.Context) error {
 		return fmt.Errorf("create data root: %w", err)
 	}
 	a.sandbox = fsops.NewSandbox(a.cfg.DataRoot, a.cfg.WorkloadUID, a.cfg.WorkloadGID)
+	a.sandbox.CopyMaxBytes = a.cfg.CopyMaxBytes
+	a.sandbox.FreeSpace = func(dir string) (int64, error) {
+		u, err := disk.Usage(dir)
+		if err != nil {
+			return 0, err
+		}
+		return int64(u.Free), nil
+	}
 	if !a.sandbox.Chown && runtime.GOOS != "windows" && os.Geteuid() != a.cfg.WorkloadUID {
 		a.log.Warn("agent runs as a different non-root user than the workloads; files it creates will not be owned by the workload user",
 			"agentUid", os.Geteuid(), "workloadUid", a.cfg.WorkloadUID)

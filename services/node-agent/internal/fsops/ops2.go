@@ -62,9 +62,23 @@ func (r *Root) Copy(p string) (string, error) {
 	if err != nil {
 		return "", MapError("copy", p, err)
 	}
+	// Copying a tree would expose denied entries under a new, allowed name.
+	if err := r.checkDenyTree(src); err != nil {
+		return "", err
+	}
 	if !fi.IsDir() && !fi.Mode().IsRegular() {
 		return "", protocol.Errorf(protocol.CodePathForbidden, "%q is not a regular file or directory", p)
 	}
+	total, err := r.treeSize(src, fi)
+	if err != nil {
+		return "", err
+	}
+	budget := r.copyBudget()
+	if total > budget {
+		return "", protocol.Errorf(protocol.CodeQuotaExceeded, "copy needs %d bytes (limit %d)", total, budget).
+			WithDetails(map[string]any{"bytes": total, "limit": budget})
+	}
+	cp := &copier{r: r, remaining: budget}
 	dir, base := path.Split(src)
 	var dst string
 	for n := 1; n <= maxCopyAttempts; n++ {
@@ -79,8 +93,11 @@ func (r *Root) Copy(p string) (string, error) {
 	if dst == "" {
 		return "", protocol.Errorf(protocol.CodeConflict, "too many copies of %q", p)
 	}
+	if _, err := r.checkDeny(dst); err != nil {
+		return "", err
+	}
 	if !fi.IsDir() {
-		if err := r.copyFile(src, dst, fi.Mode().Perm()); err != nil {
+		if err := cp.copyFile(src, dst, fi.Mode().Perm()); err != nil {
 			return "", err
 		}
 		return dst, nil
@@ -113,7 +130,7 @@ func (r *Root) Copy(p string) (string, error) {
 			}
 			_ = r.chown(target)
 		case info.Mode().IsRegular():
-			return r.copyFile(fp, target, info.Mode().Perm())
+			return cp.copyFile(fp, target, info.Mode().Perm())
 		}
 		return nil // symlinks, sockets, FIFOs: skipped
 	})
@@ -127,7 +144,59 @@ func (r *Root) Copy(p string) (string, error) {
 	return dst, nil
 }
 
-func (r *Root) copyFile(src, dst string, mode fs.FileMode) error {
+// treeSize sums the regular files fs.copy would copy (symlinks/special files are skipped).
+func (r *Root) treeSize(src string, fi fs.FileInfo) (int64, error) {
+	if !fi.IsDir() {
+		return fi.Size(), nil
+	}
+	var total int64
+	seen := 0
+	err := fs.WalkDir(r.r.FS(), src, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		seen++
+		if seen > MaxWalkEntries {
+			return protocol.Errorf(protocol.CodeQuotaExceeded, "directory has more than %d entries", MaxWalkEntries)
+		}
+		if d.Type().IsRegular() {
+			if info, err := d.Info(); err == nil {
+				total += info.Size()
+			}
+		}
+		return nil
+	})
+	return total, err
+}
+
+// copyBudget is the configured fs.copy limit, further bounded by free space minus a reserve.
+func (r *Root) copyBudget() int64 {
+	limit := r.s.CopyMaxBytes
+	if limit <= 0 {
+		limit = DefaultCopyMaxBytes
+	}
+	if r.s.FreeSpace != nil {
+		if free, err := r.s.FreeSpace(r.info.dir); err == nil {
+			avail := free - CopyFreeReserve
+			if avail < 0 {
+				avail = 0
+			}
+			if avail < limit {
+				limit = avail
+			}
+		}
+	}
+	return limit
+}
+
+// copier enforces the byte budget on the bytes actually streamed (files may grow during a copy).
+type copier struct {
+	r         *Root
+	remaining int64
+}
+
+func (c *copier) copyFile(src, dst string, mode fs.FileMode) error {
+	r := c.r
 	in, _, err := r.OpenRegular(src)
 	if err != nil {
 		return err
@@ -137,10 +206,16 @@ func (r *Root) copyFile(src, dst string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(tf, in); err != nil {
+	n, err := io.Copy(tf, io.LimitReader(in, c.remaining+1))
+	if err != nil {
 		tf.Abort()
 		return MapError("copy", dst, err)
 	}
+	if n > c.remaining {
+		tf.Abort()
+		return protocol.Errorf(protocol.CodeQuotaExceeded, "copy exceeds its byte limit")
+	}
+	c.remaining -= n
 	if _, err := r.r.Lstat(dst); err == nil {
 		tf.Abort()
 		return protocol.Errorf(protocol.CodeAlreadyExists, "%q already exists", dst)
@@ -156,6 +231,9 @@ func (r *Root) Chmod(p string, mode uint32) error {
 	}
 	name, err := CleanPath(p, true)
 	if err != nil {
+		return err
+	}
+	if _, err := r.checkDeny(name); err != nil {
 		return err
 	}
 	li, err := r.r.Lstat(name)
@@ -332,6 +410,9 @@ func (r *Root) Compress(p protocol.FsCompressPayload, now time.Time) (*CompressR
 	if err := r.requireDir(path.Dir(dest)); err != nil {
 		return nil, err
 	}
+	if _, err := r.checkDeny(dest); err != nil {
+		return nil, err
+	}
 	inputs := make([]string, 0, len(p.Paths))
 	for _, ip := range p.Paths {
 		rel, err := CleanPath(ip, true)
@@ -344,6 +425,10 @@ func (r *Root) Compress(p protocol.FsCompressPayload, now time.Time) (*CompressR
 		}
 		if _, err := r.r.Lstat(full); err != nil {
 			return nil, MapError("compress", ip, err)
+		}
+		// Archiving would leak denied entries.
+		if err := r.checkDenyTree(full); err != nil {
+			return nil, err
 		}
 		inputs = append(inputs, full)
 	}

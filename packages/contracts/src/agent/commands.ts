@@ -22,8 +22,9 @@ export const MutableRelativePath = RelativePath.refine((p) => !isRootPath(p), "m
 const WorkloadRef = z.object({ workloadId: z.uuid() });
 /**
  * Optional template `fileDenylist` (semantics: `../denylist.ts`). When present the agent refuses
- * (`PATH_FORBIDDEN`, details `{reason: "denylist"}`) if the requested path OR its symlink-resolved
- * location inside the sandbox — or, for directories, any entry it would read/copy/archive — is denied.
+ * (`PATH_FORBIDDEN`, details `{reason: "denylist"}`) if the requested path, any symlink it traverses,
+ * or its resolved location inside the sandbox — or, for tree operations, any entry below — is denied.
+ * Other `PATH_FORBIDDEN` errors (no `reason: "denylist"`) are sandbox violations.
  * The control plane sends it for every request made on behalf of non-administrators.
  */
 const Denylist = z.array(z.string().max(512)).max(256).optional();

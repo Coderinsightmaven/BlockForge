@@ -122,7 +122,7 @@ func (r *Root) Read(p string, maxBytes int64) (*ReadResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, _, err := r.OpenRegular(name)
+	f, _, err := r.OpenForRead(name)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +183,9 @@ type WriteResult struct {
 func (r *Root) Write(p protocol.FsWritePayload) (*WriteResult, error) {
 	name, err := CleanPath(p.Path, true)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := r.checkDeny(name); err != nil {
 		return nil, err
 	}
 	var data []byte
@@ -265,6 +268,9 @@ func (r *Root) Mkdir(p string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := r.checkDeny(name); err != nil {
+		return err
+	}
 	return r.MkdirAll(name)
 }
 
@@ -276,6 +282,12 @@ func (r *Root) Rename(from, to string) error {
 	}
 	dst, err := CleanPath(to, true)
 	if err != nil {
+		return err
+	}
+	if err := r.checkDenyTree(src); err != nil {
+		return err
+	}
+	if _, err := r.checkDeny(dst); err != nil {
 		return err
 	}
 	if src == dst {
@@ -310,6 +322,14 @@ func (r *Root) Delete(p string, recursive bool) error {
 	fi, err := r.r.Lstat(name)
 	if err != nil {
 		return MapError("delete", p, err)
+	}
+	if fi.IsDir() && recursive {
+		err = r.checkDenyTree(name)
+	} else {
+		_, err = r.checkDeny(name)
+	}
+	if err != nil {
+		return err
 	}
 	if fi.IsDir() && recursive {
 		if err := r.r.RemoveAll(name); err != nil {
