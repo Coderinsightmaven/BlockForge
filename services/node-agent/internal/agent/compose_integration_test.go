@@ -72,6 +72,9 @@ func TestComposeAgent(t *testing.T) {
 	if facts["dataRoot"] != dataRoot || rt == nil || rt["healthy"] != true || len(facts["filesystems"].([]any)) == 0 {
 		t.Fatalf("hello facts: %v", facts)
 	}
+	if sf, ok := facts["sftp"].(map[string]any); !ok || sf["port"].(float64) != 2022 || !strings.HasPrefix(sf["hostKeyFingerprint"].(string), "SHA256:") {
+		t.Fatalf("containerised agent sftp facts: %v", facts["sftp"])
+	}
 	b, _ := json.MarshalIndent(facts, "", " ")
 	t.Logf("containerised agent facts:\n%s", b)
 	m := cp.waitFrame(60*time.Second, func(m map[string]any) bool { return m["t"] == "metrics" })

@@ -55,6 +55,7 @@ func newFakeCP(t *testing.T) *fakeCP {
 	mux.HandleFunc("GET /agent/v1/connect", f.connect)
 	mux.HandleFunc("POST /agent/v1/transfers/{id}", f.upload)
 	mux.HandleFunc("GET /agent/v1/transfers/{id}", f.download)
+	mux.HandleFunc("POST /agent/v1/sftp/auth", f.sftpAuth)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -239,4 +240,26 @@ func errCode(m map[string]any) string {
 		return s
 	}
 	return ""
+}
+
+// Fake SFTP users: "alice.1a2b3c4d" / sftpPassword (read+write on testWID).
+const sftpPassword = "fake-cp-sftp-password"
+
+func (f *fakeCP) sftpAuth(w http.ResponseWriter, r *http.Request) {
+	if _, ok := f.authenticate(r); !ok {
+		http.Error(w, "unauthorized", 401)
+		return
+	}
+	var req protocol.SftpAuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	if req.Method != "password" || req.Username != "alice.1a2b3c4d" || req.Password != sftpPassword {
+		w.WriteHeader(401)
+		return
+	}
+	json.NewEncoder(w).Encode(protocol.SftpAuthResponse{WorkloadID: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+		UserID: "11111111-1111-4111-8111-111111111111", Permissions: []string{"read", "write"},
+		Denylist: []string{}, ExpiresAt: time.Now().Add(time.Hour).UnixMilli()})
 }

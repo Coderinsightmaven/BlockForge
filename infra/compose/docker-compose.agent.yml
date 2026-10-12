@@ -7,6 +7,13 @@
 #   BF_DOCKER_GID   group owning /var/run/docker.sock (Docker Desktop: 0, Ubuntu: `stat -c %g /var/run/docker.sock`)
 #   BF_CP_URL       control-plane URL used by the enroll command below
 #   BF_AGENT_IMAGE  image tag (default blockforge/node-agent:dev, built from this repo)
+#   BF_SFTP_LISTEN  SFTP listen address (default 0.0.0.0:2022; host network, so this binds on the host)
+#   BF_SFTP_ENABLED set to false to disable the built-in SFTP server
+#
+# SFTP: users connect to <node address>:2022 (TCP). Open that port in the host firewall for the
+# addresses that should reach it, e.g. `ufw allow 2022/tcp`; it is the agent's only inbound port.
+# Logins are verified by the control plane (POST /agent/v1/sftp/auth); the host key lives in the
+# config dir ($BF_DATA_ROOT/agent/sftp_host_ed25519_key) and its fingerprint is shown in the panel.
 #
 # Docker Desktop (control plane on the Windows host):
 #   docker compose -f infra/compose/docker-compose.agent.yml build
@@ -66,6 +73,8 @@ services:
       BLOCKFORGE_CONFIG_DIR: ${BF_DATA_ROOT:-/var/lib/blockforge}/agent
       BLOCKFORGE_DATA_ROOT: ${BF_DATA_ROOT:-/var/lib/blockforge}
       BLOCKFORGE_LOG_LEVEL: ${BF_LOG_LEVEL:-info}
+      BLOCKFORGE_SFTP_LISTEN: ${BF_SFTP_LISTEN:-0.0.0.0:2022}
+      BLOCKFORGE_SFTP_ENABLED: ${BF_SFTP_ENABLED:-true}
       BF_CP_URL: ${BF_CP_URL:-http://host.docker.internal:8080}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

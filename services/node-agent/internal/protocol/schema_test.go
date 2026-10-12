@@ -61,7 +61,7 @@ func TestPayloadValidationStrictness(t *testing.T) {
 
 func ensure(image string) string {
 	return `{"workloadId":"` + wid + `","kind":"minecraft",` + image + `,"command":["java","-jar","server.jar"],` +
-		`"memoryLimitBytes":536870912,"cpuLimitMillicores":null,"networks":[],"stopCommand":"stop","restartPolicy":{"mode":"never"}}`
+		`"memoryLimitBytes":536870912,"cpuLimitMillicores":null,"networks":[],"stop":{"type":"command","command":"stop"},"restartPolicy":{"mode":"never"}}`
 }
 
 func TestDefaults(t *testing.T) {
@@ -81,5 +81,84 @@ func TestDefaults(t *testing.T) {
 	_, known, _ := ParsePayload("backup.create", []byte(`{}`))
 	if known {
 		t.Fatal("backup.create must be unsupported in this agent")
+	}
+}
+
+func TestPhase3Schemas(t *testing.T) {
+	base := func(extra string) string {
+		return `{"workloadId":"` + wid + `","kind":"generic","image":"ghcr.io/pterodactyl/yolks:java_21",` + extra +
+			`"memoryLimitBytes":536870912,"cpuLimitMillicores":null,"stop":null,"restartPolicy":{"mode":"never"}}`
+	}
+	cases := []struct {
+		name, typ, payload string
+		ok                 bool
+	}{
+		{"image entrypoint, empty command", CmdWorkloadEnsure, base(`"entrypoint":"image","command":[],`), true},
+		{"argv with empty command", CmdWorkloadEnsure, base(`"entrypoint":"argv","command":[],`), false},
+		{"default entrypoint argv, empty command", CmdWorkloadEnsure, base(`"command":[],`), false},
+		{"lowercase env key", CmdWorkloadEnsure, base(`"entrypoint":"image","command":[],"env":{"server_jar":"x","_A":"1"},`), true},
+		{"env key starting with digit", CmdWorkloadEnsure, base(`"entrypoint":"image","command":[],"env":{"1X":"x"},`), false},
+		{"env value 16 KiB", CmdWorkloadEnsure, base(`"entrypoint":"image","command":[],"env":{"STARTUP":"` + strings.Repeat("a", 16*1024) + `"},`), true},
+		{"env value 16 KiB + 1", CmdWorkloadEnsure, base(`"entrypoint":"image","command":[],"env":{"STARTUP":"` + strings.Repeat("a", 16*1024+1) + `"},`), false},
+		{"bad dataMountPath", CmdWorkloadEnsure, base(`"entrypoint":"image","command":[],"dataMountPath":"/srv",`), false},
+		{"signal stop", CmdWorkloadEnsure, strings.Replace(base(`"entrypoint":"image","command":[],`), `"stop":null`, `"stop":{"type":"signal","signal":"SIGQUIT"}`, 1), true},
+		{"bad signal", CmdWorkloadEnsure, strings.Replace(base(`"entrypoint":"image","command":[],`), `"stop":null`, `"stop":{"type":"signal","signal":"SIGHUP"}`, 1), false},
+		{"command stop with newline", CmdWorkloadEnsure, strings.Replace(base(`"entrypoint":"image","command":[],`), `"stop":null`, `"stop":{"type":"command","command":"stop\nop me"}`, 1), false},
+		{"unknown stop type", CmdWorkloadEnsure, strings.Replace(base(`"entrypoint":"image","command":[],`), `"stop":null`, `"stop":{"type":"exec","command":"x"}`, 1), false},
+		{"stop missing", CmdWorkloadEnsure, strings.Replace(base(`"entrypoint":"image","command":[],`), `"stop":null,`, ``, 1), false},
+		{"install ok", CmdWorkloadInstall, `{"workloadId":"` + wid + `","image":"ghcr.io/pterodactyl/installers:alpine","entrypoint":"ash","script":"echo","memoryLimitBytes":134217728,"cpuLimitMillicores":null}`, true},
+		{"install bad entrypoint", CmdWorkloadInstall, `{"workloadId":"` + wid + `","image":"x","entrypoint":"python","script":"echo","memoryLimitBytes":134217728,"cpuLimitMillicores":null}`, false},
+		{"install timeout too short", CmdWorkloadInstall, `{"workloadId":"` + wid + `","image":"x","entrypoint":"sh","script":"","memoryLimitBytes":134217728,"cpuLimitMillicores":null,"timeoutMs":1000}`, false},
+		{"chmod ok", CmdFsChmod, `{"workloadId":"` + wid + `","path":"start.sh","mode":493}`, true},
+		{"chmod setuid", CmdFsChmod, `{"workloadId":"` + wid + `","path":"start.sh","mode":2541}`, false},
+		{"chmod root", CmdFsChmod, `{"workloadId":"` + wid + `","path":".","mode":493}`, false},
+		{"compress ok", CmdFsCompress, `{"workloadId":"` + wid + `","root":"","paths":["world"],"format":"zip","maxTotalBytes":1000}`, true},
+		{"compress root path", CmdFsCompress, `{"workloadId":"` + wid + `","root":"","paths":["."],"format":"zip","maxTotalBytes":1000}`, false},
+		{"compress no paths", CmdFsCompress, `{"workloadId":"` + wid + `","root":"","paths":[],"format":"zip","maxTotalBytes":1000}`, false},
+		{"find ok", CmdFsFind, `{"workloadId":"` + wid + `","path":"","query":"level"}`, true},
+		{"find empty query", CmdFsFind, `{"workloadId":"` + wid + `","path":"","query":""}`, false},
+		{"copy root", CmdFsCopy, `{"workloadId":"` + wid + `","path":""}`, false},
+		{"node.ports", CmdNodePorts, `{}`, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, known, err := ParsePayload(c.typ, []byte(c.payload))
+			if !known {
+				t.Fatal("type unknown")
+			}
+			if (err == nil) != c.ok {
+				t.Fatalf("ok=%v err=%v", c.ok, err)
+			}
+		})
+	}
+	p, _, _ := ParsePayload(CmdFsFind, []byte(`{"workloadId":"`+wid+`","path":"","query":"x"}`))
+	if p.(*FsFindPayload).MaxResults != 100 {
+		t.Fatal("find default")
+	}
+	p, _, _ = ParsePayload(CmdArtifactFetch, []byte(`{"workloadId":"`+wid+`","url":"https://x.y/z","destPath":"a","checksum":null,"maxBytes":1}`))
+	if !p.(*ArtifactFetchPayload).Cache {
+		t.Fatal("cache default must be true")
+	}
+	p, _, _ = ParsePayload(CmdWorkloadEnsure, []byte(ensure(`"image":"eclipse-temurin:21-jre"`)))
+	if s := p.(*WorkloadSpec); s.Entrypoint != "argv" || s.DataMountPath != "/data" || !s.ReadOnlyRootfs {
+		t.Fatalf("defaults %+v", s)
+	}
+}
+
+func TestAgentErrorBounds(t *testing.T) {
+	e := Errorf(CodeInternal, "%s", strings.Repeat("é", 5000)).WithDetails(map[string]any{"blob": strings.Repeat("x", 20000)})
+	ae := e.ToAgentError()
+	if UTF16Len(ae.Message) != MaxErrorMessage || !strings.HasPrefix(strings.Repeat("é", 5000), ae.Message) {
+		t.Fatalf("message len %d", UTF16Len(ae.Message))
+	}
+	if string(ae.Details) != `{"truncated":true}` {
+		t.Fatalf("details %s", ae.Details)
+	}
+	if got := TruncateUTF16(strings.Repeat("😀", 3), 5); got != "😀😀" {
+		t.Fatalf("surrogate-safe truncation %q", got)
+	}
+	small := Errorf(CodeConflict, "x").WithDetails(map[string]any{"a": 1}).ToAgentError()
+	if string(small.Details) != `{"a":1}` {
+		t.Fatal(string(small.Details))
 	}
 }

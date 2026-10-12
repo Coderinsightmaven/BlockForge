@@ -63,8 +63,10 @@ type wstate struct {
 	tracker        RestartTracker
 	timer          *time.Timer
 	pendingRestart bool
-	followCID      string
-	followCancel   context.CancelFunc
+	// installing is set while a workload.install container runs (start/remove/install answer BUSY).
+	installing   bool
+	followCID    string
+	followCancel context.CancelFunc
 
 	// consoleMu guards the persistent stdin attach (network I/O, so not under mu).
 	consoleMu  sync.Mutex
@@ -141,6 +143,11 @@ func (d *Driver) loadSpec(id string) (*protocol.WorkloadSpec, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, err
 	}
+	var legacy struct {
+		StopCommand *string `json:"stopCommand"`
+	}
+	_ = json.Unmarshal(b, &legacy)
+	NormalizeSpec(&s, legacy.StopCommand)
 	return &s, nil
 }
 
@@ -327,7 +334,7 @@ func (d *Driver) List(ctx context.Context) ([]protocol.WorkloadStatus, error) {
 	out := []protocol.WorkloadStatus{}
 	for _, s := range res.Items {
 		id := s.Labels[LabelWorkload]
-		if !protocol.IsUUID(id) || seen[id] {
+		if !protocol.IsUUID(id) || seen[id] || s.Labels[LabelRole] != "" {
 			continue
 		}
 		seen[id] = true
@@ -364,7 +371,7 @@ func (d *Driver) Running(ctx context.Context) ([]RunningInfo, error) {
 	var out []RunningInfo
 	for _, s := range res.Items {
 		id := s.Labels[LabelWorkload]
-		if !protocol.IsUUID(id) || s.Labels[LabelManaged] != "true" {
+		if !protocol.IsUUID(id) || s.Labels[LabelManaged] != "true" || s.Labels[LabelRole] != "" {
 			continue
 		}
 		ri := RunningInfo{WorkloadID: id, ContainerID: s.ID, Kind: s.Labels[LabelKind], IPs: map[string]string{}}
@@ -609,6 +616,9 @@ func (d *Driver) Start(ctx context.Context, id string) (protocol.WorkloadStatus,
 }
 
 func (d *Driver) startLocked(ctx context.Context, id string, manual bool) (protocol.WorkloadStatus, error) {
+	if d.isInstalling(id) {
+		return protocol.WorkloadStatus{}, protocol.RetryableErrorf(protocol.CodeBusy, "an install is running for this workload")
+	}
 	spec, err := d.loadSpec(id)
 	if err != nil {
 		return protocol.WorkloadStatus{}, protocol.Errorf(protocol.CodeNotFound, "workload %s has no spec on this node (run workload.ensure first)", id)
@@ -703,20 +713,29 @@ func (d *Driver) Stop(ctx context.Context, id string, timeout time.Duration) (pr
 		return d.statusFrom(id, c), nil
 	}
 	spec, _ := d.loadSpec(id)
-	graceSecs := int(timeout / time.Second)
-	if spec != nil && spec.StopCommand != nil {
-		if err := d.writeConsole(id, c.ID, *spec.StopCommand); err != nil {
-			// Not delivered: SIGTERM with the full timeout instead.
-			d.o.Logger.Warn("stop command could not be delivered; falling back to SIGTERM", "workload", id, "err", err)
-		} else {
-			if d.waitNotRunning(ctx, c.ID, timeout) {
-				return d.Status(context.WithoutCancel(ctx), id)
+	// Escalation after the stop action: SIGTERM, then SIGKILL after 15 s (also the whole sequence
+	// when the spec has no stop action).
+	graceSecs := 15
+	if spec != nil && spec.Stop != nil {
+		var delivered error
+		switch spec.Stop.Type {
+		case "command":
+			delivered = d.writeConsole(id, c.ID, spec.Stop.Command)
+		case "signal":
+			if spec.Stop.Signal == "SIGKILL" {
+				return d.Kill(ctx, id)
 			}
-			graceSecs = 15 // stop command ignored for timeoutMs: SIGTERM, then SIGKILL after 15 s
+			_, delivered = d.cli.ContainerKill(ctx, c.ID, client.ContainerKillOptions{Signal: spec.Stop.Signal})
 		}
-	}
-	if graceSecs < 1 {
-		graceSecs = 1
+		if delivered != nil {
+			d.o.Logger.Warn("stop action could not be delivered; falling back to SIGTERM", "workload", id,
+				"stop", spec.Stop.Type, "err", delivered)
+			if g := int(timeout / time.Second); g > graceSecs {
+				graceSecs = g // the workload never saw a stop request: give SIGTERM the full timeout
+			}
+		} else if d.waitNotRunning(ctx, c.ID, timeout) {
+			return d.Status(context.WithoutCancel(ctx), id)
+		}
 	}
 	if _, err := d.cli.ContainerStop(ctx, c.ID, client.ContainerStopOptions{Signal: "SIGTERM", Timeout: &graceSecs}); err != nil && !cerrdefs.IsNotFound(err) {
 		return protocol.WorkloadStatus{}, runtimeErr("stop container", err)
@@ -746,6 +765,9 @@ func (d *Driver) Remove(ctx context.Context, id string, deleteData bool) error {
 	w := d.state(id)
 	w.opMu.Lock()
 	defer w.opMu.Unlock()
+	if d.isInstalling(id) {
+		return protocol.RetryableErrorf(protocol.CodeBusy, "an install is running for this workload")
+	}
 	c, err := d.inspectManaged(ctx, id)
 	if err != nil {
 		return err
@@ -980,6 +1002,7 @@ func (d *Driver) Run(ctx context.Context) {
 	if err := d.InstallProbeJar(); err != nil {
 		d.o.Logger.Warn("JVM probe not installed", "err", err)
 	}
+	d.cleanupStaleInstalls(ctx)
 	delay := time.Second
 	for ctx.Err() == nil {
 		f := client.Filters{}.Add("type", "container").Add("label", LabelManaged+"=true")
@@ -1066,8 +1089,8 @@ func (d *Driver) resync(ctx context.Context) {
 
 func (d *Driver) handleEvent(ctx context.Context, m events.Message) {
 	id := m.Actor.Attributes[LabelWorkload]
-	if !protocol.IsUUID(id) || m.Actor.Attributes[LabelManaged] != "true" {
-		return
+	if !protocol.IsUUID(id) || m.Actor.Attributes[LabelManaged] != "true" || m.Actor.Attributes[LabelRole] != "" {
+		return // helper containers (install) never drive workload state or the restart policy
 	}
 	switch m.Action {
 	case events.ActionStart:
@@ -1168,4 +1191,11 @@ func (d *Driver) pruneNetworks(ctx context.Context, names []string) {
 			d.o.Logger.Info("network still in use or not removable", "network", name, "err", err)
 		}
 	}
+}
+
+func (d *Driver) isInstalling(id string) bool {
+	w := d.state(id)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.installing
 }

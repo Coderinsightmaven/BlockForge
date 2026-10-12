@@ -31,6 +31,8 @@ import (
 type Result struct {
 	Bytes  int64  `json:"bytes"`
 	Sha256 string `json:"sha256"`
+	// Cached is true when artifact.fetch was served from the node cache (fs.transfer.*: always false).
+	Cached bool `json:"cached"`
 }
 
 // Progress receives byte counts (total = -1 when unknown).
@@ -44,6 +46,8 @@ type Fetcher struct {
 	IdleTimeout   time.Duration
 	MaxRedirects  int
 	ProgressEvery time.Duration
+	// Cache is the content-addressed artifact cache (nil = disabled).
+	Cache *Cache
 }
 
 // DefaultTransport is a hardened transport: TLS ≥ 1.2, no transparent decompression, header timeout.
@@ -103,7 +107,22 @@ func statusError(code int, what string) error {
 	return protocol.Errorf(protocol.CodeDownloadFailed, "%s: HTTP %d", what, code)
 }
 
-// Fetch implements artifact.fetch into the workload sandbox.
+// checksumLen is the hex length of each supported digest.
+var checksumLen = map[string]int{"sha1": 40, "sha256": 64, "sha512": 128}
+
+// checkDigest compares a finished hash with the expected checksum (constant time).
+func checkDigest(h hash.Hash, c *protocol.Checksum) error {
+	got := hex.EncodeToString(h.Sum(nil))
+	want := strings.ToLower(c.Value)
+	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		return protocol.Errorf(protocol.CodeChecksumMismatch, "%s mismatch", c.Algorithm).
+			WithDetails(map[string]any{"algorithm": c.Algorithm, "expected": want, "actual": got})
+	}
+	return nil
+}
+
+// Fetch implements artifact.fetch into the workload sandbox. With a checksum and cache=true the
+// node's content-addressed cache is used (see Cache).
 func (f *Fetcher) Fetch(ctx context.Context, root *fsops.Root, p *protocol.ArtifactFetchPayload, progress Progress) (*Result, error) {
 	dest, err := fsops.CleanPath(p.DestPath, true)
 	if err != nil {
@@ -113,6 +132,7 @@ func (f *Fetcher) Fetch(ctx context.Context, root *fsops.Root, p *protocol.Artif
 	if err != nil || u.Host == "" {
 		return nil, protocol.Errorf(protocol.CodeValidationFailed, "invalid URL")
 	}
+	// The allowlist applies even when the artifact is already cached.
 	if err := f.Hosts.Allowed(u); err != nil {
 		return nil, protocol.Errorf(protocol.CodeHostNotAllowed, "%v", err)
 	}
@@ -121,7 +141,53 @@ func (f *Fetcher) Fetch(ctx context.Context, root *fsops.Root, p *protocol.Artif
 		if verify, err = newHash(p.Checksum.Algorithm); err != nil {
 			return nil, err
 		}
+		if len(p.Checksum.Value) != checksumLen[p.Checksum.Algorithm] {
+			return nil, protocol.Errorf(protocol.CodeValidationFailed, "%s checksum must be %d hex characters",
+				p.Checksum.Algorithm, checksumLen[p.Checksum.Algorithm])
+		}
+		if p.Cache && f.Cache != nil {
+			return f.fetchCached(ctx, root, dest, u, p, progress)
+		}
 	}
+	var tf *fsops.TempFile
+	defer func() {
+		if tf != nil {
+			tf.Abort()
+		}
+	}()
+	_, err = f.download(ctx, u, p.MaxBytes, progress, func() (io.Writer, error) {
+		if err := root.MkdirAll(path.Dir(dest)); err != nil {
+			return nil, err
+		}
+		t, err := root.CreateTemp(dest, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		tf = t
+		if verify != nil {
+			return io.MultiWriter(tf, verify), nil
+		}
+		return tf, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if verify != nil {
+		if err := checkDigest(verify, p.Checksum); err != nil {
+			return nil, err
+		}
+	}
+	sum, size, err := tf.Commit()
+	tf = nil
+	if err != nil {
+		return nil, err
+	}
+	return &Result{Bytes: size, Sha256: sum}, nil
+}
+
+// download performs the allowlisted HTTPS GET (redirects re-validated, idle timeout, size limit) and
+// streams the body into the writer returned by open, which is only called for a 200 response.
+func (f *Fetcher) download(ctx context.Context, u *url.URL, maxBytes int64, progress Progress, open func() (io.Writer, error)) (int64, error) {
 	maxRedirects := f.MaxRedirects
 	if maxRedirects == 0 {
 		maxRedirects = 5
@@ -150,81 +216,55 @@ func (f *Fetcher) Fetch(ctx context.Context, root *fsops.Root, p *protocol.Artif
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, protocol.Errorf(protocol.CodeValidationFailed, "invalid URL")
+		return 0, protocol.Errorf(protocol.CodeValidationFailed, "invalid URL")
 	}
 	req.Header.Set("User-Agent", "BlockForge-Agent/"+version.Version)
 	resp, err := client.Do(req)
 	if err != nil {
 		var hr *hostRefused
 		if errors.As(err, &hr) {
-			return nil, protocol.Errorf(protocol.CodeHostNotAllowed, "%v", hr.err)
+			return 0, protocol.Errorf(protocol.CodeHostNotAllowed, "%v", hr.err)
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return 0, ctx.Err()
 		}
-		return nil, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "download failed: %s", sanitize(err))
+		return 0, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "download failed: %s", sanitize(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, statusError(resp.StatusCode, "download")
+		return 0, statusError(resp.StatusCode, "download")
 	}
-	if resp.ContentLength > p.MaxBytes {
-		return nil, protocol.Errorf(protocol.CodeQuotaExceeded, "artifact is %d bytes (limit %d)", resp.ContentLength, p.MaxBytes)
+	if resp.ContentLength > maxBytes {
+		return 0, protocol.Errorf(protocol.CodeQuotaExceeded, "artifact is %d bytes (limit %d)", resp.ContentLength, maxBytes)
 	}
-	if err := root.MkdirAll(path.Dir(dest)); err != nil {
-		return nil, err
-	}
-	tf, err := root.CreateTemp(dest, 0o644)
+	w, err := open()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			tf.Abort()
-		}
-	}()
 	timer := time.AfterFunc(idle, cancel)
 	defer timer.Stop()
 	var src io.Reader = &idleReader{r: resp.Body, timer: timer, d: idle}
-	src = io.LimitReader(src, p.MaxBytes+1)
-	var w io.Writer = tf
-	if verify != nil {
-		w = io.MultiWriter(tf, verify)
-	}
+	src = io.LimitReader(src, maxBytes+1)
 	n, err := copyWithProgress(w, src, resp.ContentLength, progress, f.ProgressEvery)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return n, ctx.Err()
 		}
 		if pe, ok := protocol.AsError(err); ok {
-			return nil, pe
+			return n, pe
 		}
 		if rctx.Err() != nil {
-			return nil, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "download stalled for %s", idle)
+			return n, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "download stalled for %s", idle)
 		}
-		return nil, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "download interrupted: %s", sanitize(err))
+		return n, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "download interrupted: %s", sanitize(err))
 	}
-	if n > p.MaxBytes {
-		return nil, protocol.Errorf(protocol.CodeQuotaExceeded, "artifact exceeds %d bytes", p.MaxBytes)
+	if n > maxBytes {
+		return n, protocol.Errorf(protocol.CodeQuotaExceeded, "artifact exceeds %d bytes", maxBytes)
 	}
 	if resp.ContentLength >= 0 && n != resp.ContentLength {
-		return nil, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "short download (%d of %d bytes)", n, resp.ContentLength)
+		return n, protocol.RetryableErrorf(protocol.CodeDownloadFailed, "short download (%d of %d bytes)", n, resp.ContentLength)
 	}
-	if verify != nil {
-		got := hex.EncodeToString(verify.Sum(nil))
-		want := strings.ToLower(p.Checksum.Value)
-		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-			return nil, protocol.Errorf(protocol.CodeChecksumMismatch, "%s mismatch", p.Checksum.Algorithm).
-				WithDetails(map[string]any{"algorithm": p.Checksum.Algorithm, "expected": want, "actual": got})
-		}
-	}
-	sum, size, err := tf.Commit()
-	if err != nil {
-		return nil, err
-	}
-	committed = true
-	return &Result{Bytes: size, Sha256: sum}, nil
+	return n, nil
 }
 
 func copyWithProgress(dst io.Writer, src io.Reader, total int64, progress Progress, every time.Duration) (int64, error) {

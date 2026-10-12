@@ -64,12 +64,39 @@ func AsError(err error) (*Error, bool) {
 	return nil, false
 }
 
-// ToAgentError converts to the wire representation.
+// Bounds on agent error bodies (envelope.ts AgentError): they are untrusted and persisted.
+const (
+	MaxErrorMessage = 4096      // JavaScript string length (UTF-16 units)
+	MaxErrorDetails = 16 * 1024 // JSON length
+)
+
+// TruncateUTF16 shortens s to at most n UTF-16 code units at a rune boundary.
+func TruncateUTF16(s string, n int) string {
+	units := 0
+	for i, r := range s {
+		w := 1
+		if r >= 0x10000 {
+			w = 2
+		}
+		if units+w > n {
+			return s[:i]
+		}
+		units += w
+	}
+	return s
+}
+
+// ToAgentError converts to the wire representation, enforcing the message/details bounds.
 func (e *Error) ToAgentError() *AgentError {
-	ae := &AgentError{Code: e.Code, Message: e.Message, Retryable: e.Retryable}
+	ae := &AgentError{Code: e.Code, Message: TruncateUTF16(e.Message, MaxErrorMessage), Retryable: e.Retryable}
 	if e.Details != nil {
 		if b, err := json.Marshal(e.Details); err == nil {
-			ae.Details = b
+			// encoding/json escapes non-ASCII as UTF-8 bytes; byte length ≥ JS string length.
+			if len(b) <= MaxErrorDetails {
+				ae.Details = b
+			} else {
+				ae.Details = json.RawMessage(`{"truncated":true}`)
+			}
 		}
 	}
 	return ae

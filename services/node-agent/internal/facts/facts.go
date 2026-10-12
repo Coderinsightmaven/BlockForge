@@ -27,6 +27,8 @@ type Collector struct {
 	DataRoot      string
 	ExcludeIfaces []string
 	Docker        *client.Client
+	// SFTP is reported as NodeFacts.sftp (nil = service disabled or not listening).
+	SFTP *protocol.SftpFact
 }
 
 func ip(v int) *int      { return &v }
@@ -103,6 +105,7 @@ func (c *Collector) Collect(ctx context.Context) protocol.NodeFacts {
 	for _, fs := range metrics.Filesystems(ctx, c.DataRoot) {
 		f.Filesystems = append(f.Filesystems, protocol.FilesystemFact{Mount: fs.Mount, Device: fs.Device, FsType: fs.FsType, TotalBytes: fs.TotalBytes})
 	}
+	f.Sftp = c.SFTP
 	if c.Docker != nil {
 		rt := c.runtimeFact(ctx)
 		f.ContainerRuntime = &rt

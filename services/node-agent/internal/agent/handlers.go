@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/blockforge/node-agent/internal/fsops"
+	"github.com/blockforge/node-agent/internal/metrics"
 	"github.com/blockforge/node-agent/internal/minecraft"
 	"github.com/blockforge/node-agent/internal/protocol"
 )
@@ -63,6 +64,38 @@ func (a *Agent) handlers() map[string]Handler {
 	return map[string]Handler{
 		protocol.CmdNodeFacts: func(ctx context.Context, c *Command) (any, error) {
 			return a.facts.Collect(ctx), nil
+		},
+		protocol.CmdNodePorts: func(ctx context.Context, c *Command) (any, error) {
+			tcp, udp, err := metrics.ListeningPorts()
+			if err != nil {
+				return nil, protocol.Errorf(protocol.CodeRuntimeError, "listening ports unavailable: %v", err)
+			}
+			return map[string]any{"tcp": tcp, "udp": udp}, nil
+		},
+		protocol.CmdWorkloadInstall: func(ctx context.Context, c *Command) (any, error) {
+			return a.driver.Install(ctx, c.Payload.(*protocol.WorkloadInstallPayload), c.Progress)
+		},
+		protocol.CmdFsCopy: func(ctx context.Context, c *Command) (any, error) {
+			p := c.Payload.(*protocol.FsPathPayload)
+			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) {
+				dst, err := r.Copy(p.Path)
+				if err != nil {
+					return nil, err
+				}
+				return map[string]any{"path": dst}, nil
+			})
+		},
+		protocol.CmdFsCompress: func(ctx context.Context, c *Command) (any, error) {
+			p := c.Payload.(*protocol.FsCompressPayload)
+			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Compress(*p, time.Now()) })
+		},
+		protocol.CmdFsChmod: func(ctx context.Context, c *Command) (any, error) {
+			p := c.Payload.(*protocol.FsChmodPayload)
+			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return empty{}, r.Chmod(p.Path, p.Mode) })
+		},
+		protocol.CmdFsFind: func(ctx context.Context, c *Command) (any, error) {
+			p := c.Payload.(*protocol.FsFindPayload)
+			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Find(p.Path, p.Query, p.MaxResults) })
 		},
 		protocol.CmdNodeProbe: func(ctx context.Context, c *Command) (any, error) {
 			return probe(ctx, c.Payload.(*protocol.NodeProbePayload)), nil

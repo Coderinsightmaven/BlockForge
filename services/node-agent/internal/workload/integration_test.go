@@ -34,7 +34,7 @@ import (
 const testImage = "alpine:3.22"
 
 // itNodeID is the node id the integration drivers run as.
-const itNodeID = "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c"
+const itNodeID = "5e0c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c"
 
 // The workload script runs inside the container (the agent itself never spawns a shell).
 const script = `echo READY uid=$(id -u) gid=$(id -g); echo hello > /data/fromcontainer; ` +
@@ -114,12 +114,12 @@ func setup(t *testing.T) *itEnv {
 
 func (e *itEnv) spec(id string) *protocol.WorkloadSpec {
 	cpu := int64(500)
-	stop := "stop"
+	stop := &protocol.WorkloadStop{Type: "command", Command: "stop"}
 	return &protocol.WorkloadSpec{
 		WorkloadID: id, Kind: "minecraft", Image: testImage, Command: []string{"sh", "-c", script},
 		Env: map[string]string{"TZ": "UTC"}, MemoryLimitBytes: 128 << 20, CPULimitMillicores: &cpu, PidsLimit: 64,
 		Ports: []protocol.PortBinding{}, Networks: []protocol.WorkloadNetwork{{Name: e.netName, Aliases: []string{"it"}}},
-		StopCommand: &stop, StopTimeoutMs: 10000,
+		Stop: stop, Entrypoint: protocol.EntrypointArgv, DataMountPath: "/data", ReadOnlyRootfs: true, StopTimeoutMs: 10000,
 		RestartPolicy: protocol.RestartPolicy{Mode: "on-failure", MaxRetries: 2, BackoffMs: 1000},
 		JvmProbe:      false, Labels: map[string]string{"io.blockforge.test": "1"},
 	}
@@ -445,7 +445,7 @@ func TestPullSigtermOOMAndReattach(t *testing.T) {
 	tid := newUUID()
 	defer e.d.Remove(ctx, tid, true)
 	ts := e.spec(tid)
-	ts.StopCommand = nil
+	ts.Stop = nil
 	ts.Command = []string{"sh", "-c", `trap 'echo got-TERM; exit 0' TERM; echo READY; while true; do sleep 1; done`}
 	if _, err := e.d.Ensure(ctx, ts, nil); err != nil {
 		t.Fatal(err)

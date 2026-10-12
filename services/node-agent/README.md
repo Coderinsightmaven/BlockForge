@@ -14,9 +14,10 @@ internal/config           agent.json, control-plane URL policy, image + download
 internal/journal          durable command seen-set (commands.journal)
 internal/agent            executor (verify → replay → validate → run), handlers, wiring, fake control plane tests
 internal/transport        WebSocket session, reconnect backoff (full jitter), priority outbox
-internal/workload         Docker driver, hardening, restart policy, events, logs follower, console attach
-internal/fsops            os.Root sandbox, atomic writes, archive extraction
-internal/artifact         artifact.fetch + fs.transfer.push/pull
+internal/workload         Docker driver, hardening, egg runtime, install containers, restart policy, events, logs, console
+internal/fsops            os.Root sandbox, atomic writes, archive extraction, copy/compress/chmod/find
+internal/artifact         artifact.fetch (+ content-addressed cache) and fs.transfer.push/pull
+internal/sftpd            built-in SFTP server (control-plane auth, sandboxed sessions, activity events)
 internal/metrics, facts   host (gopsutil) and workload (Docker stats, JVM probe, SLP) telemetry
 internal/minecraft        Server List Ping client
 internal/jvmprobe         embedded services/jvm-probe jar (+ recorded sha256)
@@ -43,6 +44,7 @@ a unit test fails if the jar and the recorded checksum diverge.
 | `scripts/test-linux.sh -race ./...` | same suite in a `golang:1.27` Linux container (real symlinks, FIFOs, /proc) |
 | `scripts/test-linux.sh -tags integration ./...` | real Docker: workload lifecycle, hardening as applied by the engine, console, logs, stats, restart policy, unmanaged-container safety |
 | `BF_IT_PAPER=1 scripts/test-linux.sh -tags integration -run TestPaperEndToEnd ./internal/agent/` | real Paper server via signed commands (download + sha256 from fill-data.papermc.io, start, `Done (`, SLP, JVM probe, console, graceful stop) |
+| `BF_IT_EGG=1 scripts/test-linux.sh -tags integration -run Egg ./internal/agent/` | official Pterodactyl eggs through signed commands: Vanilla Minecraft (`yolks:java_21`, install script, done string, SLP, JVM probe, `stop`) and TeamSpeak 3 (SIGINT stop) — fixtures in `internal/agent/testdata` |
 | `BF_IT_COMPOSE=1 go test -tags integration -run TestComposeAgent ./internal/agent/` | the containerised agent from `infra/compose/docker-compose.agent.yml` against a fake control plane on the host |
 
 `scripts/test-linux.sh` mounts the Docker socket, uses `--network host` and bind-mounts
@@ -68,13 +70,16 @@ blockforge-agent run [--config-dir /etc/blockforge]
   `--workload-uid/--workload-gid`.
 
 `agent.json` keys you may edit: `dataRoot`, `workloadUid/Gid`, `imageAllowlist` (entries `repo:*` = any
-tag of exactly that repo, or exact references; default `eclipse-temurin:*`), `downloadHostAllowlist`
+tag of exactly that repo, or exact references; default `eclipse-temurin:*`, `ghcr.io/pterodactyl/yolks:*`,
+`ghcr.io/pterodactyl/installers:*`, `ghcr.io/parkervcp/yolks:*`, `ghcr.io/parkervcp/installers:*`; a config
+still holding the 0.1.0 default `["eclipse-temurin:*"]` is upgraded on load), `downloadHostAllowlist`
 (exact hosts, `host:port`, or `*.domain`; defaults are the Mojang/Paper/Purpur/Fabric/Forge/NeoForge/Modrinth
 hosts), `netIfaceExclude` (glob patterns; default skips `lo`, `veth*`, `docker*`, `br-*` and common CNI
 devices), `dockerHost` (e.g. `unix:///run/user/1000/docker.sock` for rootless Docker or a Podman socket),
-`maxConcurrentCommands`.
+`maxConcurrentCommands`, `artifactCacheMaxBytes` (default 10 GiB), `sftp.enabled` (default true) and
+`sftp.listen` (default `0.0.0.0:2022`).
 
-Environment overrides: `BLOCKFORGE_CONFIG_DIR`, `BLOCKFORGE_DATA_ROOT`, `BLOCKFORGE_LOG_LEVEL`,
+Environment overrides: `BLOCKFORGE_SFTP_LISTEN`, `BLOCKFORGE_SFTP_ENABLED`, `BLOCKFORGE_CONFIG_DIR`, `BLOCKFORGE_DATA_ROOT`, `BLOCKFORGE_LOG_LEVEL`,
 `BLOCKFORGE_HOSTNAME`, `DOCKER_HOST`, and the gopsutil host-path variables `HOST_PROC`, `HOST_SYS`,
 `HOST_ETC`, `HOST_ROOT` for containerised agents.
 
@@ -153,6 +158,44 @@ then 25565/25577.
 Filesystems: without `HOST_ROOT` only the filesystem holding the data root is reported (the agent can
 always `statfs` it because it is mounted at the same path); mount `/:/host/root:ro,rslave` and set
 `HOST_ROOT=/host/root` to report every host filesystem.
+
+## Eggs, install containers, artifact cache, SFTP
+
+* **Egg runtime** (`entrypoint: "image"`): the image's ENTRYPOINT/CMD are kept (yolks evaluate `STARTUP` and
+  `exec` the game), the data dir is mounted at `dataMountPath` (`/home/container`), which is also `WorkingDir`
+  and `HOME`; hardening is identical to argv workloads (UID/GID, cap-drop ALL, no-new-privileges, limits;
+  read-only rootfs unless `readOnlyRootfs: false`, tmpfs `/tmp` either way). docker-init is PID 1 in both
+  modes so stop signals reach the game. Stop: console command or signal, then SIGTERM, then SIGKILL after
+  15 s; `stop: null` = SIGTERM → SIGKILL after 15 s.
+* **`workload.install`**: container `bf-<id>-install` from an allowlisted image, script at
+  `/mnt/install/install.sh` (read-only, CRLF normalised), data at `/mnt/server`; root inside the container
+  with only `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID`, no-new-privileges, memory/CPU/pids limits, default
+  bridge network, writable image rootfs (scripts install packages), no Docker socket. The wrapper
+  `<sh> /mnt/install/install.sh; rc=$?; chown -R <uid>:<gid> /mnt/server; exit $rc` hands the files back
+  also on failure; after a timeout/OOM kill a short follow-up container does the chown. Output streams as
+  `logs` frames with `source: "install"` (own ring buffer and rate limit); the result has the last 200 lines.
+  `BUSY` while the workload runs, a restart is pending, or another install is in flight; start/remove are
+  `BUSY` during an install. Install containers never drive workload events or the restart policy and are
+  removed afterwards (leftovers from a crashed agent are removed at start-up). The agent itself never needs
+  root for this.
+* **Artifact cache** (`artifact.fetch` with a checksum and `cache: true`): `<dataRoot>/cache/artifacts/<alg>/<value>`
+  (0700 dir, 0444 entries, outside every sandbox). Entries are verified on download and again while being
+  copied into a sandbox (corrupt entries are evicted and re-downloaded); concurrent fetches of one artifact
+  share a single download; LRU eviction above `artifactCacheMaxBytes`; the host allowlist still applies on a
+  hit. Entries are **copied, not hard-linked**: a hard link shares the inode, so an in-place writer in one
+  server (an egg's `curl -o server.jar`, a plugin updater, a root install container) would change the
+  cached file and every other server's copy.
+* **SFTP** (`internal/sftpd`, `0.0.0.0:2022`): Ed25519 host key `<configDir>/sftp_host_ed25519_key` (0600,
+  created on first start; fingerprint in `NodeFacts.sftp`). Username `<username>.<serverShortId>` is checked
+  locally, then password or public key is verified by `POST <cp>/agent/v1/sftp/auth` (BFAgent header). Each
+  session gets an `os.Root` on its workload data dir with the same path rules as `fs.*`; `read`/`write`
+  permissions and the template denylist (gitignore subset) are enforced; symlink/hardlink creation,
+  ownership and size setstat are refused (permission bits masked to 0777 and timestamps are allowed); no
+  shell, exec or port forwarding. Re-authentication at `expiresAt` (failure closes the session),
+  10 sessions per user+server, 3 failed logins per IP per minute (then refused locally), 10 min idle
+  timeout, 30 s handshake timeout, packet sizes bounded by pkg/sftp (256 KiB). Mutations are reported as
+  `sftp.activity` events (≤ 1 s, ≤ 100 actions). It is the agent's only inbound port: open `2022/tcp` in the
+  host firewall only for the clients that need it.
 
 ## Security model (summary)
 

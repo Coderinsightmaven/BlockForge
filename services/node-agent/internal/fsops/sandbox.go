@@ -369,3 +369,6 @@ func (r *Root) hashFile(name string) (string, int64, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
+
+// ChownNew gives a freshly created entry to the workload user (no-op unless the agent runs as root).
+func (r *Root) ChownNew(name string) error { return r.chown(name) }

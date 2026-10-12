@@ -158,3 +158,45 @@ func TestConfigSaveLoad(t *testing.T) {
 		t.Fatal("non-loopback http accepted on load")
 	}
 }
+
+func TestPhase3Defaults(t *testing.T) {
+	al, err := NewImageAllowlist(DefaultImageAllowlist)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for img, want := range map[string]bool{
+		"ghcr.io/pterodactyl/yolks:java_21":     true,
+		"ghcr.io/pterodactyl/installers:alpine": true,
+		"ghcr.io/parkervcp/yolks:debian":        true,
+		"ghcr.io/parkervcp/installers:debian":   true,
+		"eclipse-temurin:25-jre":                true,
+		"ghcr.io/pterodactyl/yolks":             false, // no tag
+		"ghcr.io/pterodactyl/evil:latest":       false,
+		"ghcr.io/pterodactyl/yolks/sub:x":       false,
+		"docker.io/pterodactyl/yolks:java_21":   false,
+		"GHCR.IO/pterodactyl/yolks:java_21":     true, // registry host is case-insensitive
+	} {
+		if al.Allowed(img) != want {
+			t.Errorf("%s: want %v", img, want)
+		}
+	}
+	// A config written by an older agent with the old default list is upgraded; custom lists are kept.
+	c := &Config{ImageAllowlist: []string{"eclipse-temurin:*"}}
+	c.ApplyDefaults()
+	if len(c.ImageAllowlist) != len(DefaultImageAllowlist) {
+		t.Fatalf("legacy default not upgraded: %v", c.ImageAllowlist)
+	}
+	c = &Config{ImageAllowlist: []string{"eclipse-temurin:*", "alpine:3.22"}}
+	c.ApplyDefaults()
+	if len(c.ImageAllowlist) != 2 {
+		t.Fatalf("custom list changed: %v", c.ImageAllowlist)
+	}
+	if !c.SFTP.On() || c.SFTP.Listen != "0.0.0.0:2022" || c.ArtifactCacheMaxBytes != 10<<30 {
+		t.Fatalf("sftp/cache defaults %+v %d", c.SFTP, c.ArtifactCacheMaxBytes)
+	}
+	off := false
+	c.SFTP.Enabled = &off
+	if c.SFTP.On() {
+		t.Fatal("sftp disable")
+	}
+}

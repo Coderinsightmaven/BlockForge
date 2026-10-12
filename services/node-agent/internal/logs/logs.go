@@ -175,7 +175,7 @@ type stream struct {
 	dropped int64
 }
 
-// Manager owns per-workload log state and emits batched frames.
+// Manager owns per-workload log state (one stream per workload and source) and emits batched frames.
 type Manager struct {
 	mu      sync.Mutex
 	streams map[string]*stream
@@ -188,21 +188,40 @@ func NewManager(emit func(protocol.LogsFrame)) *Manager {
 	return &Manager{streams: map[string]*stream{}, emit: emit, now: time.Now}
 }
 
-func (m *Manager) get(id string) *stream {
-	s := m.streams[id]
+// StreamKey identifies a stream: the workload id for workload output, "<id>/<source>" otherwise.
+func StreamKey(workloadID, source string) string {
+	if source == "" || source == protocol.LogSourceWorkload {
+		return workloadID
+	}
+	return workloadID + "/" + source
+}
+
+func splitKey(key string) (id, source string) {
+	if i := strings.IndexByte(key, '/'); i >= 0 {
+		return key[:i], key[i+1:]
+	}
+	return key, ""
+}
+
+func (m *Manager) get(key string) *stream {
+	s := m.streams[key]
 	if s == nil {
 		s = &stream{ring: NewRing(RingSize), bucket: NewTokenBucket(protocol.LogLinesPerSecond, protocol.LogBurstLines, m.now())}
-		m.streams[id] = s
+		m.streams[key] = s
 	}
 	return s
 }
 
-// Ingest records one line: always kept in the ring, forwarded only if the rate limit allows.
-func (m *Manager) Ingest(workloadID string, l protocol.LogLine) {
+// Ingest records one workload output line.
+func (m *Manager) Ingest(workloadID string, l protocol.LogLine) { m.IngestSource(workloadID, "", l) }
+
+// IngestSource records one line: always kept in the ring, forwarded only if the rate limit allows
+// (200 lines/s, burst 2000 per stream).
+func (m *Manager) IngestSource(workloadID, source string, l protocol.LogLine) {
 	l.Line = Truncate(l.Line, protocol.LogLineMaxBytes)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := m.get(workloadID)
+	s := m.get(StreamKey(workloadID, source))
 	s.ring.Add(l)
 	if !s.bucket.Allow(m.now()) {
 		s.dropped++
@@ -212,42 +231,59 @@ func (m *Manager) Ingest(workloadID string, l protocol.LogLine) {
 	s.bytes += len(l.Line) + 64
 }
 
-// Tail returns buffered lines (ok=false when nothing is buffered for the workload).
+// Tail returns buffered workload lines (ok=false when nothing is buffered for the workload).
 func (m *Manager) Tail(workloadID string, n int, since int64) ([]protocol.LogLine, bool) {
+	return m.TailSource(workloadID, "", n, since)
+}
+
+// TailSource returns buffered lines of one stream.
+func (m *Manager) TailSource(workloadID, source string, n int, since int64) ([]protocol.LogLine, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := m.streams[workloadID]
+	s := m.streams[StreamKey(workloadID, source)]
 	if s == nil || s.ring.Len() == 0 {
 		return nil, false
 	}
 	return s.ring.Tail(n, since), true
 }
 
+// ResetSource starts a fresh stream (e.g. a new install run), flushing nothing of the old one.
+func (m *Manager) ResetSource(workloadID, source string) {
+	m.mu.Lock()
+	delete(m.streams, StreamKey(workloadID, source))
+	m.mu.Unlock()
+}
+
 // Forget drops all state for a removed workload.
 func (m *Manager) Forget(workloadID string) {
 	m.mu.Lock()
-	delete(m.streams, workloadID)
+	for key := range m.streams {
+		if id, _ := splitKey(key); id == workloadID {
+			delete(m.streams, key)
+		}
+	}
 	m.mu.Unlock()
 }
 
 // Flush emits pending lines as frames (≤ 5000 lines and ≈1 MiB each).
 func (m *Manager) Flush() {
 	type out struct {
-		id      string
+		key     string
 		lines   []protocol.LogLine
 		dropped int64
 	}
 	var batches []out
 	m.mu.Lock()
-	for id, s := range m.streams {
+	for key, s := range m.streams {
 		if len(s.pending) == 0 && s.dropped == 0 {
 			continue
 		}
-		batches = append(batches, out{id, s.pending, s.dropped})
+		batches = append(batches, out{key, s.pending, s.dropped})
 		s.pending, s.bytes, s.dropped = nil, 0, 0
 	}
 	m.mu.Unlock()
 	for _, b := range batches {
+		id, source := splitKey(b.key)
 		lines := b.lines
 		first := true
 		for first || len(lines) > 0 {
@@ -256,7 +292,7 @@ func (m *Manager) Flush() {
 				size += len(lines[end].Line) + 64
 				end++
 			}
-			f := protocol.LogsFrame{T: protocol.FrameLogs, WorkloadID: b.id, Lines: lines[:end]}
+			f := protocol.LogsFrame{T: protocol.FrameLogs, WorkloadID: id, Source: source, Lines: lines[:end]}
 			if f.Lines == nil {
 				f.Lines = []protocol.LogLine{}
 			}
@@ -286,13 +322,14 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-// AddDropped counts lines lost outside the manager (e.g. logs frames evicted from the outbox).
-func (m *Manager) AddDropped(workloadID string, n int) {
+// AddDropped counts lines lost outside the manager (e.g. logs frames evicted from the outbox);
+// key is a StreamKey.
+func (m *Manager) AddDropped(key string, n int) {
 	if n <= 0 {
 		return
 	}
 	m.mu.Lock()
-	if s := m.streams[workloadID]; s != nil {
+	if s := m.streams[key]; s != nil {
 		s.dropped += int64(n)
 	}
 	m.mu.Unlock()

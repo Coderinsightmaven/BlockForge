@@ -66,7 +66,7 @@ func TestPaperEndToEnd(t *testing.T) {
 	}
 	t.Logf("paper %s build %d: %s (%d bytes, sha256 %s)", version, build.ID, dl.URL, dl.Size, dl.Checksums["sha256"])
 
-	wid := "7e1c2b9a-4d3e-4f5a-9b8c-" + nextID()[24:]
+	wid := randomUUID()
 	net := "bf-it-paper-" + nextID()[30:]
 	do := func(typ string, payload any, timeout time.Duration) map[string]any {
 		t.Helper()
@@ -93,9 +93,9 @@ func TestPaperEndToEnd(t *testing.T) {
 		"command":          []string{"java", "-Xms512M", "-Xmx1024M", "-jar", "server.jar", "nogui"},
 		"env":              map[string]string{"TZ": "UTC"},
 		"memoryLimitBytes": 2 << 30, "cpuLimitMillicores": 2000, "pidsLimit": 4096,
-		"ports":       []map[string]any{{"containerPort": 25565, "hostPort": 25571, "hostIp": "127.0.0.1", "protocol": "tcp"}},
-		"networks":    []map[string]any{{"name": net, "aliases": []string{"paper"}}},
-		"stopCommand": "stop", "stopTimeoutMs": 60000,
+		"ports":    []map[string]any{{"containerPort": 25565, "hostPort": 25571, "hostIp": "127.0.0.1", "protocol": "tcp"}},
+		"networks": []map[string]any{{"name": net, "aliases": []string{"paper"}}},
+		"stop":     map[string]any{"type": "command", "command": "stop"}, "stopTimeoutMs": 60000,
 		"restartPolicy": map[string]any{"mode": "on-failure", "maxRetries": 3, "backoffMs": 10000},
 		"jvmProbe":      true,
 	}

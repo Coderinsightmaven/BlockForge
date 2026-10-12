@@ -33,19 +33,52 @@ const (
 	// LabelNode marks bf-* networks with the id of the node agent that created them.
 	LabelNode       = "io.blockforge.node"
 	LabelWatchtower = "com.centurylinklabs.watchtower.enable"
+	// LabelRole distinguishes helper containers (e.g. "install") from the workload container itself.
+	LabelRole   = "io.blockforge.role"
+	RoleInstall = "install"
 
 	// ProbeJarContainerPath is where the JVM probe is bind-mounted read-only.
 	ProbeJarContainerPath = "/opt/blockforge/jvm-probe.jar"
-	// ProbeOutputContainerPath is where the probe writes its JSON (inside the data dir).
-	ProbeOutputContainerPath = "/data/.blockforge/jvm.json"
 
 	// hardeningVersion is part of the spec hash so changes to the hardening profile recreate containers.
-	hardeningVersion = "h1"
+	hardeningVersion = "h2"
 	tmpfsSize        = "268435456" // 256 MiB /tmp (counts against the memory limit)
 )
 
 // ContainerName is the Docker name of a workload container.
 func ContainerName(workloadID string) string { return "bf-" + workloadID }
+
+// MountPath is where the data dir appears in the container (default /data).
+func MountPath(spec *protocol.WorkloadSpec) string {
+	if spec.DataMountPath == "" {
+		return "/data"
+	}
+	return spec.DataMountPath
+}
+
+// ProbeOutputPath is where the JVM probe writes its JSON inside the container (in the data dir,
+// read by the agent as .blockforge/jvm.json through the sandbox).
+func ProbeOutputPath(spec *protocol.WorkloadSpec) string {
+	return MountPath(spec) + "/.blockforge/jvm.json"
+}
+
+// NormalizeSpec fills fields that specs persisted by older agents (spec.json) do not have.
+// legacyStop is the pre-Phase-3 `stopCommand` value, if any.
+func NormalizeSpec(s *protocol.WorkloadSpec, legacyStop *string) {
+	if s.Entrypoint == "" { // written by agent ≤ 0.1.0: argv, /data, read-only rootfs
+		s.Entrypoint = protocol.EntrypointArgv
+		s.ReadOnlyRootfs = true
+		if s.Stop == nil && legacyStop != nil && *legacyStop != "" {
+			s.Stop = &protocol.WorkloadStop{Type: "command", Command: *legacyStop}
+		}
+	}
+	if s.DataMountPath == "" {
+		s.DataMountPath = "/data"
+	}
+	if s.Env == nil {
+		s.Env = map[string]string{}
+	}
+}
 
 // HostOptions are agent-side settings that shape every container.
 type HostOptions struct {
@@ -68,15 +101,24 @@ func SpecHash(spec *protocol.WorkloadSpec, h HostOptions) string {
 }
 
 // BuildCreateOptions renders a spec into Docker create options with the mandatory hardening:
-// unprivileged UID/GID, no-new-privileges, cap-drop ALL, read-only rootfs + tmpfs /tmp, pids and
-// memory limits (swap = memory), NanoCPUs, never privileged / host network / Docker socket,
-// /data bind-mount, working dir /data, stdin open without TTY, Docker restart policy off.
+// unprivileged UID/GID, no-new-privileges, cap-drop ALL, read-only rootfs (unless the spec opts out)
+// + tmpfs /tmp, pids and memory limits (swap = memory), NanoCPUs, never privileged / host network /
+// Docker socket, data dir bind-mounted at dataMountPath (also WorkingDir and HOME), stdin open
+// without TTY, Docker restart policy off.
+//
+// entrypoint "argv": command[0] replaces the image entrypoint, no shell.
+// entrypoint "image": the image's ENTRYPOINT/CMD are kept (egg yolks evaluate STARTUP in their own
+// entrypoint and `exec` the game); a non-empty command replaces CMD only.
+// Both modes run docker-init (tini) as PID 1: it forwards stop signals (SIGINT/SIGTERM) to the game
+// process, which as PID 1 would otherwise ignore signals it has no handler for, and reaps zombies.
 func BuildCreateOptions(spec *protocol.WorkloadSpec, h HostOptions) (client.ContainerCreateOptions, error) {
+	mountPath := MountPath(spec)
 	hash := SpecHash(spec, h)
 	labels := map[string]string{}
 	for k, v := range spec.Labels {
 		labels[k] = v
 	}
+	delete(labels, LabelRole) // the role label is reserved for agent helper containers
 	labels[LabelManaged] = "true"
 	labels[LabelWorkload] = spec.WorkloadID
 	labels[LabelSpecHash] = hash
@@ -102,15 +144,15 @@ func BuildCreateOptions(spec *protocol.WorkloadSpec, h HostOptions) (client.Cont
 		env = append(env, k+"="+spec.Env[k])
 	}
 	if spec.JvmProbe {
-		probe := "-javaagent:" + ProbeJarContainerPath + "=" + ProbeOutputContainerPath
+		probe := "-javaagent:" + ProbeJarContainerPath + "=" + ProbeOutputPath(spec)
 		toolOpts = strings.TrimSpace(probe + " " + toolOpts)
 	}
 	if toolOpts != "" {
 		env = append(env, "JAVA_TOOL_OPTIONS="+toolOpts)
 	}
 	if !hasHome {
-		// The image user does not exist in /etc/passwd and the rootfs is read-only.
-		env = append(env, "HOME=/tmp")
+		// The workload UID has no passwd entry; HOME points at the (writable) data mount.
+		env = append(env, "HOME="+mountPath)
 	}
 
 	exposed := network.PortSet{}
@@ -129,7 +171,7 @@ func BuildCreateOptions(spec *protocol.WorkloadSpec, h HostOptions) (client.Cont
 	}
 
 	mounts := []mount.Mount{{
-		Type: mount.TypeBind, Source: h.DataDir, Target: "/data",
+		Type: mount.TypeBind, Source: h.DataDir, Target: mountPath,
 		BindOptions: &mount.BindOptions{Propagation: mount.PropagationRPrivate},
 	}}
 	if spec.JvmProbe {
@@ -140,15 +182,27 @@ func BuildCreateOptions(spec *protocol.WorkloadSpec, h HostOptions) (client.Cont
 	}
 
 	pids := spec.PidsLimit
-	init := true
 	stopTimeout := int((spec.StopTimeoutMs + 999) / 1000)
+	var entrypoint, cmd []string
+	init := true
+	if spec.Entrypoint == protocol.EntrypointImage {
+		if len(spec.Command) > 0 {
+			cmd = append([]string{}, spec.Command...)
+		}
+	} else {
+		if len(spec.Command) == 0 {
+			return client.ContainerCreateOptions{}, protocol.Errorf(protocol.CodeValidationFailed, `command is required when entrypoint is "argv"`)
+		}
+		entrypoint = []string{spec.Command[0]}
+		cmd = append([]string{}, spec.Command[1:]...)
+	}
 	cfg := &container.Config{
 		Image:        spec.Image,
-		Entrypoint:   []string{spec.Command[0]},
-		Cmd:          append([]string{}, spec.Command[1:]...),
+		Entrypoint:   entrypoint,
+		Cmd:          cmd,
 		Env:          env,
 		User:         fmt.Sprintf("%d:%d", h.UID, h.GID),
-		WorkingDir:   "/data",
+		WorkingDir:   mountPath,
 		OpenStdin:    true,
 		StdinOnce:    false,
 		Tty:          false,
@@ -167,7 +221,7 @@ func BuildCreateOptions(spec *protocol.WorkloadSpec, h HostOptions) (client.Cont
 		Mounts:         mounts,
 		PortBindings:   bindings,
 		RestartPolicy:  container.RestartPolicy{Name: container.RestartPolicyDisabled},
-		ReadonlyRootfs: true,
+		ReadonlyRootfs: spec.ReadOnlyRootfs,
 		Tmpfs:          map[string]string{"/tmp": "rw,nosuid,nodev,size=" + tmpfsSize + ",mode=1777"},
 		SecurityOpt:    []string{"no-new-privileges:true"},
 		CapDrop:        []string{"ALL"},

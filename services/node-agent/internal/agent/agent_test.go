@@ -61,6 +61,11 @@ func enrollAgent(t *testing.T, cp *fakeCP) (string, *config.Config) {
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
+	// Tests never bind the real SFTP port.
+	cfg.SFTP.Listen = "127.0.0.1:0"
+	if err := cfg.Save(filepath.Join(dir, "config")); err != nil {
+		t.Fatal(err)
+	}
 	return filepath.Join(dir, "config"), cfg
 }
 

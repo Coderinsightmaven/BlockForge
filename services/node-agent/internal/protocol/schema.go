@@ -420,3 +420,53 @@ func Validate(s Schema, raw []byte, out any) *Error {
 	}
 	return nil
 }
+
+// --- discriminated union ------------------------------------------------------------------
+
+type unionSchema struct {
+	key      string
+	variants map[string]*ObjectSchema
+}
+
+// Union is z.discriminatedUnion(key, variants): the value of `key` selects the object schema.
+func Union(key string, variants map[string]*ObjectSchema) Schema {
+	return unionSchema{key: key, variants: variants}
+}
+
+func (u unionSchema) check(v any, p string, is *issues) any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		is.add(p, "expected object")
+		return nil
+	}
+	tag, _ := m[u.key].(string)
+	variant, ok := u.variants[tag]
+	if !ok {
+		is.add(joinPath(p, u.key), "invalid discriminator")
+		return nil
+	}
+	return variant.check(v, p, is)
+}
+
+// --- refinement ---------------------------------------------------------------------------
+
+type refineSchema struct {
+	inner Schema
+	fn    func(v any) (path, msg string)
+}
+
+// RefineObj runs fn on the cleaned value (with defaults) after inner validation succeeded.
+func RefineObj(inner Schema, fn func(v any) (path, msg string)) Schema {
+	return refineSchema{inner, fn}
+}
+
+func (r refineSchema) check(v any, p string, is *issues) any {
+	before := len(is.list)
+	out := r.inner.check(v, p, is)
+	if len(is.list) == before {
+		if fp, msg := r.fn(out); msg != "" {
+			is.add(joinPath(p, fp), "%s", msg)
+		}
+	}
+	return out
+}

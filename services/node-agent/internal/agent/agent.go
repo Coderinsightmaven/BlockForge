@@ -29,6 +29,7 @@ import (
 	"github.com/blockforge/node-agent/internal/logs"
 	"github.com/blockforge/node-agent/internal/metrics"
 	"github.com/blockforge/node-agent/internal/protocol"
+	"github.com/blockforge/node-agent/internal/sftpd"
 	"github.com/blockforge/node-agent/internal/transport"
 	"github.com/blockforge/node-agent/internal/version"
 	"github.com/blockforge/node-agent/internal/workload"
@@ -36,7 +37,8 @@ import (
 
 // Capabilities advertised in hello.
 var Capabilities = []string{"docker", "jvm-probe", "slp", "fs.sandbox", "fs.extract", "fs.transfer",
-	"artifact.fetch", "logs", "console", "restart-policy", "credentials.rotate.staged"}
+	"artifact.fetch", "logs", "console", "restart-policy", "credentials.rotate.staged",
+	"egg-runtime", "workload.install", "artifact-cache", "node.ports", "fs.copy", "fs.compress", "fs.chmod", "fs.find", "sftp"}
 
 // Agent is a running node agent.
 type Agent struct {
@@ -63,6 +65,8 @@ type Agent struct {
 	facts     *facts.Collector
 	host      *metrics.HostSampler
 	wl        *metrics.WorkloadSampler
+	sftp      *sftpd.Server
+	sftpErr   string
 
 	approved  atomic.Bool
 	metricsMs atomic.Int64
@@ -261,7 +265,7 @@ func (a *Agent) Setup(ctx context.Context) error {
 		if err != nil {
 			return
 		}
-		a.outbox.Push(transport.Item{Class: transport.Logs, Kind: protocol.FrameLogs, Data: b, WorkloadID: f.WorkloadID, Lines: len(f.Lines)})
+		a.outbox.Push(transport.Item{Class: transport.Logs, Kind: protocol.FrameLogs, Data: b, WorkloadID: logs.StreamKey(f.WorkloadID, f.Source), Lines: len(f.Lines)})
 	})
 	a.outbox.OnLogsDropped = a.logs.AddDropped
 	if a.driver, err = workload.NewDriver(workload.Options{
@@ -271,12 +275,35 @@ func (a *Agent) Setup(ctx context.Context) error {
 		return fmt.Errorf("docker client: %w", err)
 	}
 	a.fetcher = &artifact.Fetcher{Hosts: config.NewHostAllowlist(a.cfg.DownloadHostAllowlist), Transport: a.FetcherTransport}
+	if a.fetcher.Cache, err = artifact.NewCache(filepath.Join(a.cfg.DataRoot, "cache", "artifacts"), a.cfg.ArtifactCacheMaxBytes); err != nil {
+		a.log.Warn("artifact cache unavailable; downloads will not be cached", "err", err)
+		a.fetcher.Cache = nil
+	}
+	if a.cfg.SFTP.On() {
+		a.sftp, err = sftpd.New(sftpd.Options{
+			Listen: a.cfg.SFTP.Listen, HostKeyPath: filepath.Join(a.configDir, config.SftpHostKeyFile),
+			Sandbox: a.sandbox, Emit: a.emitEvent, Logger: a.log,
+			Auth: &sftpd.HTTPAuthenticator{Client: a.http, URL: config.Endpoint(a.cpURL, "/agent/v1/sftp/auth"), Header: a.currentAuth},
+		})
+		if err != nil {
+			return fmt.Errorf("sftp: %w", err)
+		}
+		if err := a.sftp.Listen(); err != nil {
+			// Not fatal: the agent keeps managing workloads; facts report sftp: null.
+			a.log.Error("sftp server could not listen; SFTP disabled", "listen", a.cfg.SFTP.Listen, "err", err)
+			a.sftpErr = err.Error()
+			a.sftp = nil
+		}
+	}
 	a.transfers = &artifact.Transfers{
 		Client: a.http,
 		URL:    func(id string) string { return config.Endpoint(a.cpURL, "/agent/v1/transfers/"+id) },
 		Auth:   a.currentAuth,
 	}
 	a.facts = &facts.Collector{DataRoot: a.cfg.DataRoot, ExcludeIfaces: a.cfg.NetIfaceExclude, Docker: a.driver.Client()}
+	if a.sftp != nil {
+		a.facts.SFTP = &protocol.SftpFact{Port: a.sftp.Port(), HostKeyFingerprint: a.sftp.Fingerprint()}
+	}
 	a.host = metrics.NewHostSampler(ctx, a.cfg.DataRoot, a.cfg.NetIfaceExclude)
 	a.wl = metrics.NewWorkloadSampler(a.driver, a.sandbox, a.log)
 
@@ -314,6 +341,16 @@ func (a *Agent) Run(ctx context.Context) error {
 	start(a.driver.Run)
 	start(a.exec.Janitor)
 	start(a.metricsLoop)
+	if a.sftp != nil {
+		start(func(ctx context.Context) {
+			if err := a.sftp.Serve(ctx); err != nil {
+				a.log.Error("sftp server stopped", "err", err)
+			}
+		})
+	}
+	if a.sftpErr != "" {
+		a.emitEvent(protocol.EventAgentWarning, protocol.AgentWarningEvent{Code: "SFTP_UNAVAILABLE", Message: "SFTP server could not start: " + a.sftpErr})
+	}
 	a.wl.RunBackground(ctx)
 	err := a.client.Run(ctx)
 	a.exec.Wait(10 * time.Second)
@@ -360,6 +397,17 @@ func commandTimeout(c *Command) time.Duration {
 		return time.Duration(p.TimeoutMs)*time.Millisecond + 5*time.Second
 	case *protocol.WorkloadStopPayload:
 		return time.Duration(p.TimeoutMs)*time.Millisecond + 90*time.Second
+	case *protocol.WorkloadInstallPayload:
+		// script timeout + image pull + ownership fix-up
+		return time.Duration(p.TimeoutMs)*time.Millisecond + 20*time.Minute
+	}
+	switch c.Type {
+	case protocol.CmdFsCompress, protocol.CmdFsCopy:
+		return time.Hour
+	case protocol.CmdFsFind, protocol.CmdFsChmod:
+		return 2 * time.Minute
+	case protocol.CmdNodePorts:
+		return 30 * time.Second
 	}
 	switch c.Type {
 	case protocol.CmdWorkloadEnsure, protocol.CmdFsExtract, protocol.CmdArtifactFetch:

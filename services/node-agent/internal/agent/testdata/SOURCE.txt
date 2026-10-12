@@ -1,0 +1,4 @@
+Egg fixtures copied verbatim from https://github.com/pterodactyl/panel (MIT), branch 1.0-develop @ 9b97ae113e05:
+  database/Seeders/eggs/minecraft/egg-vanilla-minecraft.json
+  database/Seeders/eggs/voice-servers/egg-teamspeak3-server.json
+Used only by the egg end-to-end integration test (paper/egg_integration_test.go).

@@ -18,6 +18,6 @@ exec docker run --rm --network host \
   -v bf-gomod:/go/pkg/mod -v bf-gocache:/root/.cache/go-build \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$IT_ROOT:$IT_ROOT" \
-  -e BF_IT_DATA_ROOT="$IT_ROOT" -e BF_IT_PAPER -e BF_IT_PAPER_VERSION -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=local \
+  -e BF_IT_DATA_ROOT="$IT_ROOT" -e BF_IT_PAPER -e BF_IT_PAPER_VERSION -e BF_IT_EGG -e GOFLAGS=-buildvcs=false -e GOTOOLCHAIN=local \
   -w /repo/services/node-agent \
   "$GO_IMAGE" go test "${args[@]}"

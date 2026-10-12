@@ -9,6 +9,12 @@ import (
 // Command types (AGENT_COMMANDS keys in commands.ts).
 const (
 	CmdNodeFacts         = "node.facts"
+	CmdNodePorts         = "node.ports"
+	CmdWorkloadInstall   = "workload.install"
+	CmdFsCopy            = "fs.copy"
+	CmdFsCompress        = "fs.compress"
+	CmdFsChmod           = "fs.chmod"
+	CmdFsFind            = "fs.find"
 	CmdNodeProbe         = "node.probe"
 	CmdWorkloadEnsure    = "workload.ensure"
 	CmdWorkloadStart     = "workload.start"
@@ -63,19 +69,35 @@ type RestartPolicy struct {
 	BackoffMs  int64  `json:"backoffMs"`
 }
 
+// WorkloadStop is the stop action: a console command or a signal (workload.ts WorkloadStop).
+type WorkloadStop struct {
+	Type    string `json:"type"`
+	Command string `json:"command,omitempty"`
+	Signal  string `json:"signal,omitempty"`
+}
+
+// Entrypoint modes.
+const (
+	EntrypointArgv  = "argv"
+	EntrypointImage = "image"
+)
+
 // WorkloadSpec is the payload of workload.ensure (workload.ts WorkloadSpec).
 type WorkloadSpec struct {
 	WorkloadID         string            `json:"workloadId"`
 	Kind               string            `json:"kind"`
 	Image              string            `json:"image"`
+	Entrypoint         string            `json:"entrypoint"`
 	Command            []string          `json:"command"`
 	Env                map[string]string `json:"env"`
+	DataMountPath      string            `json:"dataMountPath"`
+	ReadOnlyRootfs     bool              `json:"readOnlyRootfs"`
 	MemoryLimitBytes   int64             `json:"memoryLimitBytes"`
 	CPULimitMillicores *int64            `json:"cpuLimitMillicores"`
 	PidsLimit          int64             `json:"pidsLimit"`
 	Ports              []PortBinding     `json:"ports"`
 	Networks           []WorkloadNetwork `json:"networks"`
-	StopCommand        *string           `json:"stopCommand"`
+	Stop               *WorkloadStop     `json:"stop"`
 	StopTimeoutMs      int64             `json:"stopTimeoutMs"`
 	RestartPolicy      RestartPolicy     `json:"restartPolicy"`
 	JvmProbe           bool              `json:"jvmProbe"`
@@ -84,6 +106,55 @@ type WorkloadSpec struct {
 
 type WorkloadRef struct {
 	WorkloadID string `json:"workloadId"`
+}
+
+// WorkloadInstallPayload is the payload of workload.install.
+type WorkloadInstallPayload struct {
+	WorkloadID         string            `json:"workloadId"`
+	Image              string            `json:"image"`
+	Entrypoint         string            `json:"entrypoint"`
+	Script             string            `json:"script"`
+	Env                map[string]string `json:"env"`
+	MemoryLimitBytes   int64             `json:"memoryLimitBytes"`
+	CPULimitMillicores *int64            `json:"cpuLimitMillicores"`
+	TimeoutMs          int64             `json:"timeoutMs"`
+}
+
+// WorkloadInstallResult is the result of workload.install.
+type WorkloadInstallResult struct {
+	ExitCode   int      `json:"exitCode"`
+	DurationMs int64    `json:"durationMs"`
+	TimedOut   bool     `json:"timedOut"`
+	LogTail    []string `json:"logTail"`
+}
+
+type FsCompressPayload struct {
+	WorkloadID    string   `json:"workloadId"`
+	Root          string   `json:"root"`
+	Paths         []string `json:"paths"`
+	Format        string   `json:"format"`
+	DestPath      string   `json:"destPath,omitempty"`
+	MaxTotalBytes int64    `json:"maxTotalBytes"`
+}
+
+type FsChmodPayload struct {
+	WorkloadID string `json:"workloadId"`
+	Path       string `json:"path"`
+	Mode       uint32 `json:"mode"`
+}
+
+type FsFindPayload struct {
+	WorkloadID string `json:"workloadId"`
+	Path       string `json:"path"`
+	Query      string `json:"query"`
+	MaxResults int    `json:"maxResults"`
+}
+
+// ArtifactResult is the result of artifact.fetch and fs.transfer.*.
+type ArtifactResult struct {
+	Bytes  int64  `json:"bytes"`
+	Sha256 string `json:"sha256"`
+	Cached bool   `json:"cached"`
 }
 
 type WorkloadStopPayload struct {
@@ -205,6 +276,7 @@ type ArtifactFetchPayload struct {
 	DestPath   string    `json:"destPath"`
 	Checksum   *Checksum `json:"checksum"`
 	MaxBytes   int64     `json:"maxBytes"`
+	Cache      bool      `json:"cache"`
 }
 
 // CredentialsRotateResult is the result of credentials.rotate (§3.1).
@@ -223,7 +295,7 @@ const (
 	reIPv6 = `^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$`
 	// ReImageRef is the image reference shape check from workload.ts (authorisation is the allowlist).
 	ReImageRef = `^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$`
-	ReEnvKey   = `^[A-Z][A-Z0-9_]{0,63}$`
+	ReEnvKey   = `^[A-Za-z_][A-Za-z0-9_]{0,127}$`
 )
 
 var (
@@ -306,23 +378,43 @@ var restartPolicySchema = Obj(
 )
 
 // WorkloadSpecSchema mirrors WorkloadSpec in workload.ts.
-var WorkloadSpecSchema = Obj(
+var workloadStopSchema = Union("type", map[string]*ObjectSchema{
+	"command": Obj(F("type", Str()), F("command", Str().Min(1).Max(256).Regex(`^[^\x00\r\n]*$`))),
+	"signal":  Obj(F("type", Str()), F("signal", Str().Enum("SIGINT", "SIGTERM", "SIGQUIT", "SIGKILL"))),
+})
+
+var envSchema = Default(Record(Str().Regex(ReEnvKey), Str().Max(16*1024)), strEmptyMap)
+
+// isValidWorkloadSpec from workload.ts: "argv" workloads need a command.
+func isValidWorkloadSpec(v any) (string, string) {
+	m, _ := v.(map[string]any)
+	cmd, _ := m["command"].([]any)
+	if m["entrypoint"] == EntrypointArgv && len(cmd) == 0 {
+		return "command", `required when entrypoint is "argv"`
+	}
+	return "", ""
+}
+
+var WorkloadSpecSchema = RefineObj(Obj(
 	F("workloadId", uuidSchema),
-	F("kind", Str().Enum("minecraft", "velocity")),
+	F("kind", Str().Enum("minecraft", "velocity", "generic")),
 	F("image", Str().Max(255).Regex(ReImageRef)),
-	F("command", Arr(argSchema, 1, 256)),
-	F("env", Default(Record(Str().Regex(ReEnvKey), Str().Max(4096)), strEmptyMap)),
+	F("entrypoint", Default(Str().Enum(EntrypointArgv, EntrypointImage), constAny(EntrypointArgv))),
+	F("command", Arr(argSchema, -1, 256)),
+	F("env", envSchema),
+	F("dataMountPath", Default(Str().Enum("/data", "/home/container"), constAny("/data"))),
+	F("readOnlyRootfs", Default(Bool(), constAny(true))),
 	F("memoryLimitBytes", bytesSchema.Min(128*1024*1024)),
 	F("cpuLimitMillicores", Nullable(Int().Min(100).Max(1_024_000))),
 	F("pidsLimit", Default(Int().Min(64).Max(65536), constAny(int64(4096)))),
 	F("ports", Default(Arr(portBindingSchema, -1, 16), emptyArr)),
 	F("networks", Default(Arr(workloadNetworkSchema, -1, 8), emptyArr)),
-	F("stopCommand", Nullable(Str().Enum("stop", "end", "shutdown"))),
+	F("stop", Nullable(workloadStopSchema)),
 	F("stopTimeoutMs", Default(Int().Min(1000).Max(600_000), constAny(int64(60_000)))),
 	F("restartPolicy", restartPolicySchema),
 	F("jvmProbe", Default(Bool(), constAny(true))),
 	F("labels", Default(Record(Str().Regex(`^[a-z0-9.\-/]{1,128}$`), Str().Max(256)), strEmptyMap)),
-)
+), isValidWorkloadSpec)
 
 var checksumSchema = Obj(
 	F("algorithm", Str().Enum("sha1", "sha256", "sha512")),
@@ -340,6 +432,33 @@ type CommandDef struct {
 // Commands is the command catalogue known to this agent.
 var Commands = map[string]CommandDef{
 	CmdNodeFacts: {Schema: Obj(), New: func() any { return &EmptyPayload{} }},
+	CmdNodePorts: {Schema: Obj(), New: func() any { return &EmptyPayload{} }},
+	// Not Mutating: an install in flight answers another install/start with BUSY instead of queueing.
+	CmdWorkloadInstall: {Schema: workloadRef.Extend(
+		F("image", Str().Min(1).Max(255)),
+		F("entrypoint", Str().Enum("bash", "ash", "sh")),
+		F("script", Str().Max(64*1024)),
+		F("env", envSchema),
+		F("memoryLimitBytes", bytesSchema.Min(128*1024*1024)),
+		F("cpuLimitMillicores", Nullable(Int().Min(100))),
+		F("timeoutMs", Default(Int().Min(60_000).Max(3*3600_000), constAny(int64(30*60_000)))),
+	), New: func() any { return &WorkloadInstallPayload{} }},
+	CmdFsCopy: {Schema: workloadRef.Extend(F("path", mutableRelative)),
+		New: func() any { return &FsPathPayload{} }, Mutating: true},
+	CmdFsCompress: {Schema: workloadRef.Extend(
+		F("root", relativePath),
+		F("paths", Arr(mutableRelative, 1, 1000)),
+		F("format", Str().Enum("tar.gz", "zip")),
+		F("destPath", Optional(mutableRelative)),
+		F("maxTotalBytes", bytesSchema.Max(64*gib)),
+	), New: func() any { return &FsCompressPayload{} }, Mutating: true},
+	CmdFsChmod: {Schema: workloadRef.Extend(F("path", mutableRelative), F("mode", Int().Min(0).Max(0o777))),
+		New: func() any { return &FsChmodPayload{} }, Mutating: true},
+	CmdFsFind: {Schema: workloadRef.Extend(
+		F("path", relativePath),
+		F("query", Str().Min(1).Max(64)),
+		F("maxResults", Default(Int().Min(1).Max(500), constAny(int64(100)))),
+	), New: func() any { return &FsFindPayload{} }},
 	CmdNodeProbe: {Schema: Obj(
 		F("host", Str().Min(1).Max(253)),
 		F("port", portSchema),
@@ -404,6 +523,7 @@ var Commands = map[string]CommandDef{
 		F("destPath", mutableRelative),
 		F("checksum", Nullable(checksumSchema)),
 		F("maxBytes", bytesSchema.Max(2*gib)),
+		F("cache", Default(Bool(), constAny(true))),
 	), New: func() any { return &ArtifactFetchPayload{} }, Mutating: true},
 	CmdCredentialsRotate: {Schema: Obj(), New: func() any { return &EmptyPayload{} }},
 }
@@ -457,6 +577,14 @@ func WorkloadIDOf(p any) string {
 	case *FsTransferPullPayload:
 		return v.WorkloadID
 	case *ArtifactFetchPayload:
+		return v.WorkloadID
+	case *WorkloadInstallPayload:
+		return v.WorkloadID
+	case *FsCompressPayload:
+		return v.WorkloadID
+	case *FsChmodPayload:
+		return v.WorkloadID
+	case *FsFindPayload:
 		return v.WorkloadID
 	}
 	return ""

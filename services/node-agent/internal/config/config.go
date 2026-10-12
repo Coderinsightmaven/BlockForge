@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,10 +24,36 @@ const (
 	KeyFile     = "agent.key"
 	NextKeyFile = "agent.key.next"
 	JournalFile = "commands.journal"
+	// SftpHostKeyFile is the SFTP server's Ed25519 host key (OpenSSH PEM, 0600).
+	SftpHostKeyFile = "sftp_host_ed25519_key"
 )
 
-// DefaultImageAllowlist is applied when the config does not specify one.
-var DefaultImageAllowlist = []string{"eclipse-temurin:*"}
+// DefaultImageAllowlist is applied when the config does not specify one (agent-protocol.md §6):
+// Temurin for built-in Minecraft templates and the yolks/installers images community eggs use.
+var DefaultImageAllowlist = []string{
+	"eclipse-temurin:*",
+	"ghcr.io/pterodactyl/yolks:*",
+	"ghcr.io/pterodactyl/installers:*",
+	"ghcr.io/parkervcp/yolks:*",
+	"ghcr.io/parkervcp/installers:*",
+}
+
+// legacyDefaultImageAllowlist is what agents ≤ 0.1.0 wrote into agent.json at enrollment. A config
+// still holding exactly this list is treated as "defaults" and upgraded on load.
+var legacyDefaultImageAllowlist = []string{"eclipse-temurin:*"}
+
+// DefaultArtifactCacheMaxBytes caps <dataRoot>/cache/artifacts (LRU eviction above it).
+const DefaultArtifactCacheMaxBytes = 10 << 30
+
+// SFTPConfig configures the built-in SFTP server.
+type SFTPConfig struct {
+	// Enabled defaults to true when omitted.
+	Enabled *bool  `json:"enabled,omitempty"`
+	Listen  string `json:"listen,omitempty"`
+}
+
+// On reports whether the SFTP server should run.
+func (s SFTPConfig) On() bool { return s.Enabled == nil || *s.Enabled }
 
 // DefaultDownloadHosts is the artifact.fetch host allowlist default.
 var DefaultDownloadHosts = []string{
@@ -69,6 +96,9 @@ type Config struct {
 	HeartbeatIntervalMs   int64 `json:"heartbeatIntervalMs,omitempty"`
 	MetricsIntervalMs     int64 `json:"metricsIntervalMs,omitempty"`
 	MaxConcurrentCommands int   `json:"maxConcurrentCommands,omitempty"`
+
+	ArtifactCacheMaxBytes int64      `json:"artifactCacheMaxBytes,omitempty"`
+	SFTP                  SFTPConfig `json:"sftp"`
 }
 
 // DefaultConfigDir is the platform default config directory, overridable with BLOCKFORGE_CONFIG_DIR.
@@ -103,8 +133,14 @@ func (c *Config) ApplyDefaults() {
 	if c.DataRoot == "" {
 		c.DataRoot = DefaultDataRoot()
 	}
-	if len(c.ImageAllowlist) == 0 {
+	if len(c.ImageAllowlist) == 0 || equalStrings(c.ImageAllowlist, legacyDefaultImageAllowlist) {
 		c.ImageAllowlist = append([]string(nil), DefaultImageAllowlist...)
+	}
+	if c.ArtifactCacheMaxBytes <= 0 {
+		c.ArtifactCacheMaxBytes = DefaultArtifactCacheMaxBytes
+	}
+	if c.SFTP.Listen == "" {
+		c.SFTP.Listen = "0.0.0.0:2022"
 	}
 	if len(c.DownloadHostAllowlist) == 0 {
 		c.DownloadHostAllowlist = append([]string(nil), DefaultDownloadHosts...)
@@ -143,7 +179,24 @@ func (c *Config) Validate() error {
 	if _, err := NewImageAllowlist(c.ImageAllowlist); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	if c.SFTP.On() {
+		if _, port, err := net.SplitHostPort(c.SFTP.Listen); err != nil || port == "" {
+			return fmt.Errorf("config: sftp.listen %q must be host:port", c.SFTP.Listen)
+		}
+	}
 	return nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Load reads <dir>/agent.json, applies defaults and validates it.
@@ -157,6 +210,18 @@ func Load(dir string) (*Config, error) {
 		return nil, fmt.Errorf("parse %s: %w", ConfigFile, err)
 	}
 	c.ApplyDefaults()
+	// Deployment overrides (compose files): not persisted.
+	if v := os.Getenv("BLOCKFORGE_SFTP_LISTEN"); v != "" {
+		c.SFTP.Listen = v
+	}
+	switch strings.ToLower(os.Getenv("BLOCKFORGE_SFTP_ENABLED")) {
+	case "false", "0", "no", "off":
+		off := false
+		c.SFTP.Enabled = &off
+	case "true", "1", "yes", "on":
+		on := true
+		c.SFTP.Enabled = &on
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +90,8 @@ func TestCommandFixtures(t *testing.T) {
 		"cmd-reject-root-delete.json":         "invalid-payload",
 		"cmd-reject-reversed-timestamps.json": "lifetime",
 		"cmd-credentials-rotate.json":         "ok",
+		"cmd-workload-ensure-egg.json":        "ok",
+		"cmd-workload-install.json":           "ok",
 	}
 	for file, want := range cases {
 		t.Run(file, func(t *testing.T) {
@@ -126,7 +129,7 @@ func TestPayloadDefaultsApplied(t *testing.T) {
 	}
 	spec := p.(*protocol.WorkloadSpec)
 	if spec.Image != "eclipse-temurin:21-jre" || spec.RestartPolicy.MaxRetries != 3 || !spec.JvmProbe ||
-		*spec.CPULimitMillicores != 2000 || *spec.StopCommand != "stop" || spec.Networks[0].Aliases[0] != "lobby" {
+		*spec.CPULimitMillicores != 2000 || spec.Stop == nil || spec.Stop.Type != "command" || spec.Stop.Command != "stop" || spec.Entrypoint != "argv" || spec.DataMountPath != "/data" || !spec.ReadOnlyRootfs || spec.Networks[0].Aliases[0] != "lobby" {
 		t.Fatalf("unexpected spec %+v", spec)
 	}
 
@@ -333,5 +336,39 @@ func TestCommandTimeWindow(t *testing.T) {
 	}
 	if r := protocol.CheckCommandWindow(0, 1<<53-1, -1<<62); r != protocol.RejectFuture { // no overflow in issuedAt-now
 		t.Fatalf("negative clock: %q", r)
+	}
+}
+
+func decodeFixturePayload(t *testing.T, file string) any {
+	t.Helper()
+	k := keys(t)
+	var f protocol.CommandFrame
+	if err := json.Unmarshal(load(t, file), &f); err != nil {
+		t.Fatal(err)
+	}
+	cpKey, _ := auth.ParsePublicKeyB64(k.ControlPlane.PublicKey)
+	body, reason := protocol.VerifyCommand(f, cpKey, k.NodeID, time.UnixMilli(k.Now))
+	if reason != "" {
+		t.Fatal(reason)
+	}
+	p, _, perr := protocol.ParsePayload(body.Type, body.Payload)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	return p
+}
+
+func TestEggAndInstallFixturesDecode(t *testing.T) {
+	spec := decodeFixturePayload(t, "cmd-workload-ensure-egg.json").(*protocol.WorkloadSpec)
+	if spec.Kind != "generic" || spec.Entrypoint != protocol.EntrypointImage || len(spec.Command) != 0 ||
+		spec.DataMountPath != "/home/container" || !spec.ReadOnlyRootfs || spec.Stop == nil ||
+		spec.Stop.Type != "signal" || spec.Stop.Signal != "SIGINT" || spec.Env["SAVE_NAME"] != "gamesave" ||
+		len(spec.Ports) != 2 || spec.Ports[1].Protocol != "udp" || spec.JvmProbe {
+		t.Fatalf("egg spec %+v", spec)
+	}
+	in := decodeFixturePayload(t, "cmd-workload-install.json").(*protocol.WorkloadInstallPayload)
+	if in.Image != "ghcr.io/pterodactyl/installers:debian" || in.Entrypoint != "bash" || in.TimeoutMs != 1_800_000 ||
+		in.CPULimitMillicores != nil || in.MemoryLimitBytes != 1<<30 || !strings.Contains(in.Script, "marker.txt") {
+		t.Fatalf("install %+v", in)
 	}
 }

@@ -87,6 +87,14 @@ type NodeFacts struct {
 	Filesystems      []FilesystemFact       `json:"filesystems"`
 	ContainerRuntime *ContainerRuntimeFact  `json:"containerRuntime"`
 	JavaRuntimes     []JavaRuntimeFact      `json:"javaRuntimes"`
+	// Sftp is omitted (= null by schema default) when the SFTP service is disabled.
+	Sftp *SftpFact `json:"sftp,omitempty"`
+}
+
+// SftpFact describes the agent's SFTP service.
+type SftpFact struct {
+	Port               int    `json:"port"`
+	HostKeyFingerprint string `json:"hostKeyFingerprint"`
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +305,7 @@ const (
 	EventWorkloadState = "workload.state"
 	EventWorkloadOOM   = "workload.oom"
 	EventAgentWarning  = "agent.warning"
+	EventSftpActivity  = "sftp.activity"
 )
 
 type CommandFrame struct {
@@ -380,11 +389,55 @@ type EventFrame struct {
 	Data  json.RawMessage `json:"data"`
 }
 
+// Log sources.
+const (
+	LogSourceWorkload = "workload"
+	LogSourceInstall  = "install"
+)
+
 type LogsFrame struct {
-	T          string    `json:"t"`
-	WorkloadID string    `json:"workloadId"`
-	Lines      []LogLine `json:"lines"`
-	Dropped    *int64    `json:"dropped,omitempty"`
+	T          string `json:"t"`
+	WorkloadID string `json:"workloadId"`
+	// Source is omitted for workload output (schema default "workload").
+	Source  string    `json:"source,omitempty"`
+	Lines   []LogLine `json:"lines"`
+	Dropped *int64    `json:"dropped,omitempty"`
+}
+
+// SftpAction is one mutation in an sftp.activity event.
+type SftpAction struct {
+	Action string `json:"action"`
+	Path   string `json:"path"`
+	To     string `json:"to,omitempty"`
+	TS     int64  `json:"ts"`
+}
+
+// SftpActivityEvent is the payload of `sftp.activity` events.
+type SftpActivityEvent struct {
+	WorkloadID string       `json:"workloadId"`
+	UserID     string       `json:"userId"`
+	SessionID  string       `json:"sessionId"`
+	ClientIP   string       `json:"clientIp"`
+	Actions    []SftpAction `json:"actions"`
+}
+
+// SftpAuthRequest is the body of POST /agent/v1/sftp/auth.
+type SftpAuthRequest struct {
+	Method    string `json:"method"`
+	Username  string `json:"username"`
+	Password  string `json:"password,omitempty"`
+	PublicKey string `json:"publicKey,omitempty"`
+	ClientIP  string `json:"clientIp"`
+	SessionID string `json:"sessionId"`
+}
+
+// SftpAuthResponse is the 200 response of POST /agent/v1/sftp/auth.
+type SftpAuthResponse struct {
+	WorkloadID  string   `json:"workloadId"`
+	UserID      string   `json:"userId"`
+	Permissions []string `json:"permissions"`
+	Denylist    []string `json:"denylist"`
+	ExpiresAt   int64    `json:"expiresAt"`
 }
 
 // WorkloadOOMEvent is the payload of `workload.oom` events.

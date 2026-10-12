@@ -133,3 +133,46 @@ func TestManagerRateLimitAndBatching(t *testing.T) {
 		t.Fatal("unknown workload reported buffered lines")
 	}
 }
+
+func TestInstallSourceIsSeparate(t *testing.T) {
+	var frames []protocol.LogsFrame
+	m := NewManager(func(f protocol.LogsFrame) { frames = append(frames, f) })
+	const id = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+	m.Ingest(id, protocol.LogLine{TS: 1, Stream: "stdout", Line: "server"})
+	m.IngestSource(id, protocol.LogSourceInstall, protocol.LogLine{TS: 2, Stream: "stdout", Line: "installing"})
+	m.Flush()
+	if len(frames) != 2 {
+		t.Fatalf("frames %+v", frames)
+	}
+	for _, f := range frames {
+		if f.WorkloadID != id {
+			t.Fatal("workload id")
+		}
+		if (f.Source == "install") != (f.Lines[0].Line == "installing") {
+			t.Fatalf("source mix-up %+v", f)
+		}
+		if f.Lines[0].Line == "server" && f.Source != "" {
+			t.Fatal("workload frames must omit source (schema default)")
+		}
+	}
+	if l, _ := m.Tail(id, 10, -1); len(l) != 1 || l[0].Line != "server" {
+		t.Fatalf("workload tail %+v", l)
+	}
+	if l, _ := m.TailSource(id, "install", 10, -1); len(l) != 1 || l[0].Line != "installing" {
+		t.Fatalf("install tail %+v", l)
+	}
+	m.AddDropped(StreamKey(id, "install"), 3)
+	frames = nil
+	m.Flush()
+	if len(frames) != 1 || frames[0].Source != "install" || *frames[0].Dropped != 3 {
+		t.Fatalf("dropped attribution %+v", frames)
+	}
+	m.ResetSource(id, "install")
+	if _, ok := m.TailSource(id, "install", 10, -1); ok {
+		t.Fatal("reset")
+	}
+	m.Forget(id)
+	if _, ok := m.Tail(id, 10, -1); ok {
+		t.Fatal("forget")
+	}
+}
