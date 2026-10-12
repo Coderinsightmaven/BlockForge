@@ -21,3 +21,20 @@
 | 14 | Low | Re-ban without a reason keeps the previous reason; Mojang profile lookup does not require the returned name to match the query | Fixed: `banPlayer`/`banIp` replace the whole ban record (old `reason` removed when none is given); `lookupMojangProfile` requires the returned name to equal the query case-insensitively (`INVALID_UPSTREAM_RESPONSE` otherwise). Tests: `test/review-phase4b.test.ts` "#14 re-bans replace the reason; Mojang must return the requested name" |
 
 Test gaps called out: device-name jars, missing SHA-512, conflicting pins, unlisted alpha pins, installed jar vs pin, `version_id` fan-out, hash map not listing the hash, non-primary jar selection, `loaderMatch: "none"`, newline in plugin names, `bundledJars` traversal, `[time] [thread/INFO] [Plugin]: Saved the game`.
+
+## Round 2 (Grok grok-4.7, 2026-10-12, scope f97f67b + dddb84b)
+Verdicts on round 1: 1 FIXED, 2 PARTIAL (see R2-3), 3 FIXED, 4 FIXED, 5 FIXED (see R2-2), 6 PARTIAL (see R2-1, R2-8),
+7–14 FIXED. Reviewer ran 360 tests + an 18-case probe. `jarCompatibility` matches `ExtensionCompatibility`.
+
+| # | Sev | Finding | Resolution |
+|---|-----|---------|------------|
+| R2-1 | Major | Default `ModrinthRateLimiter` refuses work while quota remains: with `remaining ≤ 10` the spacing `ceil(timeLeft/(remaining+1))` exceeds `maxWaitMs` (2 s) and `acquire` throws `RATE_LIMITED` without sending (executed: remaining=10, reset=60 → 5455 ms → 429); concurrent `acquire`s are not serialised (decrement after the await) | Open |
+| R2-2 | Major | An installed copy whose version id equals the pin short-circuits (`DEPENDENCY_ALREADY_INSTALLED`) before the unsafe-path check and the SHA-512 comparison (`plugins/CON.jar` or a different hash → pinned jar never downloaded) | Open |
+| R2-3 | Medium | Join/leave/login/disconnect/readiness still trust any `minecraft/<Class>` logger and a loose name pattern (`[minecraft/EvilClass]: Steve joined the game` → join; `… Done (1.0s)!` → readiness) | Open |
+| R2-4 | Medium | `toContractInstallPlan` slices `replaces` to the contract's 16 while the plan stays installable (17th old jar never deleted) | Open |
+| R2-5 | Medium | Warnings sliced to 512 before errors: 512 infos + a trailing `NO_SHA512` error → the API shows no reason for `installable: false` | Open |
+| R2-6 | Medium | `listCompatibleVersions` offers unlisted / status-less / prerelease versions the installer rejects | Open |
+| R2-7 | Medium | Op level: non-integer → 4 without an issue; out-of-range clamp issue lost after 64 list errors; file-sourced names/reasons/sources with control characters pass to the overview | Open |
+| R2-8 | Low | Budget holes (`getVersions` of installed ids, incompatible version-id fetches before `maxFiles`); explicit `snapshot` root installed and mapped to `alpha` on the wire | Open |
+| R2-9 | Low | Unsafe installed path reported as update problem `UNSAFE_FILENAME` (wrong file blamed) — needs `UNSAFE_INSTALLED_PATH` in `ExtensionUpdateProblem` | Open |
+| R2-10 | Low | `list` output > 1000 names drops entries without counting them as skipped; stored `banned-ips` rows not canonicalised on parse; `isSafeNestedJarPath` allows device names (`CON.jar`) | Open |
