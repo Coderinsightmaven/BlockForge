@@ -1,10 +1,12 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SERVER_OWNER_PERMISSIONS } from "@blockforge/contracts";
 import type { InfiniteData } from "@tanstack/react-query";
-import type { Page, Server } from "@blockforge/contracts";
+import type { Job, Page, Server } from "@blockforge/contracts";
 import { SERVER_ID, makeNode, makeServer } from "@/test/fixtures";
+import { nodeAllocationsQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
+import { summarizeNodeHealth } from "@/components/shell/node-health";
 import {
   applyServerEvent,
   applyServerSample,
@@ -13,12 +15,16 @@ import {
 } from "@/lib/server-cache";
 import { cpuView, memoryView, playersView } from "@/lib/server-metrics";
 import { nodeAddresses, parsePortInput } from "./nodes/node-allocations";
+import { warningMeta } from "./nodes/node-warnings";
+import { waitForJob } from "./servers/files/archive-result";
 import { mergeJobLogs } from "./servers/server-common";
 import { allocationAddress, canAddAllocation } from "./servers/tabs/network-tab";
 import { buildPatch } from "./servers/tabs/settings-tab";
 import { checkPublicKey } from "./settings/ssh-keys";
 import { hasBlockingIssues, parseEggJson } from "./templates/templates-page";
 import { usernameFromEmail } from "./users/user-dialogs";
+
+const NODE = "22222222-2222-4222-8222-222222222222";
 
 const sample = (ts: number, extra: Record<string, unknown> = {}) => ({
   workloadId: SERVER_ID,
@@ -217,5 +223,55 @@ describe("account", () => {
     expect(usernameFromEmail("Jane.Doe+mc@example.com")).toBe("jane-doe-mc");
     expect(usernameFromEmail("_x@example.com")).toBe("");
     expect(usernameFromEmail("bob@example.com")).toBe("bob");
+  });
+});
+
+describe("node agent warnings", () => {
+  const warn = (code: string) => ({ code, message: `${code} message <b>x</b>`, at: 1_700_000_000_000 });
+  it("make the health indicator warn", () => {
+    const s = summarizeNodeHealth([makeNode({ warnings: [warn("CLOCK_SKEW")] }), makeNode()]);
+    expect(s).toMatchObject({ withWarnings: 1, tone: "warning" });
+    expect(summarizeNodeHealth([makeNode()]).tone).toBe("success");
+    // A down node still wins.
+    expect(
+      summarizeNodeHealth([makeNode({ connection: "unreachable", warnings: [warn("SFTP_UNAVAILABLE")] })])
+        .tone,
+    ).toBe("danger");
+  });
+  it("have labels for the documented codes and fall back to the code", () => {
+    for (const code of ["CLOCK_SKEW", "SFTP_UNAVAILABLE", "INSTALL_OWNERSHIP", "WORKLOAD_RESTART_LIMIT"]) {
+      expect(warningMeta(code).hint).toBeTruthy();
+    }
+    expect(warningMeta("NEW_CODE")).toEqual({ label: "NEW_CODE", hint: null });
+  });
+});
+
+describe("allocation filters", () => {
+  it("ask the API for free=true / free=false", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
+      }),
+    );
+    const qc = new QueryClient();
+    for (const f of ["all", "free", "used"] as const)
+      await qc.fetchInfiniteQuery(nodeAllocationsQuery(NODE, f));
+    expect(urls[0]).not.toMatch(/free=/);
+    expect(urls[1]).toMatch(/free=true/);
+    expect(urls[2]).toMatch(/free=false/);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("archive jobs", () => {
+  it("are polled until they finish", async () => {
+    const states = ["queued", "running", "succeeded"] as const;
+    let i = 0;
+    const get = vi.fn(async () => ({ status: states[Math.min(i++, 2)] }) as unknown as Job);
+    await expect(waitForJob("j", { get, intervalMs: 1 })).resolves.toMatchObject({ status: "succeeded" });
+    expect(get).toHaveBeenCalledTimes(3);
   });
 });

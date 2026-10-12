@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
+import { isEulaPrompt } from "../eula";
 import { ConsoleLineView } from "./console-line";
 import { ConsoleStore } from "./console-store";
 import type { ConsoleLine, ConsoleStream } from "./console-store";
@@ -83,7 +84,18 @@ function downloadText(fileName: string, text: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function ConsolePanel({ server, className }: { server: Server; className?: string }) {
+export function ConsolePanel({
+  server,
+  className,
+  onEulaPrompt,
+}: {
+  server: Server;
+  className?: string;
+  /** Called when Minecraft prints its EULA refusal (history or live). */
+  onEulaPrompt?: () => void;
+}) {
+  const eulaRef = useRef(onEulaPrompt);
+  eulaRef.current = onEulaPrompt;
   const client = useRealtimeClient();
   const status = useRealtimeStatus();
   const [historyError, setHistoryError] = useState<unknown>(null);
@@ -98,6 +110,7 @@ export function ConsolePanel({ server, className }: { server: Server; className?
       .then((h) => {
         setHistoryError(null);
         store.loadHistory(h);
+        if (h.lines.some((l) => isEulaPrompt(l.line))) eulaRef.current?.();
       })
       .catch((err: unknown) => {
         if ((err as { name?: string }).name !== "AbortError") setHistoryError(err);
@@ -113,7 +126,9 @@ export function ConsolePanel({ server, className }: { server: Server; className?
   useRealtimeTopic(`console:${server.id}`, (event) => {
     if (event.type !== "console.lines") return;
     const parsed = REALTIME_EVENT_PAYLOADS["console.lines"].safeParse(event.data);
-    if (parsed.success && parsed.data.serverId === server.id) store.push(parsed.data);
+    if (!parsed.success || parsed.data.serverId !== server.id) return;
+    store.push(parsed.data);
+    if (parsed.data.lines.some((l) => isEulaPrompt(l.line))) eulaRef.current?.();
   });
 
   useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);

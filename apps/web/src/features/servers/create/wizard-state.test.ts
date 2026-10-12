@@ -3,6 +3,7 @@ import type { TemplateSummary } from "@blockforge/contracts";
 import { NODE_ID, TEMPLATE_ID } from "@/test/fixtures";
 import {
   buildCreateBody,
+  eggNeedsEula,
   firstInvalidStep,
   initialWizardState,
   parseJvmArgs,
@@ -222,6 +223,7 @@ describe("buildCreateBody / validateWizard", () => {
     expect(body.egg).toEqual({
       dockerImage: "ghcr.io/parkervcp/yolks:debian",
       variables: { MAX_PLAYERS: "16" },
+      acceptEula: false,
     });
     expect(validateWizard(s, eggTemplate).body).not.toBeNull();
   });
@@ -251,5 +253,63 @@ describe("buildCreateBody / validateWizard", () => {
     expect(stepForPath("egg.variables.MAX_PLAYERS")).toBe("configure");
     expect(stepForPath("allocation.allocationId")).toBe("placement");
     expect(stepForPath("memoryLimitBytes")).toBe("resources");
+  });
+});
+
+describe("eggs with the eula feature", () => {
+  const vanillaEgg: TemplateSummary = {
+    ...eggTemplate,
+    id: "77777777-7777-4777-8777-777777777777",
+    key: "vanilla-minecraft",
+    name: "Vanilla Minecraft",
+    game: "minecraft-java",
+    features: ["eula", "java_version"],
+    variables: [],
+  };
+  const base = () => ({
+    ...mcState(),
+    templateId: vanillaEgg.id,
+    dockerImage: "ghcr.io/parkervcp/yolks:debian",
+    acceptEula: false,
+  });
+
+  it("blocks creation until the EULA is accepted", () => {
+    expect(eggNeedsEula(vanillaEgg)).toBe(true);
+    expect(eggNeedsEula(eggTemplate)).toBe(false);
+    expect(eggNeedsEula(minecraftTemplate)).toBe(false); // built-ins use minecraft.acceptEula
+    expect(validateStep("configure", base(), vanillaEgg).acceptEula).toMatch(/EULA/);
+    expect(validateWizard(base(), vanillaEgg).body).toBeNull();
+  });
+
+  it("sends egg.acceptEula once accepted", () => {
+    const { body, errors } = validateWizard({ ...base(), acceptEula: true }, vanillaEgg);
+    expect(errors).toEqual({});
+    expect(body?.egg).toMatchObject({ acceptEula: true });
+    // Templates without the feature never send consent.
+    expect(buildCreateBody({ ...base(), acceptEula: true }, eggTemplate).egg?.acceptEula).toBe(false);
+  });
+});
+
+describe("administrators may set non-user-editable variables", () => {
+  const s = () => ({
+    ...mcState(),
+    templateId: eggTemplate.id,
+    dockerImage: "ghcr.io/parkervcp/yolks:debian",
+    variables: { MAX_PLAYERS: "16", VERSION: "" },
+  });
+  it("validates and sends them only for admins", () => {
+    expect(validateStep("configure", s(), eggTemplate)["var.VERSION"]).toBeUndefined();
+    expect(validateStep("configure", s(), eggTemplate, { admin: true })["var.VERSION"]).toMatch(/required/);
+    const adminBody = buildCreateBody(
+      { ...s(), variables: { MAX_PLAYERS: "16", VERSION: "1.4.4" } },
+      eggTemplate,
+      { admin: true },
+    );
+    expect(adminBody.egg?.variables).toEqual({ MAX_PLAYERS: "16", VERSION: "1.4.4" });
+    const userBody = buildCreateBody(
+      { ...s(), variables: { MAX_PLAYERS: "16", VERSION: "1.4.4" } },
+      eggTemplate,
+    );
+    expect(userBody.egg?.variables).toEqual({ MAX_PLAYERS: "16" });
   });
 });

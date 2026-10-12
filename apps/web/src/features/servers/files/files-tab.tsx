@@ -68,6 +68,7 @@ import {
   validateName,
   validateRelativePath,
 } from "./paths";
+import { reportArchiveResult } from "./archive-result";
 import { downloadFile, uploadFile } from "./upload";
 import type { UploadProgress } from "./upload";
 
@@ -228,25 +229,23 @@ export default function FilesTab({
   });
   const copy = useApiMutation({
     mutationFn: (p: string) => filesApi.copy(server.id, p),
-    success: "Copy created",
+    success: (r) => `Copied to ${baseName(r.path)}`,
     errorTitle: "Could not copy",
     onSuccess: () => refresh(),
   });
   const compress = useApiMutation({
     mutationFn: (b: { paths: string[]; format: "tar.gz" | "zip" }) =>
       filesApi.compress(server.id, { root: path, ...b }),
-    success: "Archive created",
     errorTitle: "Could not create the archive",
-    onSuccess: () => {
-      refresh();
+    onSuccess: (r) => {
       done();
+      reportArchiveResult(r, "Archive created", () => refresh());
     },
   });
   const decompress = useApiMutation({
     mutationFn: (p: string) => filesApi.decompress(server.id, { path: p, destination: path }),
-    success: "Archive extracted",
     errorTitle: "Could not extract",
-    onSuccess: () => refresh(),
+    onSuccess: (r) => reportArchiveResult(r, "Archive extracted", () => refresh()),
   });
   const chmod = useApiMutation({
     mutationFn: (b: { paths: string[]; mode: string }) =>

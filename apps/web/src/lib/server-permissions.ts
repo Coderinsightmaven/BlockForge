@@ -235,10 +235,11 @@ export function grantablePermissions(granterPermissions: readonly Permission[]):
 }
 
 /**
- * Normalise a subuser permission selection before sending it:
+ * Normalise a subuser permission selection before sending it. Matches the contract's
+ * granter-relative update rule — effective = (old ∖ granterHeld) ∪ (requested ∩ granterHeld):
  *  - only assignable permissions;
- *  - permissions the granter lacks are dropped unless the subuser already had them (the granter
- *    cannot add them, and silently removing them would be a surprise — they stay as they were);
+ *  - permissions the granter does not hold are sent back exactly as the subuser has them
+ *    (the granter can neither add nor remove them);
  *  - `servers.view` is always included.
  */
 export function normalizeGrant(

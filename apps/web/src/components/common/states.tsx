@@ -51,11 +51,21 @@ export function ErrorState({
   className?: string;
   compact?: boolean;
 }) {
-  if (isApiError(error) && error.code === "FORBIDDEN") {
+  // Permission, file-denylist and redaction refusals are access states, not failures to retry.
+  if (
+    isApiError(error) &&
+    (error.code === "FORBIDDEN" || error.code === "PATH_DENIED" || error.code === "REDACTED_CONTENT")
+  ) {
     return (
       <EmptyState
         icon={Lock}
-        title="You don't have access"
+        title={
+          error.code === "PATH_DENIED"
+            ? "Protected by the server's template"
+            : error.code === "REDACTED_CONTENT"
+              ? "This file contains secrets"
+              : "You don't have access"
+        }
         description={error.message}
         className={className}
         compact={compact}

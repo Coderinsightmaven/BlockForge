@@ -30,6 +30,7 @@ import { InfoTip } from "@/components/ui/tooltip";
 import { useEnrollmentDialog } from "./enrollment-dialog";
 import { EnrollmentTokens } from "./enrollment-tokens";
 import { dataFilesystem, fsUsedPct, memoryUsedPct } from "./node-utils";
+import { NodeWarningBadge } from "./node-warnings";
 
 export type NodesTab = "nodes" | "tokens";
 
@@ -127,7 +128,10 @@ function NodesTable({ nodes, q }: { nodes: Node[]; q: string }) {
                 <NodeStatusBadge status={n.status} />
               </TableCell>
               <TableCell>
-                <NodeConnectionBadge connection={n.connection} />
+                <div className="flex flex-col items-start gap-1">
+                  <NodeConnectionBadge connection={n.connection} />
+                  <NodeWarningBadge warnings={n.warnings} />
+                </div>
               </TableCell>
               <TableCell className="whitespace-nowrap">
                 {n.location ?? <span className="text-muted-foreground">—</span>}

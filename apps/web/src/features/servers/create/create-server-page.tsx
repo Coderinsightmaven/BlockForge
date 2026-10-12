@@ -16,6 +16,7 @@ import {
   buildsQuery,
   planQuery,
   softwareQuery,
+  templateQuery,
   templatesQuery,
   usersQuery,
   versionsQuery,
@@ -43,14 +44,16 @@ import {
   STEP_LABELS,
   WIZARD_STEPS,
   buildCreateBody,
+  eggNeedsEula,
   firstInvalidStep,
   initialWizardState,
   isBuiltinTemplate,
   slugify,
   validateStep,
   validateWizard,
+  variableEditable,
 } from "./wizard-state";
-import type { GameplayForm, WizardState, WizardStep } from "./wizard-state";
+import type { GameplayForm, WizardContext, WizardState, WizardStep } from "./wizard-state";
 
 type Set_ = (patch: Partial<WizardState>) => void;
 
@@ -142,6 +145,8 @@ function TemplateStep({
                         build: null,
                         dockerImage: t.dockerImages[0]?.image ?? null,
                         variables: {},
+                        // Consent is per template; never carry it over silently.
+                        acceptEula: s.templateId === t.id ? s.acceptEula : false,
                         memoryMiB: t.kind === "velocity" ? "1024" : t.kind === "minecraft" ? "4096" : "2048",
                       })
                     }
@@ -467,30 +472,50 @@ function MinecraftConfigure({
       ) : null}
 
       {game ? (
-        <div className="flex items-start gap-3 rounded-md border p-3">
-          <Checkbox
-            id="eula"
-            checked={s.acceptEula}
-            onCheckedChange={(c) => set({ acceptEula: c === true })}
-            className="mt-0.5"
-            aria-invalid={!!errors.acceptEula}
-          />
-          <div className="flex flex-col gap-0.5">
-            <Label htmlFor="eula" className="text-sm">
-              I accept the Minecraft End User License Agreement
-            </Label>
-            <a
-              href="https://aka.ms/MinecraftEULA"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-            >
-              Read the EULA <ExternalLink className="size-3" aria-hidden />
-            </a>
-            {errors.acceptEula ? <p className="text-xs text-danger">{errors.acceptEula}</p> : null}
-          </div>
-        </div>
+        <EulaCheckbox
+          checked={s.acceptEula}
+          onChange={(v) => set({ acceptEula: v })}
+          error={errors.acceptEula}
+        />
       ) : null}
+    </div>
+  );
+}
+
+/** The Mojang EULA acknowledgement, shared by the built-in template and `eula`-feature eggs. */
+export function EulaCheckbox({
+  checked,
+  onChange,
+  error,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  error?: string;
+}) {
+  const id = useId();
+  return (
+    <div className="flex items-start gap-3 rounded-md border p-3">
+      <Checkbox
+        id={id}
+        checked={checked}
+        onCheckedChange={(c) => onChange(c === true)}
+        className="mt-0.5"
+        aria-invalid={!!error}
+      />
+      <div className="flex flex-col gap-0.5">
+        <Label htmlFor={id} className="text-sm">
+          I accept the Minecraft End User License Agreement
+        </Label>
+        <a
+          href="https://aka.ms/MinecraftEULA"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+        >
+          Read the EULA <ExternalLink className="size-3" aria-hidden />
+        </a>
+        {error ? <p className="text-xs text-danger">{error}</p> : null}
+      </div>
     </div>
   );
 }
@@ -500,11 +525,13 @@ function EggConfigure({
   set,
   errors,
   template,
+  ctx,
 }: {
   s: WizardState;
   set: Set_;
   errors: Record<string, string>;
   template: TemplateSummary;
+  ctx: WizardContext;
 }) {
   const baseId = useId();
   const vars = [...template.variables].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -543,7 +570,7 @@ function EggConfigure({
                   rules={v.rules}
                   value={s.variables[v.envName] ?? v.defaultValue}
                   onChange={(val) => set({ variables: { ...s.variables, [v.envName]: val } })}
-                  disabled={!v.userEditable}
+                  disabled={!variableEditable(v, ctx)}
                   invalid={!!err}
                 />
                 {err ? <p className="text-xs text-danger">{err}</p> : null}
@@ -551,13 +578,24 @@ function EggConfigure({
                   <p className="text-xs whitespace-pre-line text-muted-foreground">{v.description}</p>
                 ) : null}
                 {!v.userEditable ? (
-                  <p className="text-[11px] text-muted-foreground">Fixed by the template.</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    {ctx.admin
+                      ? "Not user-editable — you can set it as an administrator."
+                      : "Fixed by the template."}
+                  </p>
                 ) : null}
               </div>
             );
           })}
         </div>
       )}
+      {eggNeedsEula(template) ? (
+        <EulaCheckbox
+          checked={s.acceptEula}
+          onChange={(v) => set({ acceptEula: v })}
+          error={errors.acceptEula ?? errors["egg.acceptEula"]}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1168,14 +1206,25 @@ export function CreateServerPage({ me }: { me: Me }) {
     setState((prev) => ({ ...prev, ...patch }));
     setErrors({});
   };
-  const template = templates.data?.find((t) => t.id === s.templateId) ?? null;
+  const ctx = useMemo<WizardContext>(() => ({ admin: canAny(me, "servers.admin") }), [me]);
+  const summary = templates.data?.find((t) => t.id === s.templateId) ?? null;
+  // Template summaries only list user-viewable variables; administrators who can read templates
+  // get the complete variable list so they can set every value (the API accepts it from them).
+  const detail = useQuery({
+    ...templateQuery(summary?.id ?? ""),
+    enabled: !!summary && summary.kind === "egg" && ctx.admin && hasGlobal(me, "templates.view"),
+  });
+  const template = useMemo(
+    () => (summary && detail.data ? { ...summary, variables: detail.data.variables } : summary),
+    [summary, detail.data],
+  );
   const idx = WIZARD_STEPS.indexOf(step);
 
-  const full = useMemo(() => validateWizard(s, template), [s, template]);
+  const full = useMemo(() => validateWizard(s, template, ctx), [s, template, ctx]);
   // One key per distinct request: retries of the same body are deduplicated by the API.
   const bodyKey = useMemo(
-    () => (template ? JSON.stringify(buildCreateBody(s, template)) : ""),
-    [s, template],
+    () => (template ? JSON.stringify(buildCreateBody(s, template, ctx)) : ""),
+    [s, template, ctx],
   );
   // A new key only when the request body changes; resubmitting the same body reuses it.
   const idempotencyKey = useMemo(() => (bodyKey ? newIdempotencyKey() : ""), [bodyKey]);
@@ -1206,7 +1255,7 @@ export function CreateServerPage({ me }: { me: Me }) {
     setStep(target);
   };
   const next = () => {
-    const e = validateStep(step, s, template);
+    const e = validateStep(step, s, template, ctx);
     if (Object.keys(e).length) {
       setErrors(e);
       return;
@@ -1288,7 +1337,7 @@ export function CreateServerPage({ me }: { me: Me }) {
                 advanced={advanced}
               />
             ) : (
-              <EggConfigure s={s} set={set} errors={stepErrors} template={template} />
+              <EggConfigure s={s} set={set} errors={stepErrors} template={template} ctx={ctx} />
             )
           ) : null}
           {step === "placement" && template ? (

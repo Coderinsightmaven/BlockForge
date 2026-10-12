@@ -3,7 +3,7 @@ import { isApiError } from "@/lib/api/errors";
 /*
  * Optimistic concurrency for the editor: every save sends the sha256 of the version the user
  * opened (`baseSha256`). If someone (or the server itself) changed the file meanwhile, the API
- * answers PRECONDITION_FAILED / CONFLICT and nothing is written; the user then chooses to
+ * answers CONFLICT (PRECONDITION_FAILED is accepted too) and nothing is written; the user then chooses to
  * reload theirs-on-disk, overwrite, or keep editing.
  */
 
@@ -30,12 +30,15 @@ export interface SaveRequest {
 
 export function classifySaveError(err: unknown): SaveOutcome {
   if (isApiError(err)) {
-    if (err.code === "PRECONDITION_FAILED" || err.code === "CONFLICT")
-      return { kind: "conflict", message: err.message };
-    if (err.code === "FORBIDDEN") {
-      return /redact/i.test(err.message)
-        ? { kind: "redacted", message: err.message }
-        : { kind: "denied", message: err.message };
+    switch (err.code) {
+      case "CONFLICT":
+      case "PRECONDITION_FAILED":
+        return { kind: "conflict", message: err.message };
+      case "REDACTED_CONTENT":
+        return { kind: "redacted", message: err.message };
+      case "PATH_DENIED":
+      case "FORBIDDEN":
+        return { kind: "denied", message: err.message };
     }
   }
   return { kind: "error", error: err };

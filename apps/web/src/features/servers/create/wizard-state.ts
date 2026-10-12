@@ -133,6 +133,27 @@ export function isBuiltinTemplate(t: Pick<TemplateSummary, "kind">): boolean {
   return t.kind === "minecraft" || t.kind === "velocity";
 }
 
+/** Egg templates with the `eula` feature (Minecraft eggs) require `egg.acceptEula`. */
+export function eggNeedsEula(t: Pick<TemplateSummary, "kind" | "features">): boolean {
+  return !isBuiltinTemplate(t) && t.features.includes("eula");
+}
+
+/**
+ * Who is creating the server: holders of `servers.admin` may set variables the template does not
+ * mark user-editable (as Pterodactyl administrators can); the API enforces the same rule.
+ */
+export interface WizardContext {
+  admin: boolean;
+}
+const DEFAULT_CONTEXT: WizardContext = { admin: false };
+
+export function variableEditable(
+  v: Pick<TemplateSummary["variables"][number], "userEditable">,
+  ctx: WizardContext,
+): boolean {
+  return ctx.admin || v.userEditable;
+}
+
 const MiB = 1024 ** 2;
 const GiB = 1024 ** 3;
 
@@ -154,6 +175,7 @@ export function validateStep(
   step: WizardStep,
   s: WizardState,
   template: TemplateSummary | null,
+  ctx: WizardContext = DEFAULT_CONTEXT,
 ): Record<string, string> {
   const e: Record<string, string> = {};
   if (step === "template") {
@@ -190,8 +212,9 @@ export function validateStep(
       }
     } else {
       if (template.dockerImages.length > 0 && !s.dockerImage) e.dockerImage = "Choose an image.";
+      if (eggNeedsEula(template) && !s.acceptEula) e.acceptEula = "You must accept the Minecraft EULA.";
       for (const v of template.variables) {
-        if (!v.userEditable) continue;
+        if (!variableEditable(v, ctx)) continue;
         const value = s.variables[v.envName] ?? v.defaultValue;
         const err = validateVariableValue(v, value);
         if (err) e[`var.${v.envName}`] = err;
@@ -230,7 +253,11 @@ export function validateStep(
 export type CreateServerInput = z.input<typeof CreateServerRequest>;
 
 /** The request body for `POST /servers` (not yet validated). */
-export function buildCreateBody(s: WizardState, template: TemplateSummary): CreateServerInput {
+export function buildCreateBody(
+  s: WizardState,
+  template: TemplateSummary,
+  ctx: WizardContext = DEFAULT_CONTEXT,
+): CreateServerInput {
   const mem = Math.round(num(s.memoryMiB) * MiB);
   const body: CreateServerInput = {
     name: s.name.trim(),
@@ -284,10 +311,14 @@ export function buildCreateBody(s: WizardState, template: TemplateSummary): Crea
   } else {
     const variables: Record<string, string> = {};
     for (const v of template.variables) {
-      if (v.userEditable && s.variables[v.envName] !== undefined)
+      if (variableEditable(v, ctx) && s.variables[v.envName] !== undefined)
         variables[v.envName] = s.variables[v.envName]!;
     }
-    body.egg = { variables, ...(s.dockerImage ? { dockerImage: s.dockerImage } : {}) };
+    body.egg = {
+      variables,
+      acceptEula: eggNeedsEula(template) ? s.acceptEula : false,
+      ...(s.dockerImage ? { dockerImage: s.dockerImage } : {}),
+    };
   }
   return body;
 }
@@ -309,14 +340,15 @@ export function stepForPath(path: string): WizardStep {
 export function validateWizard(
   s: WizardState,
   template: TemplateSummary | null,
+  ctx: WizardContext = DEFAULT_CONTEXT,
 ): { body: z.output<typeof CreateServerRequest> | null; errors: StepErrors } {
   const errors: StepErrors = {};
   for (const step of WIZARD_STEPS) {
-    const e = validateStep(step, s, template);
+    const e = validateStep(step, s, template, ctx);
     if (Object.keys(e).length) errors[step] = e;
   }
   if (!template) return { body: null, errors };
-  const parsed = CreateServerRequest.safeParse(buildCreateBody(s, template));
+  const parsed = CreateServerRequest.safeParse(buildCreateBody(s, template, ctx));
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
       const path = issue.path.map(String).join(".");

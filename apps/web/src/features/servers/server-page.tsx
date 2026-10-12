@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, Lock } from "lucide-react";
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useState } from "react";
 import type { Me, Server } from "@blockforge/contracts";
 import { isApiError } from "@/lib/api/errors";
 import { serverQuery } from "@/lib/queries";
@@ -17,6 +17,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ServerStateBadge } from "@/components/ui/status";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConsolePanel } from "./console/console-panel";
+import { EulaBanner } from "./eula-banner";
 import {
   JobProgress,
   PowerControls,
@@ -78,6 +79,7 @@ export function ServerPage({
   onRangeChange: (r: TimeRange) => void;
 }) {
   const query = useQuery(serverQuery(serverId));
+  const [eulaPrompt, setEulaPrompt] = useState(false);
   const server = query.data;
   useServerRealtime(serverId, !!server);
 
@@ -150,6 +152,7 @@ export function ServerPage({
       />
       <div className="flex flex-col gap-3">
         <SuspendedBanner server={server} />
+        <EulaBanner server={server} promptSeen={eulaPrompt} onAccepted={() => setEulaPrompt(false)} />
         {job ? <JobProgress key={job.jobId} jobId={job.jobId} title={job.title} /> : null}
       </div>
 
@@ -175,7 +178,11 @@ export function ServerPage({
           <div className="pt-4">
             {tab === "console" ? (
               <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
-                <ConsolePanel server={server} className="h-[60vh] min-h-80 lg:h-[34rem]" />
+                <ConsolePanel
+                  server={server}
+                  className="h-[60vh] min-h-80 lg:h-[34rem]"
+                  onEulaPrompt={() => setEulaPrompt(true)}
+                />
                 <ServerLiveStats server={server} />
               </div>
             ) : (

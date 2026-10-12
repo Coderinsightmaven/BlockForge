@@ -279,16 +279,9 @@ function EditDialog({
 export function NodeAllocations({ node, canManage }: { node: Node; canManage: boolean }) {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<Filter>("all");
-  // "used" is the full list filtered client-side (the API only filters for free ones).
-  const q = useInfiniteQuery(nodeAllocationsQuery(node.id, filter === "free" ? "free" : "all"));
+  const q = useInfiniteQuery(nodeAllocationsQuery(node.id, filter));
   const all = useMemo(() => q.data?.pages.flatMap((p) => p.items) ?? [], [q.data]);
-  const items = useMemo(
-    () =>
-      (filter === "used" ? all.filter((a) => a.serverId) : all)
-        .slice()
-        .sort((a, b) => a.ip.localeCompare(b.ip) || a.port - b.port),
-    [all, filter],
-  );
+  const items = useMemo(() => all.slice().sort((a, b) => a.ip.localeCompare(b.ip) || a.port - b.port), [all]);
   const v = useVirtualRows(items, { estimateSize: 41, getKey: (a) => a.id });
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<Allocation | null>(null);

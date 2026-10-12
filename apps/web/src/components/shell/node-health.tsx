@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Server } from "lucide-react";
+import { Server, TriangleAlert } from "lucide-react";
 import type { Me, Node } from "@blockforge/contracts";
 import { canAny } from "@/lib/permissions";
 import { nodesQuery } from "@/lib/queries";
@@ -15,6 +15,8 @@ export interface NodeHealthSummary {
   degraded: number;
   down: number;
   pending: number;
+  /** Nodes with at least one active agent warning (clock skew, SFTP down, …). */
+  withWarnings: number;
   tone: Tone;
 }
 
@@ -28,15 +30,16 @@ export function summarizeNodeHealth(nodes: readonly Node[]): NodeHealthSummary {
   const degraded = expectedUp.filter((n) => n.connection === "degraded").length;
   const down = expectedUp.filter((n) => n.connection === "unreachable" || n.connection === "offline").length;
   const pending = relevant.filter((n) => n.status === "pending").length;
+  const withWarnings = relevant.filter((n) => n.warnings.length > 0).length;
   const tone: Tone =
     relevant.length === 0
       ? "neutral"
       : down > 0
         ? "danger"
-        : degraded > 0 || pending > 0
+        : degraded > 0 || pending > 0 || withWarnings > 0
           ? "warning"
           : "success";
-  return { total: relevant.length, online, degraded, down, pending, tone };
+  return { total: relevant.length, online, degraded, down, pending, withWarnings, tone };
 }
 
 export function NodeHealthIndicator({ me }: { me: Me | undefined }) {
@@ -50,7 +53,8 @@ export function NodeHealthIndicator({ me }: { me: Me | undefined }) {
       : "Loading node status…"
     : s.total === 0
       ? "No nodes enrolled yet."
-      : `${s.online} online · ${s.degraded} degraded · ${s.down} unreachable/offline · ${s.pending} pending approval`;
+      : `${s.online} online · ${s.degraded} degraded · ${s.down} unreachable/offline · ${s.pending} pending approval` +
+        (s.withWarnings ? ` · ${s.withWarnings} with agent warnings` : "");
   return (
     <Tooltip content={detail}>
       <Link
@@ -64,6 +68,9 @@ export function NodeHealthIndicator({ me }: { me: Me | undefined }) {
         <Server className="size-4 text-tone" aria-hidden />
         <span className="tabular font-medium">{s ? `${s.online}/${s.total}` : "–/–"}</span>
         <span className="hidden text-muted-foreground md:inline">online</span>
+        {s?.withWarnings ? (
+          <TriangleAlert className="size-3.5 text-warning" aria-label={`${s.withWarnings} with warnings`} />
+        ) : null}
       </Link>
     </Tooltip>
   );

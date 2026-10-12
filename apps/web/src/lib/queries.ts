@@ -280,11 +280,11 @@ export const planQuery = (software: string, version: string, build: string) =>
 export const nodeAllocationsQuery = (nodeId: string, filter: "all" | "free" | "used") =>
   infiniteQueryOptions({
     queryKey: qk.nodes.allocations(nodeId, filter),
-    // The API filters "free"; "used" is filtered client-side from the full list.
+    // `?free=true|false` filters server-side (assigned = free=false).
     queryFn: ({ signal, pageParam }) =>
       allocationsApi.listForNode(
         nodeId,
-        { free: filter === "free" ? true : undefined, limit: 500, cursor: pageParam },
+        { free: filter === "all" ? undefined : filter === "free", limit: 500, cursor: pageParam },
         signal,
       ),
     initialPageParam: null as string | null,

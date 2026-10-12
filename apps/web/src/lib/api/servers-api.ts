@@ -4,11 +4,15 @@ import {
   AuditEvent,
   ConsoleLinesEvent,
   CreateAllocationsResponse,
+  FileArchiveResponse,
   FileContentResponse,
+  FileCopyResponse,
+  FileJobResponse,
   FileListResponse,
   FileSearchResponse,
   Job,
   JobLogLine,
+  PlacementPreviewResponse,
   Server,
   ServerAllocationChangeResponse,
   ServerStartup,
@@ -59,18 +63,10 @@ const AuditPage = page(AuditEvent);
 const AllocationPage = page(Allocation);
 const JobRef = z.object({ jobId: z.uuid() });
 
-/** `POST /servers/placement-preview` — not a named contract schema yet (see contract requests). */
-export const PlacementCandidate = z.object({
-  nodeId: z.uuid(),
-  nodeName: z.string(),
-  fits: z.boolean(),
-  reasons: z.array(z.string()),
-  score: z.number(),
-  /** Count of free allocations on the node. */
-  freeAllocations: z.number().int().nonnegative(),
-});
-export type PlacementCandidate = z.infer<typeof PlacementCandidate>;
-const PlacementPreview = z.object({ candidates: z.array(PlacementCandidate) });
+export type PlacementCandidate = z.infer<typeof PlacementPreviewResponse>["candidates"][number];
+/** compress/decompress: synchronous result, or a background job (202). */
+const FileArchiveOrJob = z.union([FileArchiveResponse, FileJobResponse]);
+export type FileArchiveOrJob = z.infer<typeof FileArchiveOrJob>;
 
 export const CreateServerResponse = z.object({ server: Server, jobId: z.uuid() });
 const BuildChangeResponse = z.object({ server: Server, restartRequired: z.boolean() });
@@ -99,7 +95,7 @@ export const serversApi = {
     }),
   get: (id: string, signal?: AbortSignal) => apiClient.get(`/servers/${enc(id)}`, { schema: Server, signal }),
   placementPreview: (body: PlacementPreviewBody, signal?: AbortSignal) =>
-    apiClient.post("/servers/placement-preview", { body, schema: PlacementPreview, signal }),
+    apiClient.post("/servers/placement-preview", { body, schema: PlacementPreviewResponse, signal }),
   create: (body: In<typeof CreateServerRequest>, idempotencyKey: string) =>
     apiClient.post("/servers", { body, schema: CreateServerResponse, idempotencyKey }),
   updateSettings: (id: string, body: In<typeof UpdateServerSettingsRequest>) =>
@@ -227,20 +223,21 @@ export const filesApi = {
   /** `baseSha256`: sha from the read (conflict check), `null` = must not exist, `undefined` = overwrite. */
   write: (id: string, body: { path: string; content: string; baseSha256?: string | null }) =>
     apiClient.put(`/servers/${enc(id)}/files/contents`, { body, schema: FileWriteResponse }),
+  // rename/delete/mkdir/chmod answer 204; copy and archive operations describe their result.
   rename: (id: string, body: In<typeof FileRenameRequest>) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/rename`, { body }),
+    apiClient.post<void>(`/servers/${enc(id)}/files/rename`, { body }),
   remove: (id: string, paths: string[]) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/delete`, { body: { paths } }),
+    apiClient.post<void>(`/servers/${enc(id)}/files/delete`, { body: { paths } }),
   copy: (id: string, path: string) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/copy`, { body: { path } }),
+    apiClient.post(`/servers/${enc(id)}/files/copy`, { body: { path }, schema: FileCopyResponse }),
   mkdir: (id: string, path: string) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/mkdir`, { body: { path } }),
+    apiClient.post<void>(`/servers/${enc(id)}/files/mkdir`, { body: { path } }),
   compress: (id: string, body: In<typeof FileCompressRequest>) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/compress`, { body }),
+    apiClient.post(`/servers/${enc(id)}/files/compress`, { body, schema: FileArchiveOrJob }),
   decompress: (id: string, body: In<typeof FileDecompressRequest>) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/decompress`, { body }),
+    apiClient.post(`/servers/${enc(id)}/files/decompress`, { body, schema: FileArchiveOrJob }),
   chmod: (id: string, body: In<typeof FileChmodRequest>) =>
-    apiClient.post<unknown>(`/servers/${enc(id)}/files/chmod`, { body }),
+    apiClient.post<void>(`/servers/${enc(id)}/files/chmod`, { body }),
   search: (id: string, path: string, q: string, signal?: AbortSignal) =>
     apiClient.get(`/servers/${enc(id)}/files/search`, {
       query: { path, q, limit: 500 },

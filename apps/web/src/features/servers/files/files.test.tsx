@@ -99,10 +99,10 @@ describe("saveFile conflict handling", () => {
     const err = (code: ApiError["code"], message = "m") => new ApiError({ code, message, status: 400 });
     expect(classifySaveError(err("PRECONDITION_FAILED"))).toMatchObject({ kind: "conflict" });
     expect(classifySaveError(err("CONFLICT"))).toMatchObject({ kind: "conflict" });
-    expect(classifySaveError(err("FORBIDDEN", "File is redacted"))).toMatchObject({ kind: "redacted" });
-    expect(classifySaveError(err("FORBIDDEN", "Path is on the template's denylist"))).toMatchObject({
-      kind: "denied",
-    });
+    // Classification is by code, never by message text.
+    expect(classifySaveError(err("REDACTED_CONTENT", "anything"))).toMatchObject({ kind: "redacted" });
+    expect(classifySaveError(err("PATH_DENIED", "anything"))).toMatchObject({ kind: "denied" });
+    expect(classifySaveError(err("FORBIDDEN", "File is redacted"))).toMatchObject({ kind: "denied" });
     expect(classifySaveError(new Error("boom"))).toMatchObject({ kind: "error" });
   });
 });
@@ -131,11 +131,11 @@ const contents = (over: Record<string, unknown> = {}) => ({
 });
 
 describe("FileEditor", () => {
-  it("saves with baseSha256, shows the conflict dialog on 412, and can overwrite", async () => {
+  it("saves with baseSha256, shows the conflict dialog on CONFLICT, and can overwrite", async () => {
     const calls: Array<{ method: string; body: unknown }> = [];
     const responses = [
       jsonResponse(contents()),
-      jsonResponse(apiErrorBody("PRECONDITION_FAILED", "File changed since it was read"), { status: 412 }),
+      jsonResponse(apiErrorBody("CONFLICT", "File changed since it was read"), { status: 409 }),
       jsonResponse({ sha256: "sha-B", size: 12 }),
     ];
     vi.stubGlobal(
@@ -196,12 +196,13 @@ describe("FileEditor", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        jsonResponse(apiErrorBody("FORBIDDEN", "This path is on the template's file denylist"), {
+        jsonResponse(apiErrorBody("PATH_DENIED", "config/secret.cfg is on this server's file denylist"), {
           status: 403,
         }),
       ),
     );
     renderEditor("config/secret.cfg");
     expect(await screen.findByText(/file denylist/)).toBeTruthy();
+    expect(screen.getByText("Protected by the server's template")).toBeTruthy();
   });
 });

@@ -26,6 +26,7 @@ import { CpuTile, DiskIoTile, FilesystemsTile, MemoryTile, NetworkTile } from ".
 import { NodeAllocations } from "./node-allocations";
 import { NodeSettings } from "./node-settings";
 import { isStale } from "./node-utils";
+import { NodeWarnings } from "./node-warnings";
 
 export type NodeTab = "overview" | "metrics" | "allocations" | "settings";
 
@@ -181,6 +182,7 @@ export function NodeDetailPage({
         }
         actions={canManage ? <NodeActions node={node} /> : null}
       />
+      <NodeWarnings warnings={node.warnings} />
       {node.status === "pending" ? <PendingBanner node={node} canManage={canManage} /> : null}
       {node.status === "revoked" ? (
         <Callout tone="danger" title="Revoked" className="mb-4">
