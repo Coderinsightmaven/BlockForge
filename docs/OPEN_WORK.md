@@ -139,8 +139,18 @@ replace the note with the concrete gap. Affected lines:
   through an SSH tunnel instead.
 
 ### 5.2 CI on GitHub
-- The repository now has a GitHub remote (`origin`), but `.github/workflows/ci.yml` has never run on GitHub.
-- On the first push, check that it passes, including `pnpm --filter @blockforge/web bundle:check` and the fixtures diff.
+- The repository has a GitHub remote (`origin`) and CI runs on every push to `main`.
+- **First runs fail.** Run 38323141783 (53f81f7):
+  - The `node-agent` job is green.
+  - The `typescript` job passed install, lint and typecheck, then failed `pnpm test` in `packages/eggs`
+    (`test/security.test.ts` › "#4 linear-time regexes" › "stripAnsi is linear": wall-clock ratio 14.1, limit 5).
+    GitHub's slower shared runner trips the threshold; this is not a regression.
+- **Fix:** make that test (and any other wall-clock assertion) robust. For example, compare growth across input sizes
+  with a generous factor, or count steps instead of milliseconds.
+- **Still unconfirmed on GitHub:** the remaining packages' tests, `pnpm build` and `bundle:check`, because turbo stops at
+  the first failure. The same applies to the control-plane integration tests' service containers.
+- After the fix, check that the whole workflow passes, including `pnpm --filter @blockforge/web bundle:check` and the
+  fixtures diff.
 - Control-plane tests need Postgres, VictoriaMetrics and MinIO (`infra/compose/docker-compose.dev.yml`) plus `openssl`
   on PATH (the safe-fetch transport tests generate a certificate at test time). Make sure the workflow provides these.
 - Go integration tests need Docker.
