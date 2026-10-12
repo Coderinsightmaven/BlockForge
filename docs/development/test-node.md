@@ -104,5 +104,11 @@ Control plane restarted with migration 0005 (`servers.extensions.view` in the ro
   history (`rollback.available`) → rollback job restored it; restart → Paper console `[Chunky] Enabling Chunky v1.5.3`.
   **Bug found:** update checks (`GET …/extensions/updates`) → 404 and hash identification fails: the control plane's
   pinned HTTPS transport (`catalog/safe-fetch.ts`) sends every request as a GET without the caller's method, body or
-  headers (so Modrinth POSTs 404 and no User-Agent is sent); tests injected a transport and missed it — fix in progress.
+  headers (so Modrinth POSTs 404 and no User-Agent is sent); tests injected a transport and missed it.
+* **After the transport fix (11944b7, ad738e1; control plane restarted):** full scan identifies `Chunky-Bukkit-1.5.3.jar`
+  on Modrinth by SHA-512 (`fALzjamp`, 1.5.3) with no identification errors; `GET …/extensions/updates` 200 (1.5.3 is
+  current, no problem); project route lists releases only by default (`luckperms` → `v5.5.71-bukkit`); a jar copied in
+  through the file manager (as over SFTP) is identified on the next incremental scan (title, version, metadata) and
+  removed again through the keep area. Follow-ups noted: identified on-disk copies are labelled `source: "modrinth"`
+  (contract says found-on-disk = `unknown` + a Modrinth ref), and two copies of the same plugin are not flagged.
 * No error-level lines in the control-plane log.
