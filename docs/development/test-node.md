@@ -53,3 +53,16 @@ Verified 2026-10-11: tunnel established, remote `127.0.0.1:18080` reached a work
   **LAN access to 2022 is blocked by the node's `ufw`** (Docker-published game ports bypass ufw; host-network listeners
   don't). Opening it needs `sudo ufw allow 2022/tcp` (or restricted to the LAN) by the node owner. Tests above ran through
   `ssh -L 12022:127.0.0.1:2022 game@10.10.10.240`.
+
+## Phase 4a end-to-end evidence (2026-10-12)
+* **Backup** of the running Paper 26.3 server (local storage): 2.0 s, 151 MiB, consistency `save-flush` — console shows
+  `save-off` → `Saved the game` → `save-on`. The first attempt failed safely with SAVE_TIMEOUT (save-on still sent):
+  Minecraft 26.3 prefixes command feedback with `System chat:`, which the matcher didn't accept — fixed (9241c35, 8798386),
+  which also revealed that join/leave parsing was broken on 26.3.
+* **Restore** while running (marker file deleted + junk file added first): safety backup (locked) → stop → restore → start
+  in 18.2 s; marker restored, junk gone, server running.
+* **Schedule** on the Vanilla egg server (`* * * * *`, only-when-online, two console tasks 5 s apart): cron run fired at the
+  next minute and succeeded in 5.1 s, both `say` lines in the console, `lastRunStatus=succeeded`; schedule deleted.
+* **API key** (servers.view + monitoring.view, 127.0.0.1/32, 1 day): `GET /servers` 200; restart → 403 (not granted);
+  `/account/api-keys` → 403 (account routes refuse keys); last-used time/IP recorded; after revoke → 401.
+* S3 storage not exercised live (no S3 endpoint for the node yet); covered by MinIO integration tests on the workstation.

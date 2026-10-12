@@ -142,12 +142,8 @@ Contracts: `api/backups.ts`, `api/schedules.ts`, identity `ApiKey*`, agent `back
 - Live migration is not offered; migration is offline (stop → transfer → start → reroute).
 
 ## Current focus
-**Phase 3 — code complete; all four cross-model reviews fixed** (agent, control plane, eggs, web; see `docs/reviews/2026-10-12-*`).
-Live on the test node: Paper 26.3 (:25570), Vanilla egg (:25571), SFTP (:2022, LAN blocked by the node's ufw until the owner allows it).
-Remaining for Phase 3 sign-off: (1) web bundle fix for `/servers/new` (> 300 KiB because of re2js — lazy validator, in progress);
-(2) browser walkthrough of the Phase 3 UI against the live stack (needs a user-initiated turn for the preview tools).
-
-**Phase 4a in progress** (contracts 1ac8760): control plane — backups (local + S3 presigned multipart, Minecraft save-off/flush),
-schedules (croner, SKIP LOCKED scheduler), API keys; agent — `backup.*` commands + allowlist defaults for pelican-eggs images;
-libraries — Modrinth adapter, extension metadata parsers, player-file editors (Phase 4b groundwork). Web Phase 4 UI follows the bundle fix.
-Next after that: cross-model reviews of Phase 4a, live backup/restore + schedule test on the test node, then Phase 4b (plugins/mods, players UI).
+**Phase 3 signed off** (code + four cross-model reviews fixed + live E2E: Paper, Vanilla egg, SFTP, browser walkthrough).
+**Phase 4a implemented and verified live on the test node** (backups + restore, schedules, API keys; evidence in
+`docs/development/test-node.md`); cross-model reviews running (control plane, agent backups, web, Minecraft 4b libs).
+Phase 4b libraries done (Modrinth, extension metadata, player files, 26.3 console prefix) — next: contracts + agent
+`fs.hash`/`jar.readEntries` + control-plane routes + web UI for Plugins & Mods and Players, then Phase 5 (databases).
