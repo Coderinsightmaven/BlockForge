@@ -389,7 +389,7 @@ func TestExtensionScanFixtures(t *testing.T) {
 	}
 	j := decodeFixturePayload(t, "cmd-jar-read-entries.json").(*protocol.JarReadEntriesPayload)
 	if len(j.Paths) != 2 || strings.Join(j.Entries, ",") != "paper-plugin.yml,plugin.yml,META-INF/MANIFEST.MF" ||
-		j.MaxEntryBytes != 262144 || j.MaxJarBytes != 268435456 || j.MaxTotalBytes != 4194304 || len(j.Hash) != 1 || j.Hash[0] != "sha512" {
+		j.MaxEntryBytes != 262144 || j.MaxJarBytes != 268435456 || j.MaxTotalBytes != 4194304 || j.MaxReadBytes != 8<<30 || len(j.Hash) != 1 || j.Hash[0] != "sha512" {
 		t.Fatalf("jar.readEntries %+v", j)
 	}
 

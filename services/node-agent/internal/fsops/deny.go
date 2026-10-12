@@ -34,6 +34,23 @@ func (r *Root) WithDenylist(m Matcher) *Root {
 	return &c
 }
 
+// escapeError marks a resolution that would leave the sandbox (absolute symlink, or ".." above the
+// data root). It unwraps to the PATH_FORBIDDEN protocol error, so callers see the same error as before.
+type escapeError struct{ pe *protocol.Error }
+
+func (e *escapeError) Error() string { return e.pe.Error() }
+func (e *escapeError) Unwrap() error { return e.pe }
+
+func escapeErr(msg string) error {
+	return &escapeError{pe: protocol.Errorf(protocol.CodePathForbidden, "%s", msg)}
+}
+
+// isEscape reports whether err is a sandbox escape found while resolving symlinks.
+func isEscape(err error) bool {
+	var e *escapeError
+	return errors.As(err, &e)
+}
+
 func denyErr(p string) error {
 	return protocol.Errorf(protocol.CodePathForbidden, "%q is protected by the server template", p).
 		WithDetails(map[string]any{"reason": "denylist"})
@@ -57,7 +74,7 @@ func (r *Root) resolve(clean string) (string, []string, error) {
 		}
 		if seg == ".." {
 			if len(cur) == 0 {
-				return "", visited, protocol.Errorf(protocol.CodePathForbidden, "path escapes the workload data root")
+				return "", visited, escapeErr("path escapes the workload data root")
 			}
 			cur = cur[:len(cur)-1]
 			continue
@@ -85,7 +102,7 @@ func (r *Root) resolve(clean string) (string, []string, error) {
 		}
 		target = filepath.ToSlash(target)
 		if strings.HasPrefix(target, "/") || (len(target) > 1 && target[1] == ':') {
-			return "", visited, protocol.Errorf(protocol.CodePathForbidden, "absolute symlink")
+			return "", visited, escapeErr("absolute symlink")
 		}
 		// Re-resolve the link target relative to its directory, then the remaining components.
 		next := append(append([]string{}, cur...), strings.Split(target, "/")...)

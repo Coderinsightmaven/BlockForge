@@ -52,6 +52,10 @@ func TestExtensionScanSchemas(t *testing.T) {
 		{"jar hash duplicate", CmdJarReadEntries, jar(`,"hash":["sha1","sha1"]`), false},
 		{"jar hash both", CmdJarReadEntries, jar(`,"hash":["sha512","sha1"]`), true},
 		{"jar hash empty", CmdJarReadEntries, jar(`,"hash":[]`), true},
+		{"jar maxReadBytes 64 GiB", CmdJarReadEntries, jar(`,"maxReadBytes":68719476736`), true},
+		{"jar maxReadBytes 64 GiB + 1", CmdJarReadEntries, jar(`,"maxReadBytes":68719476737`), false},
+		{"jar maxReadBytes 0", CmdJarReadEntries, jar(`,"maxReadBytes":0`), false},
+		{"jar maxReadBytes 1", CmdJarReadEntries, jar(`,"maxReadBytes":1`), true},
 		{"jar duplicate entry", CmdJarReadEntries, entries("plugin.yml", "plugin.yml"), false},
 		{"jar no entries", CmdJarReadEntries, entries(), false},
 		{"jar 32 entries", CmdJarReadEntries, entries(manyNames(32)...), true},
@@ -94,7 +98,7 @@ func TestExtensionScanSchemas(t *testing.T) {
 		t.Fatal(err)
 	}
 	jp := p.(*JarReadEntriesPayload)
-	if jp.MaxTotalBytes != 4<<20 || jp.Hash == nil || len(jp.Hash) != 0 {
+	if jp.MaxTotalBytes != 4<<20 || jp.Hash == nil || len(jp.Hash) != 0 || jp.MaxReadBytes != 8<<30 {
 		t.Fatalf("jar.readEntries defaults %+v", jp)
 	}
 	if Commands[CmdFsHash].Mutating || Commands[CmdJarReadEntries].Mutating {

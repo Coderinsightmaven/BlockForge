@@ -260,10 +260,17 @@ fails for an invalid payload, a missing data dir or cancellation.
 * **Opening**: `fsops.OpenNoFollow` walks from the sandbox root with the backup walker's primitives — each
   directory opened relative to its parent with `O_NOFOLLOW|O_DIRECTORY`, the file with `O_NOFOLLOW|O_NONBLOCK`,
   each checked to be the object `lstat` saw (device + inode) and, on Linux, the file's real location
-  (`/proc/self/fd`) must still be the requested path. A symlink anywhere on the path, a directory, FIFO,
-  socket or device → `NOT_REGULAR`; a component swapped meanwhile → `IO_ERROR`; the denylist uses the same
-  semantics as the other `fs.*` commands (→ `PATH_FORBIDDEN`). `sizeBytes`/`mtime` come from fstat; a file
-  whose size or mtime changes while it is read → `IO_ERROR`.
+  (`/proc/self/fd`) must still be the requested path. A symlink inside the sandbox anywhere on the path, a
+  directory, FIFO, socket or device → `NOT_REGULAR`; a symlink resolving outside the sandbox (absolute, or
+  `..` above the root) → `PATH_FORBIDDEN` like `fs.read`; a component swapped meanwhile → `IO_ERROR`; the
+  denylist uses the same semantics as the other `fs.*` commands (→ `PATH_FORBIDDEN`).
+* **Consistency**: once open, the file's identity is taken — device, inode, size, mtime and (Linux/BSD) the
+  inode change time, which every write, truncate, chmod or utimes sets and an unprivileged process cannot set
+  back — and checked again after the whole-file hash and after the jar parse: a same-size rewrite with a
+  restored mtime → `IO_ERROR`. A file whose last change is younger than 20 ms is re-examined after a short
+  wait first (kernels without fine-grained timestamps stamp ctime from a coarse clock tick); one that keeps
+  changing → `IO_ERROR`. `sizeBytes`/`mtime` come from that fstat. Windows development builds compare size,
+  mtime and file index only.
 * **`fs.hash`**: sha1/sha256/sha512 in one pass (lowercase hex, only the requested ones). Over
   `maxBytesPerFile` → `TOO_LARGE` (not read). Once a file would push the bytes hashed past `maxTotalBytes`,
   it and every later file are `BUDGET_EXCEEDED`; the first file is always attempted.
@@ -279,7 +286,10 @@ fails for an invalid payload, a missing data dir or cancellation.
   control characters except TAB/LF/CR → U+FFFD, cut at a code point so the JSON string as sent (quotes
   included) is ≤ `maxEntryBytes`. Results are encoded without HTML escaping (all frames are). Budget: the
   first jar whose content would push the total past `maxTotalBytes` — or the frame past 16 MiB − 64 KiB —
-  and every later jar → `BUDGET_EXCEEDED`; the first jar is always returned.
+  and every later jar → `BUDGET_EXCEEDED`; the first jar is always returned. `maxReadBytes` (default 8 GiB)
+  bounds every byte the command reads from disk (hashes, end-record search, directories, entry data): a jar
+  whose whole-file hash no longer fits is refused before it is read, a parse that would read past the budget
+  stops there; that jar and every later one → `BUDGET_EXCEEDED` (the first jar is always processed).
 
 ## Denylist (template `fileDenylist`)
 

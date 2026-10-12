@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -136,6 +137,9 @@ func TestHashPerFileOutcomes(t *testing.T) {
 		"plugins/dangling":  "nowhere",
 		"plugins/loop1.jar": "loop2.jar",
 		"plugins/loop2.jar": "loop1.jar",
+		"plugins/out":       "../..",
+		"plugins/etc":       "/etc",
+		"plugins/chain.jar": "out/x.jar",
 	}
 	symlinks := true
 	for l, target := range links {
@@ -144,11 +148,22 @@ func TestHashPerFileOutcomes(t *testing.T) {
 			break
 		}
 	}
+	// In-root symlinks are refused because they are symlinks (NOT_REGULAR: never followed, not even to a
+	// regular file inside the sandbox or through a parent directory); symlinks resolving outside the
+	// sandbox are sandbox violations (PATH_FORBIDDEN, as fs.read reports them).
+	linkPaths := []string{"plugins/link.jar", "linkdir/a.jar", "linkdir/sub/b.jar", "plugins/up.jar", "plugins/dangling", "plugins/loop1.jar",
+		"abs.jar", "escape.jar", "plugins/out/x.jar", "plugins/etc/passwd", "plugins/chain.jar"}
+	linkWant := []string{"NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR",
+		"PATH_FORBIDDEN", "PATH_FORBIDDEN", "PATH_FORBIDDEN", "PATH_FORBIDDEN", "PATH_FORBIDDEN"}
 	if symlinks {
-		// Never followed — not even to a regular file inside the sandbox or through a parent directory.
-		paths = append(paths, "plugins/link.jar", "linkdir/a.jar", "linkdir/sub/b.jar", "abs.jar", "escape.jar", "plugins/up.jar",
-			"plugins/dangling", "plugins/loop1.jar")
-		want = append(want, "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR", "NOT_REGULAR")
+		paths = append(paths, linkPaths...)
+		want = append(want, linkWant...)
+		// jar.readEntries opens through the same path.
+		for i, j := range mustJars(t, r, jarPayload(linkPaths, []string{"plugin.yml"})) {
+			if outcome(j) != linkWant[i] {
+				t.Errorf("jar %q: got %s want %s", j.Path, outcome(j), linkWant[i])
+			}
+		}
 	} else {
 		t.Log("symlinks unavailable: symlink cases skipped")
 	}
@@ -173,8 +188,8 @@ func TestHashPerFileOutcomes(t *testing.T) {
 	paths = []string{"server.secret", "config/private/token.txt", "plugins/a.jar"}
 	want = []string{"PATH_FORBIDDEN", "PATH_FORBIDDEN", "ok"}
 	if symlinks {
-		paths = append(paths, "pub.yml", "plugins/cfg/private/token.txt", "plugins/link.jar")
-		want = append(want, "PATH_FORBIDDEN", "PATH_FORBIDDEN", "NOT_REGULAR")
+		paths = append(paths, "pub.yml", "plugins/cfg/private/token.txt", "plugins/link.jar", "escape.jar")
+		want = append(want, "PATH_FORBIDDEN", "PATH_FORBIDDEN", "NOT_REGULAR", "PATH_FORBIDDEN")
 	}
 	files = mustHash(t, dr, hashPayload(paths))
 	for i, f := range files {
@@ -302,26 +317,56 @@ func TestDigestDetectsChangesWhileReading(t *testing.T) {
 	put(t, data, "grow", "0123456789")
 	put(t, data, "shrink", "0123456789")
 	put(t, data, "touch", "0123456789")
+	put(t, data, "same-size", "0123456789")
+	put(t, data, "ok", "0123456789")
 	buf := make([]byte, 4)
-	for name, change := range map[string]func(p string){
+	changes := map[string]func(p string){
 		"grow":   func(p string) { f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0); f.WriteString("more"); f.Close() },
 		"shrink": func(p string) { os.Truncate(p, 3) },
 		"touch": func(p string) {
 			when := time.Now().Add(time.Hour)
 			os.Chtimes(p, when, when)
 		},
-	} {
+		"ok": func(string) {},
+	}
+	if runtime.GOOS == "linux" { // the inode change time is part of the identity (not on Windows)
+		changes["same-size"] = func(p string) { rewriteKeepingTimes(t, p, []byte("9876543210")) }
+	}
+	for name, change := range changes {
 		p := filepath.Join(data, name)
 		f, err := os.Open(p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fi, _ := f.Stat()
+		fi, id, err := settledID(f)
+		if err != nil {
+			t.Fatal(err)
+		}
 		change(p)
-		if _, _, err := digestFile(context.Background(), f, fi, []string{"sha1"}, buf); err == nil {
-			t.Errorf("%s: change not detected", name)
+		_, _, err = digestFile(context.Background(), &scanFile{f: f, fi: fi, id: id}, []string{"sha1"}, buf)
+		if (err == nil) != (name == "ok") {
+			t.Errorf("%s: err %v", name, err)
 		}
 		f.Close()
+	}
+}
+
+// rewriteKeepingTimes replaces a file's content in place with data of the same size and restores its
+// atime/mtime — what a workload process can do (write + utimes) to hide a change from size + mtime.
+func rewriteKeepingTimes(t *testing.T, p string, data []byte) {
+	t.Helper()
+	fi, err := os.Stat(p)
+	if err != nil || fi.Size() != int64(len(data)) {
+		t.Fatalf("rewrite %s: %v (size %d vs %d)", p, err, fi.Size(), len(data))
+	}
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.Stat(p); after.Size() != fi.Size() || !after.ModTime().Equal(fi.ModTime()) {
+		t.Fatal("size/mtime not restored")
 	}
 }
 
@@ -354,7 +399,7 @@ func fixture(t *testing.T, name string) string {
 
 func jarPayload(paths, entries []string) *protocol.JarReadEntriesPayload {
 	return &protocol.JarReadEntriesPayload{WorkloadID: wid, Paths: paths, Entries: entries, MaxEntryBytes: protocol.JarMaxEntryBytes,
-		MaxJarBytes: 1 << 30, MaxTotalBytes: 4 << 20, Hash: []string{}}
+		MaxJarBytes: 1 << 30, MaxTotalBytes: 4 << 20, Hash: []string{}, MaxReadBytes: protocol.JarDefaultReadBytes}
 }
 
 func mustJars(t *testing.T, r *Root, p *protocol.JarReadEntriesPayload) []protocol.JarReadResult {
@@ -540,7 +585,7 @@ func TestScansAreReadOnly(t *testing.T) {
 	paths := []string{"plugins/a.jar", "plugins/text.jar", "plugins/link.jar", "world/level.dat", "plugins", "missing"}
 	h := mustHash(t, r, hashPayload(paths))
 	j := mustJars(t, r, &protocol.JarReadEntriesPayload{WorkloadID: wid, Paths: paths, Entries: []string{"plugin.yml"},
-		MaxEntryBytes: 1024, MaxJarBytes: 1 << 20, MaxTotalBytes: 1 << 20, Hash: []string{"sha1", "sha512"}})
+		MaxEntryBytes: 1024, MaxJarBytes: 1 << 20, MaxTotalBytes: 1 << 20, Hash: []string{"sha1", "sha512"}, MaxReadBytes: 1 << 30})
 	if outcome(h[0]) != "ok" || outcome(j[0]) != "ok" || j[0].Entries[0].Content != "name: A" {
 		t.Fatalf("%+v %+v", h[0], j[0])
 	}
@@ -567,7 +612,7 @@ func TestReadJarEntriesChangedWhileRead(t *testing.T) {
 	jar := jarBytes(t, [][2]string{{"plugin.yml", strings.Repeat("name: Changing\n", 50)}})
 	p := filepath.Join(data, "plugins", "c.jar")
 	past := time.Now().Add(-time.Hour)
-	t.Cleanup(func() { afterJarOpen = nil })
+	t.Cleanup(func() { scanHook = nil })
 	for name, change := range map[string]func(){
 		"appended":  func() { f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0); f.Write(jar); f.Close() },
 		"truncated": func() { os.Truncate(p, int64(len(jar)/2)) },
@@ -580,7 +625,11 @@ func TestReadJarEntriesChangedWhileRead(t *testing.T) {
 		for _, hash := range [][]string{{}, {"sha512"}} {
 			put(t, data, "plugins/c.jar", string(jar))
 			os.Chtimes(p, past, past)
-			afterJarOpen = func(string) { change() }
+			scanHook = func(stage, _ string) {
+				if stage == "opened" {
+					change()
+				}
+			}
 			pl := jarPayload([]string{"plugins/c.jar"}, []string{"plugin.yml"})
 			pl.Hash = hash
 			if got := outcome(mustJars(t, r, pl)[0]); got != "IO_ERROR" {
@@ -588,10 +637,166 @@ func TestReadJarEntriesChangedWhileRead(t *testing.T) {
 			}
 		}
 	}
-	afterJarOpen = nil
+	scanHook = nil
 	put(t, data, "plugins/c.jar", string(jar))
 	if got := outcome(mustJars(t, r, jarPayload([]string{"plugins/c.jar"}, []string{"plugin.yml"}))[0]); got != "ok" {
 		t.Fatal(got)
+	}
+}
+
+// storedJar builds a jar whose entries are stored (not compressed), so equal-length contents give
+// byte-identical sizes.
+func storedJar(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	zw := zip.NewWriter(&b)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte(content))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// Review 2026-10-12-agent-jarread #1: a workload rewrites a jar in place with the same size and restores
+// its mtime (write + utimes) while it is scanned. The inode change time cannot be restored, so the scan
+// reports IO_ERROR instead of a hash of one content next to entries of another.
+func TestScanSameSizeRewriteWithRestoredMtime(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("relies on the inode change time (Linux test path); Windows development builds compare size + mtime + file index")
+	}
+	r, data, _ := newRoot(t)
+	v1 := storedJar(t, "plugin.yml", "name: Original\nversion: 1.0.0\n")
+	v2 := storedJar(t, "plugin.yml", "name: Replaced\nversion: 6.6.6\n")
+	if len(v1) != len(v2) || bytes.Equal(v1, v2) {
+		t.Fatal("fixture jars must differ with equal sizes")
+	}
+	p := filepath.Join(data, "plugins", "x.jar")
+	t.Cleanup(func() { scanHook = nil })
+	run := func(stage string, rewrite bool, hash ...string) protocol.JarReadResult {
+		t.Helper()
+		put(t, data, "plugins/x.jar", string(v1))
+		scanHook = func(s, _ string) {
+			if s == stage && rewrite {
+				rewriteKeepingTimes(t, p, v2)
+			}
+		}
+		pl := jarPayload([]string{"plugins/x.jar"}, []string{"plugin.yml"})
+		pl.Hash = hash
+		defer func() { scanHook = nil }()
+		return mustJars(t, r, pl)[0]
+	}
+	// Between the whole-file hash and the parse, and (no hash) between the open and the parse.
+	if j := run("hashed", true, "sha512"); outcome(j) != "IO_ERROR" {
+		t.Fatalf("rewrite between hash and parse: %+v", j)
+	}
+	if j := run("opened", true); outcome(j) != "IO_ERROR" {
+		t.Fatalf("rewrite before the parse: %+v", j)
+	}
+	// Control: unchanged, the hash and the entry describe the same bytes.
+	j := run("hashed", false, "sha512")
+	sum := sha512.Sum512(v1)
+	if outcome(j) != "ok" || j.Sha512 != hex.EncodeToString(sum[:]) || !strings.HasPrefix(j.Entries[0].Content, "name: Original") {
+		t.Fatalf("control: %+v", j)
+	}
+
+	// fs.hash: rewritten between taking the identity and reading.
+	put(t, data, "plugins/x.jar", string(v1))
+	scanHook = func(s, _ string) {
+		if s == "opened" {
+			rewriteKeepingTimes(t, p, v2)
+		}
+	}
+	if f := mustHash(t, r, hashPayload([]string{"plugins/x.jar"}))[0]; outcome(f) != "IO_ERROR" {
+		t.Fatalf("fs.hash: %+v", f)
+	}
+	scanHook = nil
+}
+
+// settledID waits out a change younger than ctimeSettle (coarse ctime clocks); see also
+// TestSettleWaitAndContinuousChanges (Linux).
+func TestSettledID(t *testing.T) {
+	_, data, _ := newRoot(t)
+	put(t, data, "f", "x")
+	f, err := os.Open(filepath.Join(data, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	start := time.Now()
+	fi, id, err := settledID(f)
+	if err != nil || fi.Size() != 1 {
+		t.Fatal(err)
+	}
+	if id.settleWait(time.Now()) > 0 {
+		t.Fatal("identity taken before it settled")
+	}
+	if runtime.GOOS == "linux" && time.Since(start) > 10*ctimeSettle {
+		t.Fatalf("settling took %v", time.Since(start))
+	}
+}
+
+// Review 2026-10-12-agent-jarread #2: maxReadBytes bounds what one jar.readEntries command reads from
+// disk (whole-file hashes + directories + entry data); the first jar is always processed.
+func TestReadJarEntriesReadBudget(t *testing.T) {
+	r, data, _ := newRoot(t)
+	jar := jarBytes(t, [][2]string{{"META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\n"}, {"plugin.yml", strings.Repeat("name: X\n", 200)}})
+	size := int64(len(jar))
+	for _, n := range []string{"a", "b", "c"} {
+		put(t, data, n+".jar", string(jar))
+	}
+	buf := make([]byte, hashBufferBytes)
+	for _, hash := range [][]string{{}, {"sha1", "sha512"}} {
+		pl := jarPayload([]string{"a.jar", "b.jar", "c.jar"}, []string{"plugin.yml", "missing.txt"})
+		pl.Hash = hash
+		// What one jar costs: identical jars cost the same (the reads are deterministic).
+		reads := &readBudget{max: math.MaxInt64}
+		if j, err := r.readJar(context.Background(), "a.jar", pl, true, reads, buf); err != nil || !j.OK {
+			t.Fatalf("%v %+v", err, j)
+		}
+		cost := reads.used
+		if len(hash) > 0 && cost < size || cost <= 0 || cost > 3*size+64<<10 {
+			t.Fatalf("hash %v: one jar read %d bytes (size %d)", hash, cost, size)
+		}
+		run := func(max int64) string {
+			pl.MaxReadBytes = max
+			var out []string
+			for _, j := range mustJars(t, r, pl) {
+				out = append(out, outcome(j))
+			}
+			return strings.Join(out, ",")
+		}
+		cases := []struct {
+			max  int64
+			want string
+		}{
+			{1, "ok,BUDGET_EXCEEDED,BUDGET_EXCEEDED"}, // the first jar is always processed
+			{2*cost - 1, "ok,BUDGET_EXCEEDED,BUDGET_EXCEEDED"},
+			{2 * cost, "ok,ok,BUDGET_EXCEEDED"},
+			{3 * cost, "ok,ok,ok"},
+			{protocol.JarDefaultReadBytes, "ok,ok,ok"},
+		}
+		for _, c := range cases {
+			if got := run(c.max); got != c.want {
+				t.Errorf("hash %v, maxReadBytes %d (one jar %d): %s, want %s", hash, c.max, cost, got, c.want)
+			}
+		}
+		// The parse stops at the budget instead of reading on: never more than maxReadBytes after the
+		// first jar.
+		reads = &readBudget{used: cost, max: cost + 100}
+		if j, _ := r.readJar(context.Background(), "b.jar", pl, false, reads, buf); outcome(j) != "BUDGET_EXCEEDED" || reads.used > reads.max {
+			t.Fatalf("hash %v: %s, read %d of %d", hash, outcome(j), reads.used, reads.max)
+		}
+	}
+	// With hashing, a jar whose size no longer fits is refused before a single byte of it is read.
+	pl := jarPayload([]string{"b.jar"}, []string{"plugin.yml"})
+	pl.Hash = []string{"sha1"}
+	reads := &readBudget{used: 1000, max: 1000 + size - 1}
+	if j, _ := r.readJar(context.Background(), "b.jar", pl, false, reads, buf); outcome(j) != "BUDGET_EXCEEDED" || reads.used != 1000 {
+		t.Fatalf("pre-check: %s, read %d", outcome(j), reads.used-1000)
 	}
 }
 

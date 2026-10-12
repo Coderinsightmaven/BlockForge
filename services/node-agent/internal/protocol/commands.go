@@ -52,6 +52,9 @@ const (
 	JarMaxCentralDirectoryBytes   = 16 * 1024 * 1024
 	JarMaxEntryBytes              = 256 * 1024
 	JarMaxTotalBytes              = 8 * 1024 * 1024
+	JarMaxReadBytes               = 64 << 30
+	// JarDefaultReadBytes is the default of jar.readEntries maxReadBytes.
+	JarDefaultReadBytes = 8 << 30
 )
 
 // Per-file / per-jar error codes of fs.hash and jar.readEntries (FsHashEntry / JarReadResult).
@@ -452,6 +455,8 @@ type JarReadEntriesPayload struct {
 	MaxJarBytes   int64    `json:"maxJarBytes"`
 	MaxTotalBytes int64    `json:"maxTotalBytes"`
 	Hash          []string `json:"hash"`
+	// MaxReadBytes bounds the bytes read from disk by the whole command (hashing, directories, entries).
+	MaxReadBytes int64 `json:"maxReadBytes"`
 }
 
 // JarEntryContent is one entry read by jar.readEntries.
@@ -833,6 +838,7 @@ var Commands = map[string]CommandDef{
 		F("maxJarBytes", bytesSchema.Min(1).Max(2*gib)),
 		F("maxTotalBytes", Default(Int().Min(1).Max(JarMaxTotalBytes), constAny(int64(4<<20)))),
 		F("hash", Default(Arr(Str().Enum("sha1", "sha512"), -1, 2).Unique("duplicate algorithm"), emptyArr)),
+		F("maxReadBytes", Default(bytesSchema.Min(1).Max(JarMaxReadBytes), constAny(int64(JarDefaultReadBytes)))),
 	), New: func() any { return &JarReadEntriesPayload{} }},
 }
 

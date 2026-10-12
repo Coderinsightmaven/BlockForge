@@ -10,7 +10,9 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"math"
 	"os"
+	"time"
 
 	"github.com/blockforge/node-agent/internal/jarread"
 	"github.com/blockforge/node-agent/internal/protocol"
@@ -20,40 +22,107 @@ import (
 // opened O_RDONLY through OpenNoFollow and nothing is created, renamed or written. Per-file failures
 // are reported per entry; the only command-level errors are a missing data dir (Sandbox.Open) and
 // cancellation.
+//
+// Consistency: a file's identity (fileID: device, inode, size, mtime and — on Linux/BSD — the inode
+// change time) is taken once it is open and checked again after every pass over it (the whole-file
+// hash, the jar parse). Any write, truncate or utimes in between changes ctime, which an unprivileged
+// workload cannot set back, so the digests and the parsed entries always describe the same content
+// or the file is reported as IO_ERROR.
 
 // scanFrameLimit bounds the encoded jar.readEntries result below the frame size the executor accepts.
 var scanFrameLimit = protocol.MaxFrameBytes - 64*1024
 
-// afterJarOpen, if set, runs once a jar is open and its size checked (tests change it meanwhile).
-var afterJarOpen func(path string)
+// scanHook, if set, runs at stages of a scan ("opened": open, identity taken and size checked;
+// "hashed": jar hashed, before it is parsed) — tests change the file there.
+var scanHook func(stage, path string)
+
+func hook(stage, path string) {
+	if scanHook != nil {
+		scanHook(stage, path)
+	}
+}
 
 const hashBufferBytes = 1 << 20
 
+// ctimeSettle: a file whose last change is younger than this is re-examined after a short wait (see
+// fileID.settleWait).
+const ctimeSettle = 20 * time.Millisecond
+
+var errChangedWhileRead = errors.New("file changed while it was read")
+
+// scanFile is a requested path opened for a scan.
+type scanFile struct {
+	f  *os.File
+	fi fs.FileInfo // fstat at the time id was taken (sizeBytes, mtime)
+	id fileID
+}
+
 // scanOpen applies the path rules, the denylist and the no-follow open to a requested path; it
 // returns a per-file error code on failure. The denylist has the semantics of every other fs command
-// (requested path, symlinks it passes through, resolved location: PATH_FORBIDDEN) even though the
-// open then refuses any symlink (NOT_REGULAR); after the open the file's real location is checked
-// too (Linux; a parent directory moved meanwhile).
-func (r *Root) scanOpen(p string) (*os.File, fs.FileInfo, string) {
+// (requested path, symlinks it passes through, resolved location) and a symlink resolving outside the
+// sandbox is a sandbox violation: both PATH_FORBIDDEN, as for fs.read. Any other symlink is refused
+// by the open (NOT_REGULAR). After the open the file's real location is checked too (Linux; a parent
+// directory moved meanwhile) and its identity is taken.
+func (r *Root) scanOpen(p string) (*scanFile, string) {
 	clean, err := CleanPath(p, false)
 	if err != nil {
-		return nil, nil, protocol.ScanPathForbidden
+		return nil, protocol.ScanPathForbidden
 	}
+	// Other resolution failures (link loops, I/O) are left to the no-follow open.
 	if r.deny != nil {
-		// Other resolution failures (absolute or escaping links, I/O) are left to the no-follow open.
-		if _, err := r.checkDeny(clean); err != nil && isDenylistError(err) {
-			return nil, nil, protocol.ScanPathForbidden
-		}
+		_, err = r.checkDeny(clean)
+	} else {
+		_, _, err = r.resolve(clean)
 	}
-	f, fi, err := r.OpenNoFollow(clean)
+	if isDenylistError(err) || isEscape(err) {
+		return nil, protocol.ScanPathForbidden
+	}
+	f, _, err := r.OpenNoFollow(clean)
 	if err != nil {
-		return nil, nil, scanOpenCode(err)
+		return nil, scanOpenCode(err)
 	}
 	if err := r.VerifyOpen(f, clean); err != nil {
 		f.Close()
-		return nil, nil, protocol.ScanPathForbidden
+		return nil, protocol.ScanPathForbidden
 	}
-	return f, fi, ""
+	fi, id, err := settledID(f)
+	if err != nil {
+		f.Close()
+		return nil, protocol.ScanIOError
+	}
+	return &scanFile{f: f, fi: fi, id: id}, ""
+}
+
+// settledID takes the identity of an open file, first waiting out a change younger than ctimeSettle
+// (a file changing continuously fails with errChangedWhileRead).
+func settledID(f *os.File) (fs.FileInfo, fileID, error) {
+	for attempt := 0; ; attempt++ {
+		fi, err := f.Stat()
+		if err != nil {
+			return nil, fileID{}, err
+		}
+		id := idOf(fi)
+		wait := id.settleWait(time.Now())
+		if wait <= 0 {
+			return fi, id, nil
+		}
+		if attempt == 3 {
+			return nil, fileID{}, errChangedWhileRead
+		}
+		time.Sleep(wait)
+	}
+}
+
+// unchanged re-stats an open file: a different identity means it changed since the identity was taken.
+func unchanged(f *os.File, before fileID) error {
+	now, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !idOf(now).same(before) {
+		return errChangedWhileRead
+	}
+	return nil
 }
 
 func isDenylistError(err error) bool {
@@ -92,11 +161,9 @@ func (c ctxReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-var errChangedWhileRead = errors.New("file changed while it was read")
-
-// digestFile reads exactly fi.Size() bytes of f into the named hashes (one pass) and checks that the
-// file neither grew, shrank nor was modified meanwhile. n is the number of bytes read.
-func digestFile(ctx context.Context, f *os.File, fi fs.FileInfo, algorithms []string, buf []byte) (map[string]string, int64, error) {
+// digestFile reads exactly the identity's size of sf into the named hashes (one pass) and checks that
+// the file did not change meanwhile. n is the number of bytes read.
+func digestFile(ctx context.Context, sf *scanFile, algorithms []string, buf []byte) (map[string]string, int64, error) {
 	hs := make(map[string]hash.Hash, len(algorithms))
 	ws := make([]io.Writer, 0, len(algorithms))
 	for _, a := range algorithms {
@@ -114,15 +181,15 @@ func digestFile(ctx context.Context, f *os.File, fi fs.FileInfo, algorithms []st
 		hs[a] = h
 		ws = append(ws, h)
 	}
-	size := fi.Size()
-	n, err := io.CopyBuffer(io.MultiWriter(ws...), io.LimitReader(ctxReader{ctx, f}, size+1), buf)
+	size := sf.fi.Size()
+	n, err := io.CopyBuffer(io.MultiWriter(ws...), io.LimitReader(ctxReader{ctx, sf.f}, size+1), buf)
 	if err != nil {
 		return nil, n, err
 	}
 	if n != size {
 		return nil, n, errChangedWhileRead
 	}
-	if err := unchanged(f, fi); err != nil {
+	if err := unchanged(sf.f, sf.id); err != nil {
 		return nil, n, err
 	}
 	out := make(map[string]string, len(hs))
@@ -130,19 +197,6 @@ func digestFile(ctx context.Context, f *os.File, fi fs.FileInfo, algorithms []st
 		out[a] = hex.EncodeToString(h.Sum(nil))
 	}
 	return out, n, nil
-}
-
-// unchanged re-stats an open file: a different size or modification time means it changed while
-// it was being read.
-func unchanged(f *os.File, before fs.FileInfo) error {
-	now, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if now.Size() != before.Size() || !now.ModTime().Equal(before.ModTime()) {
-		return errChangedWhileRead
-	}
-	return nil
 }
 
 func isCtxErr(err error) bool {
@@ -166,25 +220,26 @@ func (r *Root) Hash(ctx context.Context, p *protocol.FsHashPayload) (*protocol.F
 			fail(path, protocol.ScanBudgetExceeded)
 			continue
 		}
-		f, fi, code := r.scanOpen(path)
+		sf, code := r.scanOpen(path)
 		if code != "" {
 			fail(path, code)
 			continue
 		}
-		size := fi.Size()
+		size := sf.fi.Size()
 		switch {
 		case size > p.MaxBytesPerFile:
-			f.Close()
+			sf.f.Close()
 			fail(path, protocol.ScanTooLarge)
 			continue
 		case i > 0 && size > p.MaxTotalBytes-hashed: // the first file is always attempted
-			f.Close()
+			sf.f.Close()
 			exhausted = true
 			fail(path, protocol.ScanBudgetExceeded)
 			continue
 		}
-		sums, n, err := digestFile(ctx, f, fi, p.Algorithms, buf)
-		f.Close()
+		hook("opened", path)
+		sums, n, err := digestFile(ctx, sf, p.Algorithms, buf)
+		sf.f.Close()
 		hashed += n
 		if err != nil {
 			if isCtxErr(err) {
@@ -193,10 +248,42 @@ func (r *Root) Hash(ctx context.Context, p *protocol.FsHashPayload) (*protocol.F
 			fail(path, protocol.ScanIOError)
 			continue
 		}
-		res.Files = append(res.Files, protocol.FsHashEntry{OK: true, Path: path, SizeBytes: size, Mtime: epochMs(fi),
+		res.Files = append(res.Files, protocol.FsHashEntry{OK: true, Path: path, SizeBytes: size, Mtime: epochMs(sf.fi),
 			Sha1: sums["sha1"], Sha256: sums["sha256"], Sha512: sums["sha512"]})
 	}
 	return res, nil
+}
+
+// errReadBudget: jar.readEntries' maxReadBytes would be exceeded.
+var errReadBudget = errors.New("command read budget exhausted")
+
+// readBudget counts the bytes a command reads from disk.
+type readBudget struct {
+	used, max int64
+}
+
+// meteredReaderAt counts reads into a budget and refuses to read past limit (total bytes used).
+type meteredReaderAt struct {
+	ra    io.ReaderAt
+	b     *readBudget
+	limit int64
+}
+
+func (m *meteredReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	room := m.limit - m.b.used
+	if room <= 0 && len(p) > 0 {
+		return 0, errReadBudget
+	}
+	short := int64(len(p)) > room
+	if short {
+		p = p[:room]
+	}
+	n, err := m.ra.ReadAt(p, off)
+	m.b.used += int64(n)
+	if err == nil && short {
+		err = errReadBudget
+	}
+	return n, err
 }
 
 // ReadJarEntries implements jar.readEntries.
@@ -209,6 +296,7 @@ func (r *Root) ReadJarEntries(ctx context.Context, p *protocol.JarReadEntriesPay
 		frame += failureSize(path) + 1
 	}
 	var content int64
+	reads := &readBudget{max: p.MaxReadBytes}
 	exhausted := false
 	buf := make([]byte, hashBufferBytes)
 	for i, path := range p.Paths {
@@ -219,9 +307,12 @@ func (r *Root) ReadJarEntries(ctx context.Context, p *protocol.JarReadEntriesPay
 			res.Jars = append(res.Jars, protocol.JarReadResult{Path: path, Error: protocol.ScanBudgetExceeded})
 			continue
 		}
-		jr, err := r.readJar(ctx, path, p, buf)
+		jr, err := r.readJar(ctx, path, p, i == 0, reads, buf)
 		if err != nil {
 			return nil, err
+		}
+		if !jr.OK && jr.Error == protocol.ScanBudgetExceeded {
+			exhausted = true
 		}
 		if jr.OK {
 			var c int64
@@ -252,25 +343,34 @@ func failureSize(path string) int64 {
 	return int64(len(b))
 }
 
-// readJar reads one jar; the error is non-nil only when the command is cancelled.
-func (r *Root) readJar(ctx context.Context, path string, p *protocol.JarReadEntriesPayload, buf []byte) (protocol.JarReadResult, error) {
+// readJar reads one jar; the error is non-nil only when the command is cancelled. Every byte read
+// counts against reads; except for the first jar (always processed) the jar is BUDGET_EXCEEDED
+// when its whole-file hash would not fit into the remaining read budget, or when its parse runs out.
+func (r *Root) readJar(ctx context.Context, path string, p *protocol.JarReadEntriesPayload, first bool, reads *readBudget, buf []byte) (protocol.JarReadResult, error) {
 	fail := func(code string) (protocol.JarReadResult, error) {
 		return protocol.JarReadResult{Path: path, Error: code}, nil
 	}
-	f, fi, code := r.scanOpen(path)
+	sf, code := r.scanOpen(path)
 	if code != "" {
 		return fail(code)
 	}
-	defer f.Close()
-	if fi.Size() > p.MaxJarBytes {
+	defer sf.f.Close()
+	size := sf.fi.Size()
+	if size > p.MaxJarBytes {
 		return fail(protocol.ScanTooLarge)
 	}
-	if afterJarOpen != nil {
-		afterJarOpen(path)
+	limit := int64(math.MaxInt64)
+	if !first {
+		limit = reads.max
+		if len(p.Hash) > 0 && size > reads.max-reads.used {
+			return fail(protocol.ScanBudgetExceeded)
+		}
 	}
-	out := protocol.JarReadResult{OK: true, Path: path, SizeBytes: fi.Size(), Mtime: epochMs(fi)}
+	hook("opened", path)
+	out := protocol.JarReadResult{OK: true, Path: path, SizeBytes: size, Mtime: epochMs(sf.fi)}
 	if len(p.Hash) > 0 {
-		sums, _, err := digestFile(ctx, f, fi, p.Hash, buf)
+		sums, n, err := digestFile(ctx, sf, p.Hash, buf)
+		reads.used += n
 		if err != nil {
 			if isCtxErr(err) {
 				return protocol.JarReadResult{}, err
@@ -279,12 +379,16 @@ func (r *Root) readJar(ctx context.Context, path string, p *protocol.JarReadEntr
 		}
 		out.Sha1, out.Sha512 = sums["sha1"], sums["sha512"]
 	}
-	zr, err := jarread.Read(ctx, f, fi.Size(), p.Entries, int(p.MaxEntryBytes), jarread.DefaultLimits)
+	hook("hashed", path)
+	zr, err := jarread.Read(ctx, &meteredReaderAt{ra: sf.f, b: reads, limit: limit}, size, p.Entries, int(p.MaxEntryBytes), jarread.DefaultLimits)
 	if isCtxErr(err) {
 		return protocol.JarReadResult{}, err
 	}
-	// A jar rewritten while it was parsed is IO_ERROR (retry), whatever the parser concluded.
-	if uerr := unchanged(f, fi); uerr != nil {
+	if errors.Is(err, errReadBudget) {
+		return fail(protocol.ScanBudgetExceeded)
+	}
+	// A jar rewritten since it was opened (and hashed) is IO_ERROR (retry), whatever the parser concluded.
+	if uerr := unchanged(sf.f, sf.id); uerr != nil {
 		return fail(protocol.ScanIOError)
 	}
 	switch {
