@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useState } from "react";
+import { useId, useState } from "react";
 import type { Server, ServerStartup } from "@blockforge/contracts";
 import { serversApi } from "@/lib/api/servers-api";
 import { describeError } from "@/lib/api/errors";
@@ -8,6 +8,7 @@ import { useApiMutation } from "@/lib/mutations";
 import { serverStartupQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { serverActionable } from "@/lib/server-permissions";
+import { useSyncedForm } from "@/lib/use-synced-form";
 import { useVariableValidation } from "@/lib/variable-validation";
 import { ErrorState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
@@ -33,11 +34,13 @@ function VariableCard({
 }) {
   const queryClient = useQueryClient();
   const id = useId();
-  const [value, setValue] = useState(variable.value ?? "");
+  // A refetch updates the field only while it holds no unsaved edit.
+  const synced = useSyncedForm(variable.value ?? "", (v: string) => v);
+  const value = synced.form ?? "";
+  const setValue = (v: string) => synced.setForm(v);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => setValue(variable.value ?? ""), [variable.value]);
   const editable = canEdit && variable.editable && variable.value !== null;
-  const dirty = value !== (variable.value ?? "");
+  const dirty = synced.dirty;
   const save = useApiMutation({
     mutationFn: (v: string) => serversApi.updateVariable(server.id, variable.envName, v),
     success: `${variable.name} saved — applies on next start`,
@@ -110,6 +113,14 @@ function VariableCard({
           </form>
         )}
         {error ? <p className="text-xs text-danger">{error}</p> : null}
+        {synced.changedElsewhere ? (
+          <p role="status" className="text-xs text-warning">
+            Changed elsewhere to “{variable.value}” while you were editing.{" "}
+            <button type="button" className="underline" onClick={() => synced.reset()}>
+              Use that value
+            </button>
+          </p>
+        ) : null}
         {variable.description ? (
           <p id={`${id}-desc`} className="text-xs whitespace-pre-line text-muted-foreground">
             {variable.description}

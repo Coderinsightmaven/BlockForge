@@ -1,70 +1,61 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useBlocker } from "@tanstack/react-router";
 import { ArrowLeft, Lock } from "lucide-react";
-import { Suspense, lazy, useCallback, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { Me, Server } from "@blockforge/contracts";
 import { isApiError } from "@/lib/api/errors";
+import { retryableLazy } from "@/lib/lazy";
 import { serverQuery } from "@/lib/queries";
 import { useServerRealtime } from "@/lib/realtime/server-handlers";
 import { resolveServerTab, serverCan, visibleServerTabs } from "@/lib/server-permissions";
 import type { ServerTab } from "@/lib/server-permissions";
 import type { TimeRange } from "@/lib/time-range";
+import { ChunkBoundary, ChunkError, LazySection } from "@/components/common/chunk-boundary";
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ServerStateBadge } from "@/components/ui/status";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ConsolePanel } from "./console/console-panel";
 import { shouldBlockEditorLeave } from "./editor-guard";
+import { LazyJobProgress } from "./lazy-job-progress";
 import type { PowerAction } from "./server-common";
-import { PowerControls, ServerAddress, ServerLiveStats, StateHint, SuspendedBanner } from "./server-common";
+import { PowerControls, ServerAddress, StateHint, SuspendedBanner } from "./server-common";
 
 /*
- * Only the console (the default tab) and the page frame are part of the route's first load. Every
- * other tab is its own chunk, fetched when its trigger is hovered or focused (so switching is
- * usually instant) and at the latest when it is opened (which shows the tab skeleton meanwhile).
+ * The route's own first load is the page frame (header, power controls, banners, tab list). Every
+ * tab, the Console included, is its own chunk: the requested tab's chunk starts downloading as soon
+ * as the page mounts (in parallel with the server request), any other tab's when its trigger is
+ * hovered or focused, at the latest when it is opened (the tab skeleton shows meanwhile). A tab
+ * whose chunk fails to download shows an error with Retry.
  */
-const TAB_LOADERS = {
-  stats: () => import("./tabs/stats-tab"),
-  files: () => import("./files/files-tab"),
-  extensions: () => import("./extensions/extensions-tab"),
-  players: () => import("./players/players-tab"),
-  backups: () => import("./tabs/backups-tab"),
-  schedules: () => import("./tabs/schedules-tab"),
-  startup: () => import("./tabs/startup-tab"),
-  network: () => import("./tabs/network-tab"),
-  users: () => import("./tabs/users-tab"),
-  activity: () => import("./tabs/activity-tab"),
-  settings: () => import("./tabs/settings-tab"),
-} satisfies Partial<Record<ServerTab, () => Promise<unknown>>>;
+const TABS = {
+  console: retryableLazy(() => import("./console/console-tab")),
+  stats: retryableLazy(() => import("./tabs/stats-tab")),
+  files: retryableLazy(() => import("./files/files-tab")),
+  extensions: retryableLazy(() => import("./extensions/extensions-tab")),
+  players: retryableLazy(() => import("./players/players-tab")),
+  backups: retryableLazy(() => import("./tabs/backups-tab")),
+  schedules: retryableLazy(() => import("./tabs/schedules-tab")),
+  startup: retryableLazy(() => import("./tabs/startup-tab")),
+  network: retryableLazy(() => import("./tabs/network-tab")),
+  users: retryableLazy(() => import("./tabs/users-tab")),
+  activity: retryableLazy(() => import("./tabs/activity-tab")),
+  settings: retryableLazy(() => import("./tabs/settings-tab")),
+} satisfies Record<ServerTab, { preload: () => Promise<void> }>;
 
-/** Start downloading a tab's chunk (hover/focus of its trigger). The browser caches the module. */
+/** Start downloading a tab's chunk (page mount, hover/focus of its trigger). Never rejects. */
 export function prefetchServerTab(tab: ServerTab): void {
-  const load = (TAB_LOADERS as Partial<Record<ServerTab, () => Promise<unknown>>>)[tab];
-  // A failed prefetch is not an error: opening the tab retries and shows the failure there.
-  if (load) load().catch(() => undefined);
+  void (TABS as Partial<Record<string, { preload: () => Promise<void> }>>)[tab]?.preload();
 }
-
-const StatsTab = lazy(TAB_LOADERS.stats);
-const FilesTab = lazy(TAB_LOADERS.files);
-const ExtensionsTab = lazy(TAB_LOADERS.extensions);
-const PlayersTab = lazy(TAB_LOADERS.players);
-const BackupsTab = lazy(TAB_LOADERS.backups);
-const SchedulesTab = lazy(TAB_LOADERS.schedules);
-const StartupTab = lazy(TAB_LOADERS.startup);
-const NetworkTab = lazy(TAB_LOADERS.network);
-const UsersTab = lazy(TAB_LOADERS.users);
-const ActivityTab = lazy(TAB_LOADERS.activity);
-const SettingsTab = lazy(TAB_LOADERS.settings);
 
 // Shown only when relevant (EULA not accepted, a job running or failed): loaded on demand. Until the
 // chunk arrives they render nothing, exactly as they do while their own data is still loading.
-const EulaBanner = lazy(() => import("./eula-banner").then((m) => ({ default: m.EulaBanner })));
-const JobProgress = lazy(() => import("./server-jobs").then((m) => ({ default: m.JobProgress })));
-const PowerJobNotice = lazy(() => import("./server-jobs").then((m) => ({ default: m.PowerJobNotice })));
+const EulaBanner = retryableLazy(() => import("./eula-banner").then((m) => ({ default: m.EulaBanner })));
+const PowerJobNotice = retryableLazy(() =>
+  import("./server-jobs").then((m) => ({ default: m.PowerJobNotice })),
+);
 
 export interface ServerPageSearch {
   tab?: ServerTab;
@@ -79,20 +70,6 @@ function TabFallback() {
       <Skeleton className="h-9 w-64" />
       <Skeleton className="h-64 w-full" />
     </div>
-  );
-}
-
-/** Shown while the job progress widget loads: the job's title and the same "Loading job…" line. */
-function JobProgressFallback({ title }: { title: string }) {
-  return (
-    <Card aria-busy>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="text-xs text-muted-foreground">Loading job…</p>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -148,6 +125,9 @@ export function ServerPage({
     [],
   );
   useBlocker({ shouldBlockFn, enableBeforeUnload: false });
+  // Download the requested tab while the server itself is still being fetched.
+  const requestedTab = search.tab ?? "console";
+  useEffect(() => prefetchServerTab(requestedTab), [requestedTab]);
 
   if (query.isPending) {
     return (
@@ -223,28 +203,30 @@ export function ServerPage({
       <div className="flex flex-col gap-3">
         <SuspendedBanner server={server} />
         {server.game === "minecraft-java" ? (
-          <Suspense fallback={null}>
-            <EulaBanner server={server} promptSeen={eulaPrompt} onAccepted={() => setEulaPrompt(false)} />
-          </Suspense>
+          <ChunkBoundary fallback={(retry) => <ChunkError what="the EULA check" retry={retry} compact />}>
+            <Suspense fallback={null}>
+              <EulaBanner server={server} promptSeen={eulaPrompt} onAccepted={() => setEulaPrompt(false)} />
+            </Suspense>
+          </ChunkBoundary>
         ) : null}
         {powerJob ? (
-          <Suspense fallback={null}>
-            <PowerJobNotice
-              key={powerJob.jobId}
-              jobId={powerJob.jobId}
-              action={powerJob.action}
-              onFailed={(code) => {
-                if (code === "EULA_NOT_ACCEPTED") setEulaPrompt(true);
-              }}
-              onDismiss={() => setPowerJob(null)}
-            />
-          </Suspense>
+          <ChunkBoundary
+            key={powerJob.jobId}
+            fallback={(retry) => <ChunkError what="the power job's status" retry={retry} compact />}
+          >
+            <Suspense fallback={null}>
+              <PowerJobNotice
+                jobId={powerJob.jobId}
+                action={powerJob.action}
+                onFailed={(code) => {
+                  if (code === "EULA_NOT_ACCEPTED") setEulaPrompt(true);
+                }}
+                onDismiss={() => setPowerJob(null)}
+              />
+            </Suspense>
+          </ChunkBoundary>
         ) : null}
-        {job ? (
-          <Suspense fallback={<JobProgressFallback title={job.title} />}>
-            <JobProgress key={job.jobId} jobId={job.jobId} title={job.title} />
-          </Suspense>
-        ) : null}
+        {job ? <LazyJobProgress jobId={job.jobId} title={job.title} /> : null}
       </div>
 
       {tab === null ? (
@@ -272,41 +254,33 @@ export function ServerPage({
             ))}
           </TabsList>
           <div className="pt-4">
-            {tab === "console" ? (
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
-                <ConsolePanel
+            <LazySection key={tab} what="this tab" loading={<TabFallback />}>
+              {tab === "console" ? (
+                <TABS.console server={server} onEulaPrompt={() => setEulaPrompt(true)} />
+              ) : null}
+              {tab === "stats" ? (
+                <TABS.stats server={server} range={range} onRangeChange={onRangeChange} />
+              ) : null}
+              {tab === "files" ? (
+                <TABS.files
                   server={server}
-                  className="h-[60vh] min-h-80 lg:h-[34rem]"
-                  onEulaPrompt={() => setEulaPrompt(true)}
+                  path={search.path ?? ""}
+                  editing={search.edit ?? null}
+                  onNavigate={(path) => onSearch({ path: path || undefined, edit: undefined })}
+                  onEdit={(edit) => onSearch({ edit: edit ?? undefined })}
+                  onEditorDirty={onEditorDirty}
                 />
-                <ServerLiveStats server={server} />
-              </div>
-            ) : (
-              <Suspense fallback={<TabFallback />}>
-                {tab === "stats" ? (
-                  <StatsTab server={server} range={range} onRangeChange={onRangeChange} />
-                ) : null}
-                {tab === "files" ? (
-                  <FilesTab
-                    server={server}
-                    path={search.path ?? ""}
-                    editing={search.edit ?? null}
-                    onNavigate={(path) => onSearch({ path: path || undefined, edit: undefined })}
-                    onEdit={(edit) => onSearch({ edit: edit ?? undefined })}
-                    onEditorDirty={onEditorDirty}
-                  />
-                ) : null}
-                {tab === "extensions" ? <ExtensionsTab server={server} me={me} /> : null}
-                {tab === "players" ? <PlayersTab server={server} /> : null}
-                {tab === "backups" ? <BackupsTab server={server} me={me} /> : null}
-                {tab === "schedules" ? <SchedulesTab server={server} /> : null}
-                {tab === "startup" ? <StartupTab server={server} /> : null}
-                {tab === "network" ? <NetworkTab server={server} /> : null}
-                {tab === "users" ? <UsersTab server={server} /> : null}
-                {tab === "activity" ? <ActivityTab server={server} /> : null}
-                {tab === "settings" ? <SettingsTab me={me} server={server} /> : null}
-              </Suspense>
-            )}
+              ) : null}
+              {tab === "extensions" ? <TABS.extensions server={server} me={me} /> : null}
+              {tab === "players" ? <TABS.players server={server} /> : null}
+              {tab === "backups" ? <TABS.backups server={server} me={me} /> : null}
+              {tab === "schedules" ? <TABS.schedules server={server} /> : null}
+              {tab === "startup" ? <TABS.startup server={server} /> : null}
+              {tab === "network" ? <TABS.network server={server} /> : null}
+              {tab === "users" ? <TABS.users server={server} /> : null}
+              {tab === "activity" ? <TABS.activity server={server} /> : null}
+              {tab === "settings" ? <TABS.settings me={me} server={server} /> : null}
+            </LazySection>
           </div>
         </Tabs>
       )}

@@ -151,6 +151,10 @@ Phase 4b: contracts (4e1a456), agent commands (3125c66), control plane (f8d514d)
 Players verified live on the test node (console path on Paper, file path on stopped Vanilla); Plugins & Mods live run waits for
 the agent deploy after its review. Cross-model reviews queued (agent jar reader: Codex; libs fix re-review: Grok; Phase 4b
 control plane + web); then Phase 5 (databases).
-Web route budget enforced in CI (`bundle:check`); app shell 252.2 KiB (command palette + enrollment dialog load on first use); tightest routes:
-`/nodes/$nodeId` 287.1 KiB, `/settings` 287.0 KiB, `/servers/$serverId` 281.5 KiB (console-first: every other tab, the job widgets, the EULA banner and the kill
-confirmation are on-demand chunks; tab chunks prefetch on hover/focus of their trigger).
+Web route budget enforced in CI (`bundle:check`), including every direct-to-tab first load (`route#tab` = route + the lazy chunks
+the route module imports, discovered from the manifest; a `*-tab.tsx` chunk outside every route fails the check). App shell 251.8 KiB
+(framework vendor chunk, command palette + enrollment dialog on first use); tightest: `/settings#api-keys` 295.8 KiB,
+`/servers/$serverId#files` 291.8, `/nodes/$nodeId#node-allocations` 290.9; `/servers/$serverId` frame 266.2 (every tab, the Console
+included, is a chunk prefetched on mount/hover/focus). Lazy chunks that fail to download show an error with Retry (tabs, cards,
+charts, editor) or an error dialog with Retry/Close (dialogs). Web Phase 4b Codex review: 2 major + 3 medium fixed
+(`docs/reviews/2026-10-12-web-phase4b.md`).

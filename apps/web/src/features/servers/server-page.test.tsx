@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Server } from "@blockforge/contracts";
@@ -8,6 +8,7 @@ import { JOB_ID, SERVER_ID, apiErrorBody, jsonResponse, makeMe, makeServer } fro
 import { DEFAULT_TIME_RANGE } from "@/lib/time-range";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ServerPage } from "./server-page";
+import type { ServerPageSearch } from "./server-page";
 
 /*
  * The server page's first load is the frame + console; tabs and job widgets are separate chunks.
@@ -16,7 +17,7 @@ import { ServerPage } from "./server-page";
 const chunks = vi.hoisted(() => {
   let release!: () => void;
   const jobsGate = new Promise<void>((resolve) => (release = resolve));
-  return { loaded: new Set<string>(), jobsGate, releaseJobs: () => release() };
+  return { loaded: new Set<string>(), jobsGate, releaseJobs: () => release(), usersAttempts: 0 };
 });
 
 vi.mock("./console/console-panel", () => ({ ConsolePanel: () => <p>console panel</p> }));
@@ -27,6 +28,13 @@ vi.mock("./tabs/backups-tab", () => {
 vi.mock("./tabs/activity-tab", () => {
   chunks.loaded.add("activity");
   return { default: () => <p>activity tab</p> };
+});
+// The Users tab's downloads fail twice (the prefetch on mount and the render: dropped connection or a
+// new deployment), the third one works.
+vi.mock("./tabs/users-tab", () => {
+  chunks.usersAttempts++;
+  if (chunks.usersAttempts <= 2) throw new TypeError("Failed to fetch dynamically imported module");
+  return { default: () => <p>users tab</p> };
 });
 vi.mock("./server-jobs", async () => {
   chunks.loaded.add("jobs");
@@ -43,7 +51,7 @@ vi.mock("./server-jobs", async () => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-function renderPage(server: Server) {
+function renderPage(server: Server, search: ServerPageSearch = {}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) =>
@@ -58,7 +66,7 @@ function renderPage(server: Server) {
       <ServerPage
         me={makeMe()}
         serverId={SERVER_ID}
-        search={{}}
+        search={search}
         range={DEFAULT_TIME_RANGE}
         onSearch={onSearch}
         onRangeChange={() => {}}
@@ -107,5 +115,16 @@ describe("server page loading", () => {
     });
     expect(await screen.findByText(`Installing server progress for ${JOB_ID}`)).toBeTruthy();
     expect(screen.queryByText("Loading job…")).toBeNull();
+  });
+
+  it("a tab whose chunk fails to download shows an error with Retry, which downloads it again", async () => {
+    const user = userEvent.setup();
+    renderPage(makeServer(), { tab: "users" });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Could not load this tab");
+    expect(screen.queryByText("users tab")).toBeNull();
+    await user.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("users tab")).toBeTruthy();
+    expect(chunks.usersAttempts).toBe(3);
   });
 });

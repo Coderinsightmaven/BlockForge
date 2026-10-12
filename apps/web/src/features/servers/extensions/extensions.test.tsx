@@ -7,6 +7,7 @@ import { IDEMPOTENCY_HEADER, SERVER_OWNER_PERMISSIONS } from "@blockforge/contra
 import type { Job } from "@blockforge/contracts";
 import { JOB_ID, SERVER_ID, apiErrorBody, jsonResponse, makeMe, makeServer } from "@/test/fixtures";
 import { makeClient } from "@/test/fake-socket";
+import { findLoadedDialog } from "@/test/lazy";
 import {
   EXT_ID,
   EXT_ID_2,
@@ -270,6 +271,77 @@ describe("Plugins & mods — installed", () => {
     await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/extensions")).length).toBe(before + 1));
   });
 
+  it("overlapping detail reads: an older response arriving after a newer 404 does not re-add the row", async () => {
+    // First read of EXT_ID_2 (event 1) is held; the second read (event 2) answers 404 at once.
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((r) => (releaseFirst = r));
+    const stale = makeExtension({
+      id: EXT_ID_2,
+      path: "plugins/b.jar",
+      filename: "b.jar",
+      metadata: [makeMetadata({ name: "Second (stale read)" })],
+    });
+    routeFetch([
+      [
+        "GET",
+        /\/extensions$/,
+        ok(
+          makeExtensionList({
+            items: [
+              makeExtension(),
+              makeExtension({
+                id: EXT_ID_2,
+                path: "plugins/b.jar",
+                filename: "b.jar",
+                metadata: [makeMetadata({ name: "Second" })],
+              }),
+            ],
+          }),
+        ),
+      ],
+      [
+        "GET",
+        new RegExp(`/extensions/${EXT_ID_2}$`),
+        [
+          async () => {
+            await firstHeld;
+            return jsonResponse(stale);
+          },
+          () => jsonResponse(apiErrorBody("NOT_FOUND"), { status: 404 }),
+        ],
+      ],
+    ]);
+    const { client, last } = makeClient();
+    wrap(<ExtensionsTab server={owner} me={makeMe()} />, client);
+    await screen.findByText("Second");
+    act(() => last().open());
+    const send = (changed: string[]) =>
+      act(() =>
+        last().receive({
+          op: "event",
+          topic: `server:${SERVER_ID}`,
+          type: "extensions.updated",
+          ts: 1,
+          data: {
+            serverId: SERVER_ID,
+            scan: { status: "completed", scannedAt: 2, jobId: null, error: null },
+            changed,
+          },
+        }),
+      );
+    send([EXT_ID_2]); // read 1: held
+    send([EXT_ID_2]); // read 2: 404 → removed
+    await waitFor(() => expect(screen.queryByText("Second")).toBeNull());
+    await act(async () => {
+      releaseFirst();
+      await firstHeld;
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(screen.queryByText("Second (stale read)")).toBeNull();
+    expect(screen.queryByText("Second")).toBeNull();
+    expect(screen.getByText("EssentialsX")).toBeTruthy();
+  });
+
   it("vanilla servers have no plugins or mods", async () => {
     routeFetch([
       ["GET", /\/extensions$/, ok(makeExtensionList({ installDir: null, kind: null, items: [] }))],
@@ -350,7 +422,7 @@ describe("Plugins & mods — Modrinth", () => {
     expect(screen.getByText(/1 result\(s\) on this page hidden/)).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "View Lithium" }));
-    const dialog = await screen.findByRole("dialog", {}, { timeout: 5000 });
+    const dialog = await findLoadedDialog();
     expect(await within(dialog).findByText(/<script>alert\(1\)<\/script>/)).toBeTruthy();
     expect(dialog.querySelector("script")).toBeNull();
     expect(await within(dialog).findByText("Sodium is optional")).toBeTruthy();
@@ -411,7 +483,7 @@ describe("Plugins & mods — Modrinth", () => {
     wrap(<ExtensionsTab server={owner} me={makeMe()} />);
     await user.click(await screen.findByRole("tab", { name: "Browse Modrinth" }));
     await user.click(await screen.findByRole("button", { name: "View Lithium" }));
-    const dialog = await screen.findByRole("dialog", {}, { timeout: 5000 });
+    const dialog = await findLoadedDialog();
     expect(await within(dialog).findByText("Client-only mod")).toBeTruthy();
     expect(within(dialog).getByText("Blocking problems")).toBeTruthy();
     expect((within(dialog).getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(
@@ -539,7 +611,7 @@ describe("Plugins & mods — updates, history, uploads", () => {
     const user = userEvent.setup();
     wrap(<ExtensionsTab server={owner} me={makeMe()} />);
     await user.click(await screen.findByRole("button", { name: "Upload .jar" }));
-    const dialog = await screen.findByRole("dialog", {}, { timeout: 5000 });
+    const dialog = await findLoadedDialog();
     await user.upload(within(dialog).getByLabelText("Jar file"), new File(["PK"], "Essentials.jar"));
     await user.click(within(dialog).getByRole("button", { name: "Upload" }));
     expect(await within(dialog).findByText(/A file with this name already exists/)).toBeTruthy();
@@ -558,6 +630,59 @@ describe("Plugins & mods — updates, history, uploads", () => {
       { replaceExisting: false, allowIncompatible: false },
       { replaceExisting: true, allowIncompatible: false },
     ]);
+    expect(calls.filter((c) => c.url.endsWith("/uploads"))).toHaveLength(1);
+  });
+
+  it("after a completion with an unknown outcome the options are frozen and Retry resends them unchanged", async () => {
+    const calls = routeFetch([
+      ["GET", /\/extensions$/, ok(makeExtensionList())],
+      [
+        "POST",
+        /\/extensions\/uploads$/,
+        ok({ url: "/api/v1/transfers/tok", expiresAt: 9, uploadId: UPLOAD_ID }),
+      ],
+      [
+        "POST",
+        /\/complete$/,
+        [
+          // The response is lost: a gateway error says nothing about whether the jar went in.
+          () => jsonResponse(apiErrorBody("UPSTREAM_ERROR", "bad gateway"), { status: 502 }),
+          ok({
+            extension: makeExtension({ source: "upload", modrinth: null }),
+            compatibility: { loadable: true, metadataIndex: 0, problems: [] },
+            warnings: [],
+            restartRequired: true,
+          }),
+        ],
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<ExtensionsTab server={owner} me={makeMe()} />);
+    await user.click(await screen.findByRole("button", { name: "Upload .jar" }));
+    const dialog = await findLoadedDialog();
+    await user.upload(within(dialog).getByLabelText("Jar file"), new File(["PK"], "Essentials.jar"));
+    await user.click(within(dialog).getByRole("switch", { name: "Replace the existing file" }));
+    await user.click(within(dialog).getByRole("button", { name: "Upload" }));
+    expect(await within(dialog).findByText(/It is unknown whether the jar was installed/)).toBeTruthy();
+    // Only a same-options retry is offered; the options can't be changed meanwhile.
+    expect(within(dialog).queryByRole("button", { name: "Try again with these options" })).toBeNull();
+    const replace = within(dialog).getByRole("switch", {
+      name: "Replace the existing file",
+    }) as HTMLButtonElement;
+    const incompatible = within(dialog).getByRole("switch", {
+      name: "Install although incompatible",
+    }) as HTMLButtonElement;
+    expect(replace.disabled).toBe(true);
+    expect(replace.getAttribute("aria-checked")).toBe("true");
+    expect(incompatible.disabled).toBe(true);
+    await user.click(within(dialog).getByRole("button", { name: "Retry" }));
+    expect(await within(dialog).findByText("Installed")).toBeTruthy();
+    const completes = calls.filter((c) => c.url.endsWith("/complete"));
+    expect(completes.map((c) => c.body)).toEqual([
+      { replaceExisting: true, allowIncompatible: false },
+      { replaceExisting: true, allowIncompatible: false },
+    ]);
+    expect(completes[1]!.url).toBe(completes[0]!.url); // same staged upload
     expect(calls.filter((c) => c.url.endsWith("/uploads"))).toHaveLength(1);
   });
 
@@ -590,7 +715,7 @@ describe("Plugins & mods — updates, history, uploads", () => {
     const user = userEvent.setup();
     wrap(<ExtensionsTab server={owner} me={makeMe()} />);
     await user.click(await screen.findByRole("button", { name: "Upload .jar" }));
-    const dialog = await screen.findByRole("dialog", {}, { timeout: 5000 });
+    const dialog = await findLoadedDialog();
     await user.upload(within(dialog).getByLabelText("Jar file"), new File(["PK"], "Essentials.jar"));
     await user.click(within(dialog).getByRole("button", { name: "Upload" }));
     expect(await screen.findByText(/turned off by an administrator/)).toBeTruthy();

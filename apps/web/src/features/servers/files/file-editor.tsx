@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, Lock, Save } from "lucide-react";
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { Server } from "@blockforge/contracts";
 import { filesApi } from "@/lib/api/files-api";
@@ -8,6 +8,8 @@ import { formatBytes } from "@/lib/format";
 import { toastError } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
 import { serverActionable } from "@/lib/server-permissions";
+import { retryableLazy } from "@/lib/lazy";
+
 import { ErrorState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,12 +23,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { LazySection } from "@/components/common/chunk-boundary";
+
 import { baseName, languageFor, parentPath } from "./paths";
 import { saveFile } from "./save-file";
 import type { SaveOutcome } from "./save-file";
 import { downloadFile } from "./upload";
 
-const CodeEditor = lazy(() => import("./code-editor"));
+const CodeEditor = retryableLazy(() => import("./code-editor"));
 
 interface Loaded {
   content: string;
@@ -202,7 +206,7 @@ export function FileEditor({
         ) : !loaded ? (
           <Skeleton className="m-3 h-[calc(100%-1.5rem)]" />
         ) : (
-          <Suspense fallback={<Skeleton className="m-3 h-[calc(100%-1.5rem)]" />}>
+          <LazySection what="the code editor" loading={<Skeleton className="m-3 h-[calc(100%-1.5rem)]" />}>
             <CodeEditor
               value={text}
               onChange={setText}
@@ -212,7 +216,7 @@ export function FileEditor({
               onEscape={() => backRef.current?.focus()}
               ariaLabel={`Editing ${path}`}
             />
-          </Suspense>
+          </LazySection>
         )}
       </div>
       <Dialog open={conflict !== null} onOpenChange={(o) => !o && setConflict(null)}>

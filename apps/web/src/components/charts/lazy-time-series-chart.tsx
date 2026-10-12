@@ -1,4 +1,6 @@
-import { Suspense, lazy } from "react";
+import { Suspense } from "react";
+import { retryableLazy } from "@/lib/lazy";
+import { ChunkBoundary, ChunkError } from "@/components/common/chunk-boundary";
 import type { TimeSeriesChartProps } from "./time-series-chart";
 
 /*
@@ -6,7 +8,7 @@ import type { TimeSeriesChartProps } from "./time-series-chart";
  * stats) don't carry the plotting library in their first-load JS. Until it arrives the chart area
  * shows a loading placeholder of the same height — never values.
  */
-const Impl = lazy(() => import("./time-series-chart").then((m) => ({ default: m.TimeSeriesChart })));
+const Impl = retryableLazy(() => import("./time-series-chart").then((m) => ({ default: m.TimeSeriesChart })));
 
 export function ChartLoading({ height = 200, label }: { height?: number; label: string }) {
   return (
@@ -24,8 +26,10 @@ export function ChartLoading({ height = 200, label }: { height?: number; label: 
 
 export function TimeSeriesChart(props: TimeSeriesChartProps) {
   return (
-    <Suspense fallback={<ChartLoading height={props.height} label={props.label} />}>
-      <Impl {...props} />
-    </Suspense>
+    <ChunkBoundary fallback={(retry) => <ChunkError what="the chart" retry={retry} compact />}>
+      <Suspense fallback={<ChartLoading height={props.height} label={props.label} />}>
+        <Impl {...props} />
+      </Suspense>
+    </ChunkBoundary>
   );
 }

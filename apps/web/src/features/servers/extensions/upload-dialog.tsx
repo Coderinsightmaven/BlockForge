@@ -2,9 +2,10 @@ import { CircleX, TriangleAlert } from "lucide-react";
 import { useRef, useState } from "react";
 import { ExtensionUploadRejectedDetails, MAX_EXTENSION_UPLOAD_BYTES } from "@blockforge/contracts";
 import type { ExtensionCompatibility, Server } from "@blockforge/contracts";
-import { extensionsApi } from "@/lib/api/phase4b-api";
+import { extensionsApi } from "@/lib/api/extensions-api";
 import { describeError, isApiError } from "@/lib/api/errors";
 import { formatBytes } from "@/lib/format";
+import { isUncertainFailure } from "@/lib/idempotency";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import {
@@ -21,13 +22,27 @@ import { Switch } from "@/components/ui/switch";
 import { putToTransferUrl } from "../files/upload";
 import { UPLOAD_REJECTION, checkUploadFile, problemsByLevel } from "./extension-model";
 
+interface CompleteOptions {
+  replaceExisting: boolean;
+  allowIncompatible: boolean;
+}
+
 type Phase =
   | { kind: "idle" }
   | { kind: "uploading"; loaded: number }
-  | { kind: "completing" }
-  /** The bytes are staged under this id: completion can be retried with other options. */
+  | { kind: "completing"; options: CompleteOptions }
+  /**
+   * Definitive refusal (422/409 with a reason): nothing was installed and the bytes stay staged
+   * under this id, so completion can be tried again with other options.
+   */
   | { kind: "rejected"; uploadId: string; reason: string; compatibility: ExtensionCompatibility | null }
-  | { kind: "error"; message: string; uploadId: string | null }
+  /**
+   * The completion's outcome is unknown (network error, 5xx, timeout: the response was lost). The
+   * server may have installed the jar with `options` (completion is idempotent per upload id and
+   * replays that result), so the only safe step is to retry with exactly the same options.
+   */
+  | { kind: "uncertain"; uploadId: string; options: CompleteOptions; message: string }
+  | { kind: "error"; message: string }
   | {
       kind: "done";
       compatibility: ExtensionCompatibility;
@@ -59,7 +74,8 @@ function Problems({ compatibility }: { compatibility: ExtensionCompatibility | n
 /**
  * Upload a plugin/mod jar: announce it (policy + name/size checks), PUT the bytes to the single-use
  * transfer URL (staged outside the install dir), then complete — which validates the jar and moves it
- * into place. A refused completion keeps the staged upload so it can be retried with other options.
+ * into place. A refused completion keeps the staged upload so it can be retried with other options;
+ * a completion with an unknown outcome can only be retried with the same options.
  */
 export default function UploadDialog({
   server,
@@ -79,14 +95,14 @@ export default function UploadDialog({
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const abort = useRef<AbortController | null>(null);
   const busy = phase.kind === "uploading" || phase.kind === "completing";
+  // While the outcome of a completion is unknown, the options it was sent with are frozen.
+  const frozen =
+    phase.kind === "uncertain" ? phase.options : phase.kind === "completing" ? phase.options : null;
 
-  const complete = async (uploadId: string) => {
-    setPhase({ kind: "completing" });
+  const complete = async (uploadId: string, options: CompleteOptions) => {
+    setPhase({ kind: "completing", options });
     try {
-      const r = await extensionsApi.completeUpload(server.id, uploadId, {
-        replaceExisting,
-        allowIncompatible,
-      });
+      const r = await extensionsApi.completeUpload(server.id, uploadId, options);
       setPhase({
         kind: "done",
         compatibility: r.compatibility,
@@ -103,8 +119,10 @@ export default function UploadDialog({
           reason: details.data.reason,
           compatibility: details.data.compatibility,
         });
+      } else if (isUncertainFailure(err)) {
+        setPhase({ kind: "uncertain", uploadId, options, message: describeError(err).title });
       } else {
-        setPhase({ kind: "error", message: describeError(err).title, uploadId });
+        setPhase({ kind: "error", message: describeError(err).title });
       }
     }
   };
@@ -142,14 +160,13 @@ export default function UploadDialog({
         onUploadsDisabled();
         return;
       }
-      setPhase({ kind: "error", message: describeError(err).title, uploadId: null });
+      setPhase({ kind: "error", message: describeError(err).title });
       return;
     }
-    await complete(uploadId);
+    await complete(uploadId, { replaceExisting, allowIncompatible });
   };
 
-  const retryable = phase.kind === "rejected" || (phase.kind === "error" && phase.uploadId !== null);
-  const retryId = phase.kind === "rejected" || phase.kind === "error" ? phase.uploadId : null;
+  const staged = phase.kind === "rejected" || phase.kind === "uncertain";
   return (
     <Dialog
       open
@@ -191,7 +208,7 @@ export default function UploadDialog({
                 id="extension-file"
                 type="file"
                 accept=".jar,application/java-archive"
-                disabled={busy || retryable}
+                disabled={busy || staged}
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
                   setFile(f);
@@ -214,9 +231,9 @@ export default function UploadDialog({
             <div className="flex items-start gap-2">
               <Switch
                 id="upload-replace"
-                checked={replaceExisting}
+                checked={frozen ? frozen.replaceExisting : replaceExisting}
                 onCheckedChange={setReplaceExisting}
-                disabled={busy}
+                disabled={busy || frozen !== null}
               />
               <div>
                 <Label htmlFor="upload-replace">Replace the existing file</Label>
@@ -228,9 +245,9 @@ export default function UploadDialog({
             <div className="flex items-start gap-2">
               <Switch
                 id="upload-incompatible"
-                checked={allowIncompatible}
+                checked={frozen ? frozen.allowIncompatible : allowIncompatible}
                 onCheckedChange={setAllowIncompatible}
-                disabled={busy}
+                disabled={busy || frozen !== null}
               />
               <div>
                 <Label htmlFor="upload-incompatible">Install although incompatible</Label>
@@ -253,6 +270,15 @@ export default function UploadDialog({
                 <Problems compatibility={phase.compatibility} />
               </div>
             ) : null}
+            {phase.kind === "uncertain" ? (
+              <div role="alert" className="flex flex-col gap-1 text-sm">
+                <p className="text-danger">{phase.message}</p>
+                <p className="text-xs text-muted-foreground">
+                  It is unknown whether the jar was installed. Retry checks again with the same options; if it
+                  was installed, that result is shown.
+                </p>
+              </div>
+            ) : null}
             {phase.kind === "error" ? (
               <p role="alert" className="text-sm text-danger">
                 {phase.message}
@@ -270,10 +296,14 @@ export default function UploadDialog({
           >
             {phase.kind === "done" ? "Close" : "Cancel"}
           </Button>
-          {phase.kind === "done" ? null : retryable && retryId ? (
-            <Button loading={busy} onClick={() => void complete(retryId)}>
+          {phase.kind === "done" ? null : phase.kind === "uncertain" ? (
+            <Button onClick={() => void complete(phase.uploadId, phase.options)}>Retry</Button>
+          ) : phase.kind === "rejected" ? (
+            <Button onClick={() => void complete(phase.uploadId, { replaceExisting, allowIncompatible })}>
               Try again with these options
             </Button>
+          ) : phase.kind === "completing" ? (
+            <Button loading>Checking…</Button>
           ) : (
             <Button loading={busy} disabled={!file || fileError !== null} onClick={() => void start()}>
               Upload

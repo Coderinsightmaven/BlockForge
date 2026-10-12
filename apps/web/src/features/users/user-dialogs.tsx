@@ -18,6 +18,8 @@ import { useApiMutation } from "@/lib/mutations";
 import { isOwner } from "@/lib/permissions";
 import { nodesQuery, rolesQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
+import { useSyncedForm } from "@/lib/use-synced-form";
+import { ChangedElsewhere } from "@/components/common/changed-elsewhere";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -231,6 +233,8 @@ export function CreateUserDialog({
   );
 }
 
+const editableUser = (u: User) => ({ displayName: u.displayName, username: u.username, status: u.status });
+
 export function EditUserDialog({
   user,
   me,
@@ -240,18 +244,16 @@ export function EditUserDialog({
   me: Me;
   onOpenChange: (o: boolean) => void;
 }) {
-  const [displayName, setDisplayName] = useState("");
-  const [username, setUsername] = useState("");
-  const [status, setStatus] = useState<User["status"]>("active");
+  // A list refetch updates the fields only while they hold no unsaved edits.
+  const synced = useSyncedForm(user ?? undefined, editableUser, user?.id);
+  const displayName = synced.form?.displayName ?? "";
+  const username = synced.form?.username ?? "";
+  const status = synced.form?.status ?? "active";
+  const setDisplayName = (v: string) => synced.setForm((f) => ({ ...f, displayName: v }));
+  const setUsername = (v: string) => synced.setForm((f) => ({ ...f, username: v }));
+  const setStatus = (v: User["status"]) => synced.setForm((f) => ({ ...f, status: v }));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  useEffect(() => {
-    if (user) {
-      setDisplayName(user.displayName);
-      setUsername(user.username);
-      setStatus(user.status);
-      setErrors({});
-    }
-  }, [user]);
+  useEffect(() => setErrors({}), [user?.id]);
   const save = useApiMutation({
     mutationFn: (body: z.input<typeof UpdateUserRequest>) => usersApi.update(user!.id, body),
     success: "User saved",
@@ -284,6 +286,7 @@ export function EditUserDialog({
             <DialogTitle>Edit user</DialogTitle>
             <DialogDescription>{user?.email}</DialogDescription>
           </DialogHeader>
+          {synced.changedElsewhere ? <ChangedElsewhere onDiscard={() => synced.reset()} /> : null}
           <Field label="Display name" error={errors.displayName}>
             <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={80} />
           </Field>

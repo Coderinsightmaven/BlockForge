@@ -3,6 +3,7 @@ import { Download, FileJson, Pencil, Trash2, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { Me, Template, TemplateImportPreview, TemplateSummary } from "@blockforge/contracts";
+import { useSyncedForm } from "@/lib/use-synced-form";
 import { templatesApi } from "@/lib/api/servers-api";
 import { describeError, fieldErrorsFrom } from "@/lib/api/errors";
 import { toastError, useApiMutation } from "@/lib/mutations";
@@ -11,6 +12,7 @@ import { hasGlobal } from "@/lib/permissions";
 import { templateQuery, templatesQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { cn } from "@/lib/utils";
+import { ChangedElsewhere } from "@/components/common/changed-elsewhere";
 import { PageHeader } from "@/components/common/page-header";
 import { PatternHelp, linesToList } from "@/components/common/pattern-help";
 import { EmptyState, ErrorState, NoPermission, TableSkeleton } from "@/components/common/states";
@@ -327,17 +329,9 @@ function ImportDialog({
   );
 }
 
-function EditDialog({ id, onClose }: { id: string | null; onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const q = useQuery({ ...templateQuery(id ?? ""), enabled: !!id });
-  const t = q.data;
-  const builtin = t?.source === "builtin";
-  const [form, setForm] = useState<Record<string, string>>({});
-  const [readOnlyRootfs, setReadOnlyRootfs] = useState(true);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  useEffect(() => {
-    if (!t) return;
-    setForm({
+function templateForm(t: Template): { fields: Record<string, string>; readOnlyRootfs: boolean } {
+  return {
+    fields: {
       name: t.name,
       description: t.description,
       category: t.category,
@@ -347,10 +341,25 @@ function EditDialog({ id, onClose }: { id: string | null; onClose: () => void })
       images: t.dockerImages.map((d) => `${d.label}=${d.image}`).join("\n"),
       stop: t.stop.type === "command" ? t.stop.command : `^${t.stop.signal}`,
       dataMountPath: t.runtime.dataMountPath,
-    });
-    setReadOnlyRootfs(t.runtime.readOnlyRootfs);
-    setErrors({});
-  }, [t]);
+    },
+    readOnlyRootfs: t.runtime.readOnlyRootfs,
+  };
+}
+
+function EditDialog({ id, onClose }: { id: string | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const q = useQuery({ ...templateQuery(id ?? ""), enabled: !!id });
+  const t = q.data;
+  const builtin = t?.source === "builtin";
+  // A refetch (focus, another admin's save) updates the form only while it holds no unsaved edits.
+  const synced = useSyncedForm(t, templateForm, id);
+  const form = synced.form?.fields ?? {};
+  const readOnlyRootfs = synced.form?.readOnlyRootfs ?? true;
+  const setForm = (fn: (f: Record<string, string>) => Record<string, string>) =>
+    synced.setForm((f) => ({ ...f, fields: fn(f.fields) }));
+  const setReadOnlyRootfs = (v: boolean) => synced.setForm((f) => ({ ...f, readOnlyRootfs: v }));
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  useEffect(() => setErrors({}), [id]);
   const save = useApiMutation({
     mutationFn: (body: Parameters<typeof templatesApi.update>[1]) => templatesApi.update(id!, body),
     success: "Template saved",
@@ -416,6 +425,7 @@ function EditDialog({ id, onClose }: { id: string | null; onClose: () => void })
           />
         ) : (
           <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
+            {synced.changedElsewhere ? <ChangedElsewhere onDiscard={() => synced.reset()} /> : null}
             <DialogHeader>
               <DialogTitle>Edit {t.name}</DialogTitle>
               <DialogDescription>

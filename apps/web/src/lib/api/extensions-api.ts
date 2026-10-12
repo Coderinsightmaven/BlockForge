@@ -5,15 +5,10 @@ import {
   ExtensionList,
   ExtensionUpdatesResponse,
   ExtensionUploadResponse,
-  ExtensionUploadSettings,
   InstalledExtension,
   ModrinthInstallPlan,
   ModrinthProjectResponse,
   ModrinthSearchResult,
-  PlayerActionResult,
-  PlayerLookupResponse,
-  PlayerSessionPage,
-  PlayersOverview,
   RemoveExtensionResponse,
   UpdateExtensionResponse,
 } from "@blockforge/contracts";
@@ -23,14 +18,13 @@ import type {
   ExtensionUploadRequest,
   ModrinthInstallRequest,
   ModrinthPlanRequest,
-  PlayerActionRequest,
 } from "@blockforge/contracts";
-import { z } from "zod";
+import type { z } from "zod";
 import { apiClient } from "./client";
 
 /*
- * Phase 4b routes (docs/architecture/api.md: Plugins & mods, Players). Imported only by the lazily
- * loaded tabs, dialogs and settings card. Every response is parsed with its contract schema.
+ * Plugins & mods routes (docs/architecture/api.md). Imported only by the lazily loaded extensions
+ * tab and its dialogs. Every response is parsed with its contract schema.
  */
 
 type In<T extends z.ZodType> = z.input<T>;
@@ -122,41 +116,5 @@ export const extensionsApi = {
     apiClient.post(`${base(serverId)}/history/${enc(entryId)}/rollback`, {
       schema: ExtensionJobResponse,
       idempotencyKey,
-    }),
-};
-
-const ExtensionUploadSettingsView = z.object({
-  key: z.literal("extensions.uploads"),
-  value: ExtensionUploadSettings,
-});
-
-/** Admin policy for `/extensions/uploads` (generic settings wrapper, settings.manage). */
-export const extensionUploadSettingsApi = {
-  get: (signal?: AbortSignal) =>
-    apiClient.get("/settings/extensions.uploads", { schema: ExtensionUploadSettingsView, signal }),
-  put: (value: In<typeof ExtensionUploadSettings>) =>
-    apiClient.put("/settings/extensions.uploads", { body: { value }, schema: ExtensionUploadSettingsView }),
-};
-
-export const playersApi = {
-  overview: (serverId: string, signal?: AbortSignal) =>
-    apiClient.get(`/servers/${enc(serverId)}/players`, { schema: PlayersOverview, signal }),
-  action: (serverId: string, body: In<typeof PlayerActionRequest>) =>
-    apiClient.post(`/servers/${enc(serverId)}/players/actions`, { body, schema: PlayerActionResult }),
-  lookup: (serverId: string, name: string, signal?: AbortSignal) =>
-    apiClient.get(`/servers/${enc(serverId)}/players/lookup`, {
-      query: { name },
-      schema: PlayerLookupResponse,
-      signal,
-    }),
-  sessions: (
-    serverId: string,
-    q: { limit?: number; cursor?: string | null; name?: string },
-    signal?: AbortSignal,
-  ) =>
-    apiClient.get(`/servers/${enc(serverId)}/players/sessions`, {
-      query: { limit: q.limit, cursor: q.cursor ?? undefined, name: q.name || undefined },
-      schema: PlayerSessionPage,
-      signal,
     }),
 };

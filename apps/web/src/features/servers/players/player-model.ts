@@ -188,3 +188,18 @@ export function sessionsLeft(data: SessionPages, ev: JoinLeaveEvent): SessionPag
   }));
   return closed ? { ...data, pages } : data;
 }
+
+/** Player actions that open a dialog (the rest run from their button). */
+export type DialogAction = "kick" | "ban" | "ban-ip" | "op" | "whitelist-add";
+
+/** Dialog titles (also used while the dialog's chunk loads). */
+export const ACTION_TITLE: Record<DialogAction, string> = {
+  kick: "Kick a player",
+  ban: "Ban a player",
+  "ban-ip": "Ban an IP address",
+  op: "Make a player an operator",
+  "whitelist-add": "Add to the whitelist",
+};
+
+/** Actions that add a name to a list: the name is looked up (UUID + source) before anything is sent. */
+export const NEEDS_LOOKUP: ReadonlySet<DialogAction> = new Set<DialogAction>(["ban", "op", "whitelist-add"]);

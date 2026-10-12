@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
 import { toast } from "sonner";
 import { OPERATION_ALLOWED_FROM, UpdateServerBuildRequest } from "@blockforge/contracts";
@@ -16,6 +16,8 @@ import { usersQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { upsertServerInCache } from "@/lib/server-cache";
 import { serverActionable, serverCan } from "@/lib/server-permissions";
+import { useSyncedForm } from "@/lib/use-synced-form";
+import { ChangedElsewhere } from "@/components/common/changed-elsewhere";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
@@ -31,22 +33,26 @@ import { Textarea } from "@/components/ui/textarea";
 const MiB = 1024 ** 2;
 const GiB = 1024 ** 3;
 
+const detailsFrom = (s: Server) => ({ name: s.name, description: s.description });
+
 function GeneralCard({ server }: { server: Server }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState(server.name);
-  const [description, setDescription] = useState(server.description);
+  // Live server updates refresh the fields only while they hold no unsaved edits.
+  const details = useSyncedForm(server, detailsFrom);
+  const { name, description } = details.form ?? detailsFrom(server);
+  const setName = (v: string) => details.setForm((f) => ({ ...f, name: v }));
+  const setDescription = (v: string) => details.setForm((f) => ({ ...f, description: v }));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  useEffect(() => {
-    setName(server.name);
-    setDescription(server.description);
-  }, [server.name, server.description]);
   const canEdit = serverActionable(server, "servers.settings.edit");
   const save = useApiMutation({
     mutationFn: () =>
       serversApi.updateSettings(server.id, { name: name.trim(), description: description.trim() }),
     success: "Server details saved",
     errorTitle: "Could not save",
-    onSuccess: (s) => upsertServerInCache(queryClient, s),
+    onSuccess: (s) => {
+      upsertServerInCache(queryClient, s);
+      details.reset(s);
+    },
   });
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -58,7 +64,7 @@ function GeneralCard({ server }: { server: Server }) {
     setErrors({});
     save.mutate(undefined, { onError: (err) => setErrors(fieldErrorsFrom(err)) });
   };
-  const dirty = name !== server.name || description !== server.description;
+  const dirty = details.dirty;
   return (
     <form onSubmit={submit}>
       <Card>
@@ -66,6 +72,7 @@ function GeneralCard({ server }: { server: Server }) {
           <CardTitle>Server details</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-3">
+          {details.changedElsewhere ? <ChangedElsewhere onDiscard={() => details.reset()} /> : null}
           <Field label="Name" error={errors.name}>
             <Input
               value={name}
@@ -275,16 +282,19 @@ export function buildPatch(
   return { patch, errors };
 }
 
+const adminFormFrom = (s: Server) => ({ limits: formFromServer(s), ownerId: s.ownerId });
+
 function AdminCard({ me, server }: { me: Me; server: Server }) {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState<BuildForm>(() => formFromServer(server));
+  // Live server updates (state changes, other admins) refresh the form only while it holds no unsaved
+  // edits; a changed limit or owner while editing shows "changed elsewhere" instead.
+  const build = useSyncedForm(server, adminFormFrom);
+  const form = build.form?.limits ?? formFromServer(server);
+  const ownerId = build.form?.ownerId ?? server.ownerId;
+  const setForm = (fn: (f: BuildForm) => BuildForm) => build.setForm((b) => ({ ...b, limits: fn(b.limits) }));
+  const setOwnerId = (v: string) => build.setForm((b) => ({ ...b, ownerId: v }));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [ownerId, setOwnerId] = useState(server.ownerId);
   const [suspendOpen, setSuspendOpen] = useState(false);
-  useEffect(() => {
-    setForm(formFromServer(server));
-    setOwnerId(server.ownerId);
-  }, [server]);
   const canListUsers = hasGlobal(me, "users.view");
   const users = useInfiniteQuery({ ...usersQuery, enabled: canListUsers });
   const userOptions = users.data?.pages.flatMap((p) => p.items) ?? [];
@@ -294,6 +304,7 @@ function AdminCard({ me, server }: { me: Me; server: Server }) {
     errorTitle: "Could not save limits",
     onSuccess: (r) => {
       upsertServerInCache(queryClient, r.server);
+      build.reset(r.server);
       toast.success(
         "Limits saved",
         r.restartRequired ? { description: "Restart the server to apply them." } : undefined,
@@ -331,6 +342,7 @@ function AdminCard({ me, server }: { me: Me; server: Server }) {
           </div>
         </CardHeader>
         <CardContent className="grid gap-4">
+          {build.changedElsewhere ? <ChangedElsewhere onDiscard={() => build.reset()} /> : null}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <Field
               label="Memory limit (MiB)"

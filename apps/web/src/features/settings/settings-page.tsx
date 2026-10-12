@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Monitor, Moon, ShieldCheck, ShieldOff, Sun } from "lucide-react";
 import QRCode from "qrcode";
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { ChangePasswordRequest, TotpCode } from "@blockforge/contracts";
 import type { Me } from "@blockforge/contracts";
@@ -14,7 +14,11 @@ import { qk } from "@/lib/query-keys";
 import { useTheme } from "@/lib/theme";
 import type { ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { retryableLazy } from "@/lib/lazy";
+
 import { PageHeader } from "@/components/common/page-header";
+import { LazySection } from "@/components/common/chunk-boundary";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
@@ -30,9 +34,10 @@ import type { SettingsTab } from "./settings-tabs";
 
 export type { SettingsTab } from "./settings-tabs";
 
-const ApiKeysCard = lazy(() => import("./api-keys"));
-const BackupStorageCard = lazy(() => import("./backup-storage"));
-const ExtensionUploadsCard = lazy(() => import("./extension-uploads"));
+// Each card is its own chunk, prefetched on hover/focus of its tab (a failed download offers Retry).
+const ApiKeysCard = retryableLazy(() => import("./api-keys"));
+const BackupStorageCard = retryableLazy(() => import("./backup-storage"));
+const ExtensionUploadsCard = retryableLazy(() => import("./extension-uploads"));
 
 function CardFallback() {
   return <Skeleton className="h-48 w-full" />;
@@ -378,10 +383,32 @@ export function SettingsPage({
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
           <TabsTrigger value="ssh">SSH keys</TabsTrigger>
-          <TabsTrigger value="api-keys">API keys</TabsTrigger>
+          <TabsTrigger
+            value="api-keys"
+            onPointerEnter={() => void ApiKeysCard.preload()}
+            onFocus={() => void ApiKeysCard.preload()}
+          >
+            API keys
+          </TabsTrigger>
           <TabsTrigger value="appearance">Appearance</TabsTrigger>
-          {canStorage ? <TabsTrigger value="backups">Backup storage</TabsTrigger> : null}
-          {canStorage ? <TabsTrigger value="extensions">Plugin uploads</TabsTrigger> : null}
+          {canStorage ? (
+            <TabsTrigger
+              value="backups"
+              onPointerEnter={() => void BackupStorageCard.preload()}
+              onFocus={() => void BackupStorageCard.preload()}
+            >
+              Backup storage
+            </TabsTrigger>
+          ) : null}
+          {canStorage ? (
+            <TabsTrigger
+              value="extensions"
+              onPointerEnter={() => void ExtensionUploadsCard.preload()}
+              onFocus={() => void ExtensionUploadsCard.preload()}
+            >
+              Plugin uploads
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         <TabsContent value="account" className="flex flex-col gap-3">
           <Card>
@@ -420,25 +447,25 @@ export function SettingsPage({
           <SshKeysCard mfaEnabled={me.user.mfaEnabled} />
         </TabsContent>
         <TabsContent value="api-keys">
-          <Suspense fallback={<CardFallback />}>
+          <LazySection what="API keys" loading={<CardFallback />}>
             <ApiKeysCard me={me} />
-          </Suspense>
+          </LazySection>
         </TabsContent>
         <TabsContent value="appearance">
           <Appearance />
         </TabsContent>
         {canStorage ? (
           <TabsContent value="backups">
-            <Suspense fallback={<CardFallback />}>
+            <LazySection what="backup storage" loading={<CardFallback />}>
               <BackupStorageCard />
-            </Suspense>
+            </LazySection>
           </TabsContent>
         ) : null}
         {canStorage ? (
           <TabsContent value="extensions">
-            <Suspense fallback={<CardFallback />}>
+            <LazySection what="the upload policy" loading={<CardFallback />}>
               <ExtensionUploadsCard />
-            </Suspense>
+            </LazySection>
           </TabsContent>
         ) : null}
       </Tabs>

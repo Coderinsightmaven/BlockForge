@@ -4,6 +4,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { findLoadedDialog } from "@/test/lazy";
 import { IDEMPOTENCY_HEADER, SERVER_OWNER_PERMISSIONS } from "@blockforge/contracts";
 import type { Job, Permission } from "@blockforge/contracts";
 import {
@@ -162,7 +163,7 @@ describe("Backups tab", () => {
     const user = userEvent.setup();
     wrap(<BackupsTab server={makeServer({ backupLimit: 2, state: "stopped" })} me={makeMe()} />);
     await user.click(await screen.findByRole("button", { name: "Create backup" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect(within(dialog).getByText("2 / 2 backups used on this server.")).toBeTruthy();
     expect(within(dialog).getByText("Backup limit reached")).toBeTruthy();
     const submit = within(dialog).getByRole("button", { name: "Create backup" }) as HTMLButtonElement;
@@ -199,7 +200,7 @@ describe("Backups tab", () => {
     // Restore may start while running: the job stops the server first.
     wrap(<BackupsTab server={makeServer({ state: "running" })} me={makeMe()} />);
     await user.click(await screen.findByRole("button", { name: "Restore Before 1.21 update" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect(within(dialog).getByText(/it will be stopped before the files are restored/)).toBeTruthy();
     expect(
       within(dialog).getByRole("switch", { name: "Take a safety backup first" }).getAttribute("aria-checked"),
@@ -238,7 +239,7 @@ describe("Backups tab", () => {
     const user = userEvent.setup();
     wrap(<BackupsTab server={makeServer({ state: "stopped" })} me={makeMe()} />);
     await user.click(await screen.findByRole("button", { name: "Restore Before 1.21 update" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     const restore = within(dialog).getByRole("button", { name: "Restore" });
     const startAfter = within(dialog).getByRole("switch", {
       name: "Start the server afterwards",
@@ -464,7 +465,7 @@ describe("Schedules tab", () => {
     const user = userEvent.setup();
     wrap(<SchedulesTab server={makeServer({ timezone: "UTC" })} />);
     await user.click(await screen.findByRole("button", { name: "New schedule" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     await user.type(within(dialog).getByLabelText(/^Name/), "Announce");
     await user.click(within(dialog).getByRole("button", { name: "Every 15 minutes" }));
     expect((within(dialog).getByLabelText("Minute") as HTMLInputElement).value).toBe("*/15");
@@ -510,7 +511,7 @@ describe("Schedules tab", () => {
         .disabled,
     ).toBe(true);
     await user.click(screen.getByRole("button", { name: "Edit Nightly restart" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect(within(dialog).getAllByText(/You don't hold servers\.control/).length).toBeGreaterThan(0);
     const save = within(dialog).getByRole("button", { name: "Save schedule" }) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
@@ -540,7 +541,7 @@ describe("Schedules tab", () => {
       />,
     );
     await user.click(await screen.findByRole("button", { name: "New schedule" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect(within(dialog).getByRole("combobox", { name: "Task 1 type" }).textContent).toContain(
       "Power action",
     );
@@ -571,7 +572,7 @@ describe("Schedules tab", () => {
     const user = userEvent.setup();
     wrap(<SchedulesTab server={makeServer({ timezone: "UTC" })} />);
     await user.click(await screen.findByRole("button", { name: "New schedule" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect(await within(dialog).findByText("in UTC", {}, { timeout: 3000 })).toBeTruthy();
     const zone = within(dialog).getByLabelText(/^Time zone/);
     await user.clear(zone);
@@ -619,7 +620,7 @@ describe("Schedules tab", () => {
     await user.click(screen.getByRole("button", { name: "Run Nightly restart now" }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/run"))).toBe(true));
     await user.click(screen.getByRole("button", { name: "Run history of Nightly restart" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect(await within(dialog).findByText(/editor lost servers\.control/)).toBeTruthy();
     expect(within(dialog).getByRole("button", { name: "View job" })).toBeTruthy();
   });

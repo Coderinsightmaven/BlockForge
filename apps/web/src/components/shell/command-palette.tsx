@@ -1,12 +1,15 @@
 import { Search } from "lucide-react";
-import { Suspense, lazy, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Me } from "@blockforge/contracts";
+import { retryableLazy } from "@/lib/lazy";
+import { LazyDialog } from "@/components/common/lazy-dialog";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 
-// cmdk and the searches load on first use (hover/focus of the trigger starts the download).
-const loadDialog = () => import("./command-palette-dialog");
-const CommandPaletteDialog = lazy(loadDialog);
+// cmdk and the searches load on first use (hover/focus of the trigger starts the download); a
+// failed download shows a dialog with Retry.
+const CommandPaletteDialog = retryableLazy(() => import("./command-palette-dialog"));
+const loadDialog = () => void CommandPaletteDialog.preload();
 
 const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform || navigator.userAgent);
 
@@ -36,8 +39,8 @@ export function CommandPalette({ me }: { me: Me | undefined }) {
       <Button
         variant="outline"
         onClick={() => show(true)}
-        onPointerEnter={() => void loadDialog()}
-        onFocus={() => void loadDialog()}
+        onPointerEnter={loadDialog}
+        onFocus={loadDialog}
         className="h-8 w-full max-w-72 justify-start gap-2 px-2.5 text-muted-foreground"
         aria-label="Search"
         aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
@@ -47,9 +50,9 @@ export function CommandPalette({ me }: { me: Me | undefined }) {
         <Kbd className="hidden sm:inline-flex">{isMac ? "⌘K" : "Ctrl K"}</Kbd>
       </Button>
       {mounted ? (
-        <Suspense fallback={null}>
+        <LazyDialog title="Search" open={open} onClose={() => setOpen(false)}>
           <CommandPaletteDialog me={me} open={open} onOpenChange={setOpen} />
-        </Suspense>
+        </LazyDialog>
       ) : null}
     </>
   );

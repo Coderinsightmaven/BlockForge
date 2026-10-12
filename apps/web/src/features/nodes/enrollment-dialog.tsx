@@ -1,15 +1,17 @@
-import { Suspense, createContext, lazy, useCallback, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { retryableLazy } from "@/lib/lazy";
+import { LazyDialog } from "@/components/common/lazy-dialog";
 
 /*
  * The provider and hook are part of the always-loaded app shell; the dialog (form, token display,
  * select/switch widgets) is a separate chunk loaded the first time someone opens it.
  */
-const EnrollmentDialog = lazy(() => import("./enrollment-dialog-body"));
+const EnrollmentDialog = retryableLazy(() => import("./enrollment-dialog-body"));
 
 /** Start loading the dialog early (e.g. when the opening button is hovered or focused). */
 export function prefetchEnrollmentDialog(): void {
-  void import("./enrollment-dialog-body");
+  void EnrollmentDialog.preload();
 }
 
 interface EnrollmentContextValue {
@@ -31,9 +33,9 @@ export function EnrollmentDialogProvider({ children }: { children: ReactNode }) 
     <EnrollmentContext.Provider value={value}>
       {children}
       {mounted ? (
-        <Suspense fallback={null}>
+        <LazyDialog title="Enroll a node" open={isOpen} onClose={() => setOpen(false)}>
           <EnrollmentDialog open={isOpen} onOpenChange={setOpen} />
-        </Suspense>
+        </LazyDialog>
       ) : null}
     </EnrollmentContext.Provider>
   );

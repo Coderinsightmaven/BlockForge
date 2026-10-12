@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
 import type { ExtensionUploadSettings } from "@blockforge/contracts";
-import { extensionUploadSettingsApi } from "@/lib/api/phase4b-api";
+import { extensionUploadSettingsApi } from "@/lib/api/extension-settings-api";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
+import { useSyncedForm } from "@/lib/use-synced-form";
+import { ChangedElsewhere } from "@/components/common/changed-elsewhere";
 import { ErrorState } from "@/components/common/states";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
@@ -19,22 +20,21 @@ export default function ExtensionUploadsCard() {
     queryKey: qk.settings.extensionUploads,
     queryFn: ({ signal }) => extensionUploadSettingsApi.get(signal),
   });
-  const [form, setForm] = useState<ExtensionUploadSettings>({ allowed: true, requireMetadata: true });
-  useEffect(() => {
-    if (q.data) setForm(q.data.value);
-  }, [q.data]);
-  const dirty =
-    !!q.data &&
-    (form.allowed !== q.data.value.allowed || form.requireMetadata !== q.data.value.requireMetadata);
+  // Refetches (focus, reconnect) only update the form while it has no unsaved edits.
+  const synced = useSyncedForm(q.data?.value, (v: ExtensionUploadSettings) => v);
+  const { dirty } = synced;
   const save = useApiMutation({
     mutationFn: (value: ExtensionUploadSettings) => extensionUploadSettingsApi.put(value),
     success: "Upload policy saved",
     errorTitle: "Could not save the upload policy",
     onSuccess: (view) => {
       queryClient.setQueryData(qk.settings.extensionUploads, view);
+      synced.reset(view.value);
     },
   });
-  if (q.isPending) return <Skeleton className="h-40 w-full" />;
+  const form = synced.form;
+  const setForm = synced.setForm;
+  if (q.isPending || !form) return <Skeleton className="h-40 w-full" />;
   if (q.isError)
     return (
       <ErrorState error={q.error} onRetry={() => void q.refetch()} title="Could not load the upload policy" />
@@ -50,6 +50,7 @@ export default function ExtensionUploadsCard() {
         </div>
       </CardHeader>
       <CardContent className="flex max-w-xl flex-col gap-4">
+        {synced.changedElsewhere ? <ChangedElsewhere onDiscard={() => synced.reset()} /> : null}
         <div className="flex items-start gap-3">
           <Switch
             id="uploads-allowed"

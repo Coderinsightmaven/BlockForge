@@ -1,15 +1,17 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiKey } from "@blockforge/contracts";
 import { apiErrorBody, jsonResponse, makeMe } from "@/test/fixtures";
 import { createQueryClient } from "@/lib/queries";
+import { qk } from "@/lib/query-keys";
 import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ApiKeysCard from "./api-keys";
 import BackupStorageCard from "./backup-storage";
+import ExtensionUploadsCard from "./extension-uploads";
 import { SettingsPage } from "./settings-page";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -350,6 +352,97 @@ describe("Backup storage settings", () => {
           .map((q) => q.state.data),
       ),
     ).not.toContain("LEAKED");
+  });
+});
+
+describe("Settings forms during refetches", () => {
+  const s3 = {
+    type: "s3",
+    endpoint: "https://s3.example.test",
+    region: "eu-central-1",
+    bucket: "bf-backups",
+    prefix: "blockforge/",
+    forcePathStyle: false,
+    accessKeyId: "AKIA123",
+  };
+
+  it("the upload policy keeps unsaved edits across a refetch and says when it changed elsewhere", async () => {
+    let server = { allowed: true, requireMetadata: true };
+    const calls = routeFetch([
+      [
+        "GET",
+        /\/settings\/extensions\.uploads$/,
+        () => jsonResponse({ key: "extensions.uploads", value: server }),
+      ],
+      [
+        "PUT",
+        /\/settings\/extensions\.uploads$/,
+        (c) => jsonResponse({ key: "extensions.uploads", value: (c.body as { value: unknown }).value }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    const qc = wrap(<ExtensionUploadsCard />);
+    const requireMeta = () => screen.getByRole("switch", { name: "Require plugin/mod metadata" });
+    const allowed = () => screen.getByRole("switch", { name: "Allow uploads" });
+    await screen.findByRole("switch", { name: "Allow uploads" });
+    await user.click(requireMeta()); // unsaved edit: metadata no longer required
+    expect(requireMeta().getAttribute("aria-checked")).toBe("false");
+
+    // A focus refetch / reconnect invalidation with unchanged data keeps the edit, without a hint.
+    await act(() => qc.invalidateQueries({ queryKey: qk.settings.extensionUploads }));
+    await waitFor(() => expect(calls.filter((c) => c.method === "GET")).toHaveLength(2));
+    expect(requireMeta().getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByText("Changed elsewhere")).toBeNull();
+
+    // Another admin turned uploads off: the edit stays, the change is announced.
+    server = { allowed: false, requireMetadata: true };
+    await act(() => qc.invalidateQueries({ queryKey: qk.settings.extensionUploads }));
+    expect(await screen.findByText("Changed elsewhere")).toBeTruthy();
+    expect(requireMeta().getAttribute("aria-checked")).toBe("false");
+    expect(allowed().getAttribute("aria-checked")).toBe("true");
+
+    // Discarding loads the current values; while pristine, refetches apply directly.
+    await user.click(screen.getByRole("button", { name: "Discard my changes" }));
+    expect(allowed().getAttribute("aria-checked")).toBe("false");
+    expect(screen.queryByText("Changed elsewhere")).toBeNull();
+    server = { allowed: true, requireMetadata: false };
+    await act(() => qc.invalidateQueries({ queryKey: qk.settings.extensionUploads }));
+    await waitFor(() => expect(allowed().getAttribute("aria-checked")).toBe("true"));
+    expect(requireMeta().getAttribute("aria-checked")).toBe("false");
+
+    // Saving makes the saved value the new baseline (Save disables again).
+    await user.click(allowed());
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true),
+    );
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({
+      value: { allowed: false, requireMetadata: false },
+    });
+  });
+
+  it("backup storage keeps typed values across a refetch", async () => {
+    let value: object = s3;
+    routeFetch([
+      [
+        "GET",
+        /\/settings\/backups\.storage$/,
+        () => jsonResponse({ key: "backups.storage", value, secretAccessKeySet: true }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    const qc = wrap(<BackupStorageCard />);
+    const bucket = (await screen.findByLabelText(/^Bucket/)) as HTMLInputElement;
+    await user.clear(bucket);
+    await user.type(bucket, "new-bucket");
+    await act(() => qc.invalidateQueries({ queryKey: qk.settings.backupStorage }));
+    expect((screen.getByLabelText(/^Bucket/) as HTMLInputElement).value).toBe("new-bucket");
+    expect(screen.queryByText("Changed elsewhere")).toBeNull();
+    value = { ...s3, region: "us-east-1" };
+    await act(() => qc.invalidateQueries({ queryKey: qk.settings.backupStorage }));
+    expect(await screen.findByText("Changed elsewhere")).toBeTruthy();
+    expect((screen.getByLabelText(/^Bucket/) as HTMLInputElement).value).toBe("new-bucket");
+    expect((screen.getByLabelText(/^Region/) as HTMLInputElement).value).toBe("eu-central-1");
   });
 });
 

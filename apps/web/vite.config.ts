@@ -40,5 +40,20 @@ export default defineConfig({
     target: "es2022",
     sourcemap: true,
     chunkSizeWarningLimit: 900,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          // The framework packages every page loads (React, the router, TanStack Query, zod) go into
+          // one vendor chunk. Without it the bundler splits them into dozens of small shared chunks
+          // as lazy chunks are added, and every page pays the per-chunk gzip overhead (~5 KiB).
+          groups: [
+            {
+              name: "vendor",
+              test: /node_modules[\\/](react|react-dom|scheduler|zod|@tanstack[\\/](react-router|router-core|history|react-store|store|react-query|query-core)|use-sync-external-store)[\\/]/,
+            },
+          ],
+        },
+      },
+    },
   },
 });

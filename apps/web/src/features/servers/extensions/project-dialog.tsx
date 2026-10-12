@@ -3,7 +3,7 @@ import { CircleX, Info, TriangleAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ModrinthInstallPlan } from "@blockforge/contracts";
 import type { ModrinthVersionSummary, PlanWarning, Server } from "@blockforge/contracts";
-import { extensionsApi } from "@/lib/api/phase4b-api";
+import { extensionsApi } from "@/lib/api/extensions-api";
 import { describeError } from "@/lib/api/errors";
 import { formatBytes, formatNumber, formatShortDate } from "@/lib/format";
 import { isUncertainFailure, useIdempotencyKeys } from "@/lib/idempotency";

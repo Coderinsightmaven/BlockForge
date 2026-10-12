@@ -1,15 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, MapPin, Tag } from "lucide-react";
-import { Suspense, lazy, useState } from "react";
+import { useState } from "react";
 import type { Me, Node } from "@blockforge/contracts";
 import { isApiError } from "@/lib/api/errors";
 import { can, canAny } from "@/lib/permissions";
 import { nodeQuery } from "@/lib/queries";
 import { useNodeDetailRealtime } from "@/lib/realtime/handlers";
 import type { TimeRange } from "@/lib/time-range";
-import { MetricChart } from "@/components/charts/metric-chart";
-import { TimeRangePicker } from "@/components/charts/time-range-picker";
+import { retryableLazy } from "@/lib/lazy";
+import { LazySection } from "@/components/common/chunk-boundary";
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState, NoPermission } from "@/components/common/states";
 import { Timestamp, useNow } from "@/components/common/timestamp";
@@ -23,17 +23,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApproveNodeDialog, NodeActions } from "./node-actions";
 import { CapacityFacts, FilesystemFacts, InterfacesFacts, RuntimeFacts, SystemFacts } from "./node-facts";
 import { CpuTile, DiskIoTile, FilesystemsTile, MemoryTile, NetworkTile } from "./node-live";
-import { NODE_CHARTS } from "./node-charts";
-import { NodeSettings } from "./node-settings";
 import { isStale } from "./node-utils";
 import { NodeWarnings } from "./node-warnings";
 
 export type NodeTab = "overview" | "metrics" | "allocations" | "settings";
 
-// The allocations table (virtualised) loads when its tab is opened.
-const NodeAllocations = lazy(() =>
+// Live (the default tab) is part of the page; History, Allocations and Settings are their own
+// chunks, prefetched on hover/focus of their triggers (a failed download offers Retry).
+const NodeMetricsTab = retryableLazy(() => import("./node-metrics-tab"));
+const NodeAllocations = retryableLazy(() =>
   import("./node-allocations").then((m) => ({ default: m.NodeAllocations })),
 );
+const NodeSettings = retryableLazy(() =>
+  import("./node-settings").then((m) => ({ default: m.NodeSettings })),
+);
+
+function TabLoading() {
+  return <Skeleton className="h-48 w-full" aria-busy aria-label="Loading" />;
+}
 
 export function PendingBanner({ node, canManage }: { node: Node; canManage: boolean }) {
   const [confirming, setConfirming] = useState(false);
@@ -169,11 +176,28 @@ export function NodeDetailPage({
       <Tabs value={tab} onValueChange={(v) => onTabChange(v as NodeTab)}>
         <TabsList>
           <TabsTrigger value="overview">Live</TabsTrigger>
-          <TabsTrigger value="metrics" disabled={!canMetrics}>
+          <TabsTrigger
+            value="metrics"
+            disabled={!canMetrics}
+            onPointerEnter={() => void NodeMetricsTab.preload()}
+            onFocus={() => void NodeMetricsTab.preload()}
+          >
             History
           </TabsTrigger>
-          <TabsTrigger value="allocations">Allocations</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
+          <TabsTrigger
+            value="allocations"
+            onPointerEnter={() => void NodeAllocations.preload()}
+            onFocus={() => void NodeAllocations.preload()}
+          >
+            Allocations
+          </TabsTrigger>
+          <TabsTrigger
+            value="settings"
+            onPointerEnter={() => void NodeSettings.preload()}
+            onFocus={() => void NodeSettings.preload()}
+          >
+            Settings
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="flex flex-col gap-3">
@@ -214,37 +238,27 @@ export function NodeDetailPage({
         </TabsContent>
 
         <TabsContent value="metrics">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-muted-foreground">
-              Historical samples from the metrics store. Gaps mean the agent was not reporting.
-            </p>
-            <TimeRangePicker value={range} onChange={onRangeChange} />
-          </div>
           {tab === "metrics" ? (
-            <div className="grid gap-3 xl:grid-cols-2">
-              {NODE_CHARTS.map((c) => (
-                <MetricChart
-                  key={c.series}
-                  title={c.title}
-                  info={c.info}
-                  target={{ series: c.series, nodeId: node.id }}
-                  range={range}
-                />
-              ))}
-            </div>
+            <LazySection what="the history charts" loading={<TabLoading />}>
+              <NodeMetricsTab node={node} range={range} onRangeChange={onRangeChange} />
+            </LazySection>
           ) : null}
         </TabsContent>
 
         <TabsContent value="allocations">
           {tab === "allocations" ? (
-            <Suspense fallback={<Skeleton className="h-48 w-full" />}>
+            <LazySection what="the allocations" loading={<TabLoading />}>
               <NodeAllocations node={node} canManage={can(me, "allocations.manage", scope)} />
-            </Suspense>
+            </LazySection>
           ) : null}
         </TabsContent>
 
         <TabsContent value="settings">
-          <NodeSettings node={node} canManage={canManage} />
+          {tab === "settings" ? (
+            <LazySection what="the node settings" loading={<TabLoading />}>
+              <NodeSettings node={node} canManage={canManage} />
+            </LazySection>
+          ) : null}
         </TabsContent>
       </Tabs>
       {!sample && node.connection === "online" ? (

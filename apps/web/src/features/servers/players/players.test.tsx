@@ -8,6 +8,7 @@ import type { Permission } from "@blockforge/contracts";
 import { SERVER_ID, apiErrorBody, jsonResponse, makeServer } from "@/test/fixtures";
 import { makeClient } from "@/test/fake-socket";
 import { makeOverview } from "@/test/phase4b-fixtures";
+import { findLoadedDialog } from "@/test/lazy";
 import { RealtimeProvider } from "@/lib/realtime/provider";
 import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -54,6 +55,8 @@ function wrap(ui: ReactNode, client?: ReturnType<typeof makeClient>["client"]) {
   );
   return qc;
 }
+
+const ALEX_UUID = "11111111-2222-4333-8444-555555555555";
 
 const owner = (over: Parameters<typeof makeServer>[0] = {}) =>
   makeServer({ myPermissions: [...SERVER_OWNER_PERMISSIONS] as Permission[], ...over });
@@ -107,6 +110,7 @@ describe("Players tab", () => {
     const calls = routeFetch([
       ["GET", /\/players$/, ok(makeOverview())],
       ["GET", /\/players\/sessions/, emptySessions],
+      ["GET", /\/players\/lookup/, ok({ name: "Alex", uuid: ALEX_UUID, source: "mojang" })],
       [
         "POST",
         /\/players\/actions$/,
@@ -121,10 +125,12 @@ describe("Players tab", () => {
     wrap(<PlayersTab server={owner({ state: "running" })} />);
     const online = (await screen.findByText("Alex")).closest("li")!;
     await user.click(within(online).getByRole("button", { name: "Ban" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     expect((within(dialog).getByLabelText("Expires") as HTMLInputElement).disabled).toBe(true);
     expect(within(dialog).getByText(/Only while the server is stopped/)).toBeTruthy();
     await user.type(within(dialog).getByLabelText("Reason"), "griefing");
+    // A ban adds to a list: the account is looked up first, even from the online list.
+    expect(await within(dialog).findByText(ALEX_UUID)).toBeTruthy();
     await user.click(within(dialog).getByRole("button", { name: "Ban" }));
     expect(await screen.findByText("<b>Banned player Alex</b>")).toBeTruthy();
     expect(calls.find((c) => c.method === "POST")!.body).toEqual({
@@ -157,7 +163,7 @@ describe("Players tab", () => {
     wrap(<PlayersTab server={owner({ state: "running" })} />);
     await screen.findByText("Steve");
     await user.click(screen.getByRole("button", { name: "Add" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     await user.type(within(dialog).getByLabelText("Player name"), "notch");
     const add = within(dialog).getByRole("button", { name: "Add" }) as HTMLButtonElement;
     expect(add.disabled).toBe(true);
@@ -173,6 +179,106 @@ describe("Players tab", () => {
         name: "notch",
       }),
     );
+  });
+
+  it("whitelisting from the online list goes through the lookup preview (no direct add)", async () => {
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((r) => (releaseLookup = r));
+    const calls = routeFetch([
+      ["GET", /\/players$/, ok(makeOverview({ whitelist: { ...makeOverview().whitelist, enabled: true } }))],
+      ["GET", /\/players\/sessions/, emptySessions],
+      [
+        "GET",
+        /\/players\/lookup/,
+        async () => {
+          await lookupGate;
+          return jsonResponse({ name: "Alex", uuid: ALEX_UUID, source: "offline" });
+        },
+      ],
+      ["POST", /\/players\/actions$/, ok({ applied: "file", feedback: null, overview: null })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<PlayersTab server={owner({ state: "stopped" })} />);
+    const online = (await screen.findByText("Alex")).closest("li")!;
+    await user.click(within(online).getByRole("button", { name: "Whitelist" }));
+    // Nothing is sent from the row itself: a dialog opens and looks the name up.
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+    const dialog = await findLoadedDialog();
+    expect((within(dialog).getByLabelText("Player name") as HTMLInputElement).value).toBe("Alex");
+    const add = within(dialog).getByRole("button", { name: "Add" }) as HTMLButtonElement;
+    expect(await within(dialog).findByText("Looking up Alex…")).toBeTruthy();
+    expect(add.disabled).toBe(true);
+    await user.click(add);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+    releaseLookup();
+    expect(await within(dialog).findByText(ALEX_UUID)).toBeTruthy();
+    expect(within(dialog).getByText(/offline-mode UUID/)).toBeTruthy();
+    expect(calls.filter((c) => c.url.includes("/lookup")).map((c) => c.url)).toEqual([
+      expect.stringContaining("name=Alex"),
+    ]);
+    expect(add.disabled).toBe(false);
+    await user.click(add);
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "POST")?.body).toEqual({ action: "whitelist-add", name: "Alex" }),
+    );
+  });
+
+  it("the Op quick action looks the name up and warns when it resolves to another UUID", async () => {
+    const calls = routeFetch([
+      [
+        "GET",
+        /\/players$/,
+        ok(
+          makeOverview({
+            online: {
+              ...makeOverview().online,
+              players: [{ name: "Alex", uuid: "11111111-2222-4333-8444-aaaaaaaaaaaa" }],
+            },
+          }),
+        ),
+      ],
+      ["GET", /\/players\/sessions/, emptySessions],
+      ["GET", /\/players\/lookup/, ok({ name: "Alex", uuid: ALEX_UUID, source: "mojang" })],
+      [
+        "POST",
+        /\/players\/actions$/,
+        ok({ applied: "console", feedback: { ok: true, message: "Opped" }, overview: null }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<PlayersTab server={owner({ state: "running" })} />);
+    const online = (await screen.findByText("Alex")).closest("li")!;
+    await user.click(within(online).getByRole("button", { name: "Op" }));
+    const dialog = await findLoadedDialog();
+    const submit = within(dialog).getByRole("button", { name: "Make operator" }) as HTMLButtonElement;
+    expect(await within(dialog).findByText(ALEX_UUID)).toBeTruthy();
+    expect(within(dialog).getByText(/Mojang account/)).toBeTruthy();
+    expect(within(dialog).getByText(/resolves to a different UUID than the online player/)).toBeTruthy();
+    expect(calls.find((c) => c.url.includes("/lookup"))!.url).toContain("name=Alex");
+    expect(submit.disabled).toBe(false);
+    await user.click(submit);
+    await waitFor(() =>
+      expect(calls.find((c) => c.method === "POST")?.body).toEqual({ action: "op", name: "Alex" }),
+    );
+  });
+
+  it("a failed lookup keeps every list add disabled", async () => {
+    const calls = routeFetch([
+      ["GET", /\/players$/, ok(makeOverview())],
+      ["GET", /\/players\/sessions/, emptySessions],
+      ["GET", /\/players\/lookup/, () => jsonResponse(apiErrorBody("NOT_FOUND", "unknown"), { status: 404 })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<PlayersTab server={owner({ state: "running" })} />);
+    const online = (await screen.findByText("Alex")).closest("li")!;
+    await user.click(within(online).getByRole("button", { name: "Ban" }));
+    const dialog = await findLoadedDialog();
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/lookup"))).toBe(true));
+    expect(await within(dialog).findByRole("alert")).toBeTruthy();
+    const ban = within(dialog).getByRole("button", { name: "Ban" }) as HTMLButtonElement;
+    expect(ban.disabled).toBe(true);
+    await user.click(ban);
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
   });
 
   it("explains a command the server didn't confirm", async () => {
@@ -193,7 +299,7 @@ describe("Players tab", () => {
     wrap(<PlayersTab server={owner({ state: "running" })} />);
     const online = (await screen.findByText("Alex")).closest("li")!;
     await user.click(within(online).getByRole("button", { name: "Kick" }));
-    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Kick" }));
+    await user.click(within(await findLoadedDialog()).getByRole("button", { name: "Kick" }));
     expect(await screen.findByText("Sent, but the server didn't confirm")).toBeTruthy();
     expect(screen.getByText(/Check the console/)).toBeTruthy();
   });
@@ -218,7 +324,7 @@ describe("Players tab", () => {
     const user = userEvent.setup();
     wrap(<PlayersTab server={owner({ state: "stopped" })} />);
     await user.click(await screen.findByRole("button", { name: "Add operator" }));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await findLoadedDialog();
     await user.type(within(dialog).getByLabelText("Player name"), "Helper");
     await user.click(within(dialog).getByRole("button", { name: "Look up" }));
     expect(await within(dialog).findByText(/offline-mode UUID/)).toBeTruthy();

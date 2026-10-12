@@ -1,23 +1,7 @@
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  CircleX,
-  Download,
-  ExternalLink,
-  History,
-  PackageSearch,
-  Puzzle,
-  RefreshCw,
-  Trash2,
-  TriangleAlert,
-  Upload,
-} from "lucide-react";
-import { Suspense, lazy, useEffect, useMemo, useState } from "react";
-import {
-  EXTENSIONS_MANAGE_PERMISSION,
-  EXTENSION_UPDATE_PROBLEMS,
-  ModrinthCategoryTag,
-  REALTIME_EVENT_PAYLOADS,
-} from "@blockforge/contracts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { CircleX, ExternalLink, Puzzle, RefreshCw, Trash2, TriangleAlert, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { EXTENSIONS_MANAGE_PERMISSION, REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type {
   ExtensionList,
   ExtensionUpdateStatus,
@@ -25,46 +9,42 @@ import type {
   Me,
   Server,
 } from "@blockforge/contracts";
-import { extensionsApi } from "@/lib/api/phase4b-api";
-import type { ModrinthSearchParams } from "@/lib/api/phase4b-api";
+import { extensionsApi } from "@/lib/api/extensions-api";
 import { isApiError } from "@/lib/api/errors";
-import { formatBytes, formatNumber } from "@/lib/format";
+import { formatBytes } from "@/lib/format";
 import { useIdempotencyKeys } from "@/lib/idempotency";
+import { retryableLazy } from "@/lib/lazy";
 import { useApiMutation } from "@/lib/mutations";
 import { jobQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { useRealtimeClient, useRealtimeTopic } from "@/lib/realtime/provider";
 import { serverActionable } from "@/lib/server-permissions";
-import { useDebounced } from "@/lib/use-debounced";
+import { LazySection } from "@/components/common/chunk-boundary";
+import { LazyConfirmDialog } from "@/components/common/lazy-confirm-dialog";
+import { LazyDialog } from "@/components/common/lazy-dialog";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/common/states";
 import { Timestamp } from "@/components/common/timestamp";
-import { ConfirmDialog } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Tooltip } from "@/components/ui/tooltip";
-import { JobProgress } from "../server-jobs";
+import { LazyJobProgress } from "../lazy-job-progress";
 import { ExtensionIcon, SafeLink } from "./extension-ui";
-import {
-  HISTORY_ACTION_LABEL,
-  ROLLBACK_UNAVAILABLE,
-  SKIPPED_REASON,
-  extensionNames,
-  historyChange,
-  primaryMetadata,
-  problemsByLevel,
-} from "./extension-model";
+import { SKIPPED_REASON, extensionNames, primaryMetadata, problemsByLevel } from "./extension-model";
 
-// Dialogs load on first use (the tab itself is already a lazy chunk).
-const ProjectDialog = lazy(() => import("./project-dialog"));
-const UploadDialog = lazy(() => import("./upload-dialog"));
+/*
+ * First paint of the tab is the Installed section. Browse, Updates and History are their own chunks
+ * (prefetched on hover/focus of their section triggers), as are the project and upload dialogs
+ * (prefetched on hover/focus of the buttons that open them) and the job widget.
+ */
+const BrowseSection = retryableLazy(() => import("./browse-section"));
+const UpdatesSection = retryableLazy(() => import("./updates-section"));
+const HistorySection = retryableLazy(() => import("./history-section"));
+const ProjectDialog = retryableLazy(() => import("./project-dialog"));
+const UploadDialog = retryableLazy(() => import("./upload-dialog"));
 
 type Section = "installed" | "browse" | "updates" | "history";
 
@@ -142,7 +122,7 @@ function ExtensionJob({
   }, [done, queryClient, serverId]);
   return (
     <div className="flex flex-col gap-1">
-      <JobProgress jobId={jobId} title={title} />
+      <LazyJobProgress jobId={jobId} title={title} />
       {done || job.isError ? (
         <Button size="sm" variant="ghost" className="self-end" onClick={onClose}>
           Dismiss
@@ -259,7 +239,12 @@ function InstalledSection({
               Full rescan
             </Button>
             {uploadsAllowed ? (
-              <Button size="sm" onClick={onUpload}>
+              <Button
+                size="sm"
+                onClick={onUpload}
+                onPointerEnter={() => void UploadDialog.preload()}
+                onFocus={() => void UploadDialog.preload()}
+              >
                 <Upload aria-hidden />
                 Upload .jar
               </Button>
@@ -400,7 +385,7 @@ function InstalledSection({
           </ul>
         </details>
       ) : null}
-      <ConfirmDialog
+      <LazyConfirmDialog
         open={removing !== null}
         onOpenChange={(o) => !o && setRemoving(null)}
         title="Remove this extension?"
@@ -409,482 +394,6 @@ function InstalledSection({
         destructive
         pending={remove.isPending}
         onConfirm={() => removing && remove.mutate(removing)}
-      />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
-// Browse (Modrinth)
-
-const CATEGORIES = [
-  "adventure",
-  "economy",
-  "game-mechanics",
-  "library",
-  "management",
-  "minigame",
-  "optimization",
-  "social",
-  "storage",
-  "technology",
-  "transportation",
-  "utility",
-  "worldgen",
-].filter((c) => ModrinthCategoryTag.safeParse(c).success);
-
-const SORTS = [
-  { value: "relevance" as const, label: "Relevance" },
-  { value: "downloads" as const, label: "Downloads" },
-  { value: "follows" as const, label: "Follows" },
-  { value: "newest" as const, label: "Newest" },
-  { value: "updated" as const, label: "Recently updated" },
-];
-const PAGE = 20;
-
-function BrowseSection({ server, onOpen }: { server: Server; onOpen: (project: string) => void }) {
-  const [text, setText] = useState("");
-  const [categories, setCategories] = useState<string[]>([]);
-  const [sort, setSort] = useState<NonNullable<ModrinthSearchParams["sort"]>>("relevance");
-  const [offset, setOffset] = useState(0);
-  const query = useDebounced(text.trim(), 350);
-  useEffect(() => setOffset(0), [query, categories, sort]);
-  const params: ModrinthSearchParams = { query, categories, sort, offset, limit: PAGE };
-  const q = useQuery({
-    queryKey: qk.server(server.id).modrinthSearch(params),
-    queryFn: ({ signal }) => extensionsApi.search(server.id, params, signal),
-    staleTime: 60_000,
-  });
-  const toggleCategory = (c: string) =>
-    setCategories((list) => (list.includes(c) ? list.filter((x) => x !== c) : [...list, c].slice(0, 8)));
-  const rateLimited = isApiError(q.error) && q.error.code === "RATE_LIMITED";
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-end gap-2">
-        <Input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Search Modrinth"
-          aria-label="Search Modrinth"
-          maxLength={256}
-          className="max-w-sm"
-        />
-        <Select value={sort} onValueChange={setSort} options={SORTS} aria-label="Sort by" className="w-44" />
-      </div>
-      <div className="flex flex-wrap gap-1.5" role="group" aria-label="Categories">
-        {CATEGORIES.map((c) => (
-          <Button
-            key={c}
-            size="sm"
-            variant={categories.includes(c) ? "default" : "outline"}
-            aria-pressed={categories.includes(c)}
-            className="h-6 px-2 text-xs"
-            onClick={() => toggleCategory(c)}
-          >
-            {c}
-          </Button>
-        ))}
-      </div>
-      {q.isPending ? (
-        <TableSkeleton columns={3} rows={4} />
-      ) : q.isError ? (
-        <ErrorState
-          error={q.error}
-          onRetry={() => void q.refetch()}
-          title={
-            rateLimited
-              ? "Modrinth is rate-limiting requests — try again in a moment"
-              : "Could not search Modrinth"
-          }
-          compact
-        />
-      ) : q.data.hits.length === 0 ? (
-        <EmptyState icon={PackageSearch} title="Nothing found for this server" compact />
-      ) : (
-        <>
-          <ul className="flex flex-col divide-y rounded-md border">
-            {q.data.hits.map((h) => (
-              <li key={h.projectId} className="flex items-start gap-3 p-3">
-                <ExtensionIcon url={h.iconUrl} className="size-10" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="font-medium break-words">{h.title}</span>
-                    <span className="text-xs text-muted-foreground">by {h.author}</span>
-                    {h.installed ? <Badge tone="success">Installed</Badge> : null}
-                    {h.loaderMatch === "warning" ? (
-                      <Badge
-                        tone="warning"
-                        title="Only a loader that runs here with a warning matches (e.g. a Quilt mod on Fabric) — it may not work."
-                      >
-                        Loader warning
-                      </Badge>
-                    ) : null}
-                  </div>
-                  <p className="mt-0.5 text-sm break-words text-muted-foreground">{h.description}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                    <span className="tabular">{formatNumber(h.downloads, 0)} downloads</span>
-                    {h.loaders.map((l) => (
-                      <Badge key={l} variant="outline" className="font-normal">
-                        {l}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  aria-label={`View ${h.title}`}
-                  onClick={() => onOpen(h.slug ?? h.projectId)}
-                >
-                  View
-                </Button>
-              </li>
-            ))}
-          </ul>
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-            <span>
-              {q.data.filteredOut > 0
-                ? `${q.data.filteredOut} result(s) on this page hidden: they don't run on this server or are client-only.`
-                : ""}
-            </span>
-            <span className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={offset === 0}
-                onClick={() => setOffset(Math.max(0, offset - PAGE))}
-              >
-                Previous
-              </Button>
-              <span className="tabular">
-                {offset + 1}–{offset + q.data.hits.length + q.data.filteredOut} of{" "}
-                {formatNumber(q.data.totalHits, 0)}
-              </span>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={offset + PAGE >= q.data.totalHits}
-                onClick={() => setOffset(offset + PAGE)}
-              >
-                Next
-              </Button>
-            </span>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
-// Updates
-
-function UpdatesSection({
-  server,
-  list,
-  canManage,
-  onJob,
-}: {
-  server: Server;
-  list: ExtensionList;
-  canManage: boolean;
-  onJob: (jobId: string, title: string) => void;
-}) {
-  const [allowPrerelease, setAllowPrerelease] = useState(false);
-  const [checked, setChecked] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
-  const q = useQuery({
-    queryKey: qk.server(server.id).extensionUpdates(allowPrerelease),
-    queryFn: ({ signal }) => extensionsApi.updates(server.id, allowPrerelease, signal),
-    enabled: checked,
-    staleTime: 5 * 60_000,
-  });
-  const keys = useIdempotencyKeys<string>();
-  const ids = [...selected].sort();
-  const action = JSON.stringify([ids, allowPrerelease]);
-  const apply = useApiMutation({
-    mutationFn: (body: { extensionIds: string[]; allowPrerelease: boolean }) =>
-      extensionsApi.applyUpdates(
-        server.id,
-        body,
-        keys.sent(JSON.stringify([body.extensionIds, body.allowPrerelease])),
-      ),
-    success: "Updating",
-    errorTitle: "Could not apply the updates",
-    onError: (error, body) =>
-      keys.settle(JSON.stringify([body.extensionIds, body.allowPrerelease]), { ok: false, error }),
-    onSuccess: (r, body) => {
-      keys.settle(JSON.stringify([body.extensionIds, body.allowPrerelease]), { ok: true });
-      setSelected(new Set());
-      onJob(r.jobId, `Updating ${body.extensionIds.length} extension(s)`);
-    },
-  });
-  const locked = keys.isLocked(action);
-  const byId = new Map(list.items.map((e) => [e.id, e]));
-  const available = (q.data?.items ?? []).filter((u) => u.updateAvailable);
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <Button
-          size="sm"
-          variant="outline"
-          loading={q.isFetching}
-          onClick={() => (checked ? void q.refetch() : setChecked(true))}
-        >
-          <RefreshCw aria-hidden />
-          Check for updates
-        </Button>
-        <label className="flex items-center gap-2 text-sm">
-          <Switch checked={allowPrerelease} onCheckedChange={setAllowPrerelease} disabled={locked} />
-          Include beta/alpha versions
-        </label>
-        {q.data ? (
-          <span className="text-xs text-muted-foreground">
-            Checked <Timestamp ts={q.data.checkedAt} />
-          </span>
-        ) : null}
-      </div>
-      {allowPrerelease ? (
-        <Callout tone="warning">
-          Pre-release versions can be unstable or break worlds — back up first.
-        </Callout>
-      ) : null}
-      {!checked ? (
-        <p className="text-sm text-muted-foreground">
-          Checks the Modrinth-identified extensions for newer compatible versions.
-        </p>
-      ) : q.isPending ? (
-        <TableSkeleton columns={3} rows={3} />
-      ) : q.isError ? (
-        <ErrorState
-          error={q.error}
-          onRetry={() => void q.refetch()}
-          title="Could not check for updates"
-          compact
-        />
-      ) : available.length === 0 ? (
-        <EmptyState
-          icon={Download}
-          title="Everything is up to date"
-          description="Only Modrinth-identified files can be checked."
-          compact
-        />
-      ) : (
-        <>
-          <ul className="flex flex-col divide-y rounded-md border">
-            {available.map((u) => {
-              const ext = byId.get(u.extensionId);
-              const name = ext ? extensionNames(ext).join(", ") : u.path;
-              const id = `upd-${u.extensionId}`;
-              return (
-                <li key={u.extensionId} className="flex items-center gap-3 p-3 text-sm">
-                  {canManage ? (
-                    <Checkbox
-                      id={id}
-                      checked={selected.has(u.extensionId)}
-                      disabled={!u.file || locked}
-                      onCheckedChange={(c) =>
-                        setSelected((s) => {
-                          const n = new Set(s);
-                          if (c === true) n.add(u.extensionId);
-                          else n.delete(u.extensionId);
-                          return n;
-                        })
-                      }
-                      aria-label={`Update ${name}`}
-                    />
-                  ) : null}
-                  <label htmlFor={id} className="min-w-0 flex-1">
-                    <span className="font-medium break-words">{name}</span>{" "}
-                    <span className="text-muted-foreground tabular">
-                      {u.current?.versionNumber ?? "?"} → {u.latest?.versionNumber ?? "?"}
-                    </span>
-                    {u.latest && u.latest.versionType !== "release" ? (
-                      <Badge tone="warning" className="ml-1.5">
-                        {u.latest.versionType}
-                      </Badge>
-                    ) : null}
-                    {u.problem ? (
-                      <span className="block text-xs text-danger">
-                        Can't be applied: {EXTENSION_UPDATE_PROBLEMS[u.problem]}.
-                      </span>
-                    ) : null}
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-          {canManage ? (
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                disabled={selected.size === 0}
-                loading={apply.isPending}
-                onClick={() => apply.mutate({ extensionIds: ids, allowPrerelease })}
-              >
-                Apply {selected.size || ""} update{selected.size === 1 ? "" : "s"}
-              </Button>
-              {locked ? (
-                <span role="status" className="text-xs">
-                  The previous request's outcome is unknown; applying again retries the same request.
-                </span>
-              ) : null}
-            </div>
-          ) : null}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------------------------
-// History
-
-function HistorySection({
-  server,
-  canManage,
-  onJob,
-}: {
-  server: Server;
-  canManage: boolean;
-  onJob: (jobId: string, title: string) => void;
-}) {
-  const [confirm, setConfirm] = useState<{ id: string; name: string; change: string } | null>(null);
-  const q = useInfiniteQuery({
-    queryKey: qk.server(server.id).extensionHistory,
-    queryFn: ({ signal, pageParam }) =>
-      extensionsApi.history(server.id, { limit: 25, cursor: pageParam }, signal),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.nextCursor,
-  });
-  const keys = useIdempotencyKeys<string>();
-  const rollback = useApiMutation({
-    mutationFn: (entryId: string) => extensionsApi.rollback(server.id, entryId, keys.sent(entryId)),
-    success: "Rollback started",
-    errorTitle: "Could not roll back",
-    onError: (error, id) => keys.settle(id, { ok: false, error }),
-    onSuccess: (r, id) => {
-      keys.settle(id, { ok: true });
-      setConfirm(null);
-      onJob(r.jobId, "Rolling back");
-    },
-  });
-  const entries = q.data?.pages.flatMap((p) => p.items) ?? [];
-  if (q.isPending) return <TableSkeleton columns={5} rows={4} />;
-  if (q.isError)
-    return (
-      <ErrorState
-        error={q.error}
-        onRetry={() => void q.refetch()}
-        title="Could not load the history"
-        compact
-      />
-    );
-  if (entries.length === 0) return <EmptyState icon={History} title="No changes yet" compact />;
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="overflow-x-auto rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead>When</TableHead>
-              <TableHead>Change</TableHead>
-              <TableHead>By</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">
-                <span className="sr-only">Rollback</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {entries.map((e) => (
-              <TableRow key={e.id}>
-                <TableCell className="text-xs whitespace-nowrap">
-                  <Timestamp ts={e.at} />
-                </TableCell>
-                <TableCell className="max-w-96 text-sm">
-                  <span className="font-medium">{HISTORY_ACTION_LABEL[e.action]}</span>{" "}
-                  <span className="break-words">{e.extensionName}</span>
-                  <span className="block text-xs text-muted-foreground tabular">{historyChange(e)}</span>
-                </TableCell>
-                <TableCell className="text-xs">
-                  {e.actor.name ??
-                    (e.actor.type === "system"
-                      ? "System"
-                      : e.actor.type === "schedule"
-                        ? "A schedule"
-                        : "Unknown")}
-                  {e.actor.type === "api_token" ? (
-                    <span className="text-muted-foreground"> (API key)</span>
-                  ) : null}
-                </TableCell>
-                <TableCell className="text-xs">
-                  {e.status === "succeeded" ? (
-                    <Badge tone="success">Succeeded</Badge>
-                  ) : (
-                    <>
-                      <Badge tone="danger">Failed</Badge>
-                      {e.error ? (
-                        <span className="mt-0.5 block break-words text-danger">{e.error}</span>
-                      ) : null}
-                    </>
-                  )}
-                </TableCell>
-                <TableCell className="text-right">
-                  {canManage ? (
-                    <Tooltip
-                      content={
-                        e.rollback.available
-                          ? null
-                          : e.rollback.reason
-                            ? ROLLBACK_UNAVAILABLE[e.rollback.reason]
-                            : null
-                      }
-                    >
-                      <span>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!e.rollback.available}
-                          aria-label={`Roll back: ${HISTORY_ACTION_LABEL[e.action]} ${e.extensionName}`}
-                          onClick={() =>
-                            setConfirm({ id: e.id, name: e.extensionName, change: historyChange(e) })
-                          }
-                        >
-                          Roll back
-                        </Button>
-                      </span>
-                    </Tooltip>
-                  ) : null}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-      {q.hasNextPage ? (
-        <Button
-          variant="outline"
-          size="sm"
-          className="self-center"
-          loading={q.isFetchingNextPage}
-          onClick={() => void q.fetchNextPage()}
-        >
-          Load older changes
-        </Button>
-      ) : null}
-      <ConfirmDialog
-        open={confirm !== null}
-        onOpenChange={(o) => !o && setConfirm(null)}
-        title="Roll back this change?"
-        description={`“${confirm?.name ?? ""}” goes back (${confirm?.change ?? ""}, reversed). Takes effect at the next server start.${
-          keys.isLocked(confirm?.id ?? "")
-            ? " The previous request's outcome is unknown; confirming retries the same request."
-            : ""
-        }`}
-        confirmLabel="Roll back"
-        pending={rollback.isPending}
-        onConfirm={() => confirm && rollback.mutate(confirm.id)}
       />
     </div>
   );
@@ -920,38 +429,53 @@ export default function ExtensionsTab({ server }: { server: Server; me: Me }) {
   );
 
   // Live: `extensions.updated` patches the scan status, re-reads changed rows (404 = removed) or the
-  // whole list when `changed` is null.
+  // whole list when `changed` is null. Reads can overlap (two events for one extension) and race
+  // full re-reads, so a row read is applied only if no newer read of that extension and no full
+  // re-read started after it (`reads`): an older response can't resurrect a removed row.
+  const reads = useRef({ epoch: 0, gen: new Map<string, number>() });
+  const refetchList = () => {
+    reads.current.epoch++;
+    void queryClient.invalidateQueries({ queryKey: qk.server(server.id).extensions });
+  };
   useRealtimeTopic(`server:${server.id}`, (event) => {
     if (event.type !== "extensions.updated") return;
     const parsed = REALTIME_EVENT_PAYLOADS["extensions.updated"].safeParse(event.data);
     const key = qk.server(server.id).extensions;
     if (!parsed.success || parsed.data.serverId !== server.id) {
-      void queryClient.invalidateQueries({ queryKey: key });
+      refetchList();
       return;
     }
     const ev = parsed.data;
     queryClient.setQueryData<ExtensionList>(key, (prev) => (prev ? { ...prev, scan: ev.scan } : prev));
     void queryClient.invalidateQueries({ queryKey: qk.server(server.id).extensionHistory });
     if (ev.changed === null) {
-      void queryClient.invalidateQueries({ queryKey: key });
+      refetchList();
       return;
     }
+    const r = reads.current;
     for (const id of ev.changed) {
+      const gen = (r.gen.get(id) ?? 0) + 1;
+      r.gen.set(id, gen);
+      const epoch = r.epoch;
+      const latest = () => r.gen.get(id) === gen && r.epoch === epoch;
       extensionsApi.get(server.id, id).then(
-        (ext) =>
+        (ext) => {
+          if (!latest()) return;
           queryClient.setQueryData<ExtensionList>(key, (prev) => {
             if (!prev) return prev;
             const i = prev.items.findIndex((x) => x.id === ext.id);
             const items =
               i === -1 ? [...prev.items, ext] : prev.items.map((x) => (x.id === ext.id ? ext : x));
             return { ...prev, items: items.sort((a, b) => a.filename.localeCompare(b.filename)) };
-          }),
+          });
+        },
         (err: unknown) => {
+          if (!latest()) return;
           if (isApiError(err) && err.status === 404)
             queryClient.setQueryData<ExtensionList>(key, (prev) =>
               prev ? { ...prev, items: prev.items.filter((x) => x.id !== id) } : prev,
             );
-          else void queryClient.invalidateQueries({ queryKey: key });
+          else refetchList();
         },
       );
     }
@@ -959,6 +483,7 @@ export default function ExtensionsTab({ server }: { server: Server; me: Me }) {
   useEffect(
     () =>
       client?.onReconnect(() => {
+        reads.current.epoch++;
         void queryClient.invalidateQueries({ queryKey: qk.server(server.id).extensions });
         void queryClient.invalidateQueries({ queryKey: qk.server(server.id).extensionHistory });
       }),
@@ -1026,9 +551,27 @@ export default function ExtensionsTab({ server }: { server: Server; me: Me }) {
         <Tabs value={section} onValueChange={(v) => setSection(v as Section)}>
           <TabsList>
             <TabsTrigger value="installed">Installed ({data.items.length})</TabsTrigger>
-            <TabsTrigger value="browse">Browse Modrinth</TabsTrigger>
-            <TabsTrigger value="updates">Updates</TabsTrigger>
-            <TabsTrigger value="history">History</TabsTrigger>
+            <TabsTrigger
+              value="browse"
+              onPointerEnter={() => void BrowseSection.preload()}
+              onFocus={() => void BrowseSection.preload()}
+            >
+              Browse Modrinth
+            </TabsTrigger>
+            <TabsTrigger
+              value="updates"
+              onPointerEnter={() => void UpdatesSection.preload()}
+              onFocus={() => void UpdatesSection.preload()}
+            >
+              Updates
+            </TabsTrigger>
+            <TabsTrigger
+              value="history"
+              onPointerEnter={() => void HistorySection.preload()}
+              onFocus={() => void HistorySection.preload()}
+            >
+              History
+            </TabsTrigger>
           </TabsList>
           <TabsContent value="installed">
             <InstalledSection
@@ -1043,18 +586,28 @@ export default function ExtensionsTab({ server }: { server: Server; me: Me }) {
             />
           </TabsContent>
           <TabsContent value="browse">
-            <BrowseSection server={server} onOpen={setProject} />
+            <LazySection what="the Modrinth browser" loading={<TableSkeleton columns={3} rows={4} />}>
+              <BrowseSection
+                server={server}
+                onOpen={setProject}
+                onPrefetchOpen={() => void ProjectDialog.preload()}
+              />
+            </LazySection>
           </TabsContent>
           <TabsContent value="updates">
-            <UpdatesSection server={server} list={data} canManage={canManage} onJob={onJob} />
+            <LazySection what="the update check" loading={<TableSkeleton columns={3} rows={3} />}>
+              <UpdatesSection server={server} list={data} canManage={canManage} onJob={onJob} />
+            </LazySection>
           </TabsContent>
           <TabsContent value="history">
-            <HistorySection server={server} canManage={canManage} onJob={onJob} />
+            <LazySection what="the history" loading={<TableSkeleton columns={5} rows={4} />}>
+              <HistorySection server={server} canManage={canManage} onJob={onJob} />
+            </LazySection>
           </TabsContent>
         </Tabs>
       </CardContent>
-      <Suspense fallback={null}>
-        {project ? (
+      {project ? (
+        <LazyDialog title="Modrinth project" onClose={() => setProject(null)}>
           <ProjectDialog
             server={server}
             project={project}
@@ -1065,8 +618,10 @@ export default function ExtensionsTab({ server }: { server: Server; me: Me }) {
               if (restartRequired) onRestart();
             }}
           />
-        ) : null}
-        {uploading ? (
+        </LazyDialog>
+      ) : null}
+      {uploading ? (
+        <LazyDialog title="Upload a plugin or mod" onClose={() => setUploading(false)}>
           <UploadDialog
             server={server}
             onClose={() => setUploading(false)}
@@ -1080,8 +635,8 @@ export default function ExtensionsTab({ server }: { server: Server; me: Me }) {
               if (restartRequired) onRestart();
             }}
           />
-        ) : null}
-      </Suspense>
+        </LazyDialog>
+      ) : null}
     </Card>
   );
 }

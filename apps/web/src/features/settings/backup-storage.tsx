@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CircleCheck, PlugZap } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
 import { BackupStorageSettings } from "@blockforge/contracts";
 import type { BackupStorageSettingsView } from "@blockforge/contracts";
@@ -10,6 +10,8 @@ import type { BackupStorageTestResult } from "@/lib/api/phase4-api";
 import { fieldErrorsFrom } from "@/lib/api/errors";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
+import { useSyncedForm } from "@/lib/use-synced-form";
+import { ChangedElsewhere } from "@/components/common/changed-elsewhere";
 import { ErrorState } from "@/components/common/states";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
@@ -99,15 +101,15 @@ export default function BackupStorageCard() {
     queryKey: qk.settings.backupStorage,
     queryFn: ({ signal }) => backupStorageApi.view(signal),
   });
-  const [form, setForm] = useState<StorageForm>(() => formFromView(undefined));
+  // Refetches (focus, reconnect, another admin's save) only update the form while it has no unsaved
+  // edits; otherwise "changed elsewhere" is shown.
+  const synced = useSyncedForm(q.data, formFromView);
+  const form = synced.form ?? formFromView(undefined);
+  const setForm = synced.setForm;
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [result, setResult] = useState<BackupStorageTestResult | null>(null);
-  useEffect(() => {
-    if (q.data) setForm(formFromView(q.data));
-  }, [q.data]);
   const secretSet = q.data?.secretAccessKeySet ?? false;
-  const saved = formFromView(q.data);
-  const dirty = JSON.stringify(form) !== JSON.stringify(saved);
+  const dirty = synced.dirty;
   const valid = storageRequest(form, secretSet).body !== null;
   const save = useApiMutation({
     mutationFn: (body: BackupStorageSettings) => backupStorageApi.put(body),
@@ -120,7 +122,10 @@ export default function BackupStorageCard() {
       // Drop the typed secret first; the stored one is only ever reported as a flag.
       setForm(withoutSecret);
       setResult(null);
-      if (view) queryClient.setQueryData(qk.settings.backupStorage, view);
+      if (view) {
+        queryClient.setQueryData(qk.settings.backupStorage, view);
+        synced.reset(view);
+      }
       await queryClient.invalidateQueries({ queryKey: qk.settings.backupStorage });
     },
   });
@@ -174,6 +179,7 @@ export default function BackupStorageCard() {
       </CardHeader>
       <CardContent>
         <form onSubmit={submit} className="flex max-w-xl flex-col gap-4" noValidate>
+          {synced.changedElsewhere ? <ChangedElsewhere onDiscard={() => synced.reset()} /> : null}
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-1 text-sm font-medium">Storage</legend>
             <label className="flex items-start gap-2 text-sm">

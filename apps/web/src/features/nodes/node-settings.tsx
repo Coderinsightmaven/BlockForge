@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { FormEvent } from "react";
 import { UpdateNodeRequest } from "@blockforge/contracts";
 import type { Node } from "@blockforge/contracts";
@@ -9,6 +9,8 @@ import { formatBytes, formatCores } from "@/lib/format";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
 import { upsertNodeInCache } from "@/lib/realtime/handlers";
+import { useSyncedForm } from "@/lib/use-synced-form";
+import { ChangedElsewhere } from "@/components/common/changed-elsewhere";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
@@ -121,14 +123,11 @@ export function buildNodePatch(node: Node, form: NodeForm): { patch: Patch; erro
 
 export function NodeSettings({ node, canManage }: { node: Node; canManage: boolean }) {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState<NodeForm>(() => formFromNode(node));
+  // Follows server updates while the user has no unsaved edits; otherwise says it changed elsewhere.
+  const synced = useSyncedForm(node, formFromNode);
+  const form = synced.form ?? formFromNode(node);
+  const dirty = synced.dirty;
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [dirty, setDirty] = useState(false);
-
-  // Follow server updates while the user has not started editing.
-  useEffect(() => {
-    if (!dirty) setForm(formFromNode(node));
-  }, [node, dirty]);
 
   const save = useApiMutation({
     mutationFn: (patch: Patch) => nodesApi.update(node.id, patch),
@@ -137,13 +136,12 @@ export function NodeSettings({ node, canManage }: { node: Node; canManage: boole
     invalidate: [qk.overview],
     onSuccess: (updated) => {
       upsertNodeInCache(queryClient, updated);
-      setDirty(false);
+      synced.reset(updated);
     },
   });
 
   const set = <K extends keyof NodeForm>(k: K, v: NodeForm[K]) => {
-    setDirty(true);
-    setForm((f) => ({ ...f, [k]: v }));
+    synced.setForm((f) => ({ ...f, [k]: v }));
   };
 
   const submit = (e: FormEvent) => {
@@ -152,7 +150,7 @@ export function NodeSettings({ node, canManage }: { node: Node; canManage: boole
     setErrors(errs);
     if (Object.keys(errs).length) return;
     if (Object.keys(patch).length === 0) {
-      setDirty(false);
+      synced.reset();
       return;
     }
     save.mutate(patch, { onError: (err) => setErrors(fieldErrorsFrom(err)) });
@@ -177,6 +175,14 @@ export function NodeSettings({ node, canManage }: { node: Node; canManage: boole
           </div>
         </CardHeader>
         <CardContent className="flex flex-col gap-5">
+          {synced.changedElsewhere ? (
+            <ChangedElsewhere
+              onDiscard={() => {
+                synced.reset();
+                setErrors({});
+              }}
+            />
+          ) : null}
           {!canManage ? (
             <Callout tone="info">
               You can view these settings but need the nodes.manage permission to change them.
@@ -331,9 +337,8 @@ export function NodeSettings({ node, canManage }: { node: Node; canManage: boole
               variant="outline"
               disabled={!dirty || save.isPending}
               onClick={() => {
-                setForm(formFromNode(node));
+                synced.reset();
                 setErrors({});
-                setDirty(false);
               }}
             >
               Discard changes

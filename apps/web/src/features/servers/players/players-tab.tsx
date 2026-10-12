@@ -1,47 +1,31 @@
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { InfiniteData } from "@tanstack/react-query";
-import { Ban, RefreshCw, ShieldCheck, UserCheck, UserX, Users } from "lucide-react";
+import { Ban, RefreshCw, ShieldCheck, UserCheck, UserX } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
-import {
-  BanIpAddress,
-  PlayerActionRequest,
-  PlayerName,
-  REALTIME_EVENT_PAYLOADS,
-} from "@blockforge/contracts";
+import { BanIpAddress, PlayerName, REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type {
   Page,
   PlayerActionKind,
-  PlayerLookupResponse,
+  PlayerActionRequest,
   PlayerSession,
   PlayersOverview,
   Server,
 } from "@blockforge/contracts";
-import { playersApi } from "@/lib/api/phase4b-api";
-import { formatDuration } from "@/lib/format";
+import { playersApi } from "@/lib/api/players-api";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
 import { useRealtimeClient, useRealtimeTopic } from "@/lib/realtime/provider";
+import { preloadWhenIdle, retryableLazy } from "@/lib/lazy";
 import { parseTimeRange } from "@/lib/time-range";
-import { MetricChart } from "@/components/charts/metric-chart";
-import { EmptyState, ErrorState, TableSkeleton } from "@/components/common/states";
+import { ChartLoading } from "@/components/charts/lazy-time-series-chart";
+import { LazySection } from "@/components/common/chunk-boundary";
+import { LazyDialog } from "@/components/common/lazy-dialog";
+import { ErrorState, TableSkeleton } from "@/components/common/states";
 import { Timestamp } from "@/components/common/timestamp";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Field } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -53,22 +37,11 @@ import {
   describePlayerActionError,
   sessionsJoined,
   sessionsLeft,
-  stoppedOnlyReason,
+  ACTION_TITLE,
 } from "./player-model";
+import type { DialogAction } from "./player-model";
 
 type Feedback = { tone: "success" | "warning" | "danger"; title: string; detail: string | null };
-type DialogAction = "kick" | "ban" | "ban-ip" | "op" | "whitelist-add";
-
-const ACTION_TITLE: Record<DialogAction, string> = {
-  kick: "Kick a player",
-  ban: "Ban a player",
-  "ban-ip": "Ban an IP address",
-  op: "Make a player an operator",
-  "whitelist-add": "Add to the whitelist",
-};
-
-/** Actions that add a name to a list: the name is looked up (UUID + source) before sending. */
-const NEEDS_LOOKUP = new Set<DialogAction>(["ban", "op", "whitelist-add"]);
 
 /** A button for one player action, shown only when the overview offers it; disabled with the reason. */
 function ActionButton({
@@ -97,209 +70,6 @@ function ActionButton({
   );
 }
 
-function localInputToEpoch(value: string): number | null {
-  if (!value) return null;
-  const t = new Date(value).getTime();
-  return Number.isFinite(t) ? t : null;
-}
-
-function ActionDialog({
-  server,
-  action,
-  presetName,
-  onClose,
-  onSubmit,
-  pending,
-}: {
-  server: Server;
-  action: DialogAction;
-  presetName: string | null;
-  onClose: () => void;
-  onSubmit: (body: PlayerActionRequest) => void;
-  pending: boolean;
-}) {
-  const [name, setName] = useState(presetName ?? "");
-  const [ip, setIp] = useState("");
-  const [reason, setReason] = useState("");
-  const [expires, setExpires] = useState("");
-  const [level, setLevel] = useState("4");
-  const [bypass, setBypass] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [lookup, setLookup] = useState<PlayerLookupResponse | null>(null);
-  const [lookupError, setLookupError] = useState<string | null>(null);
-  const [looking, setLooking] = useState(false);
-  const stoppedReason = stoppedOnlyReason(server);
-  const needsLookup = NEEDS_LOOKUP.has(action) && presetName === null;
-  const lookedUp = lookup !== null && lookup.name.toLowerCase() === name.trim().toLowerCase();
-
-  const doLookup = async () => {
-    const n = PlayerName.safeParse(name.trim());
-    if (!n.success) {
-      setLookupError("1–16 letters, digits or underscores.");
-      return;
-    }
-    setLooking(true);
-    setLookupError(null);
-    try {
-      setLookup(await playersApi.lookup(server.id, n.data));
-    } catch (err) {
-      setLookup(null);
-      setLookupError(describePlayerActionError(err).title);
-    } finally {
-      setLooking(false);
-    }
-  };
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    const expiresAt = localInputToEpoch(expires);
-    if (expires && (expiresAt === null || expiresAt <= Date.now())) {
-      setError("Choose an expiry in the future.");
-      return;
-    }
-    const trimmedReason = reason.trim() || undefined;
-    const raw =
-      action === "kick"
-        ? { action, name: name.trim(), reason: trimmedReason }
-        : action === "ban"
-          ? { action, name: name.trim(), reason: trimmedReason, ...(expiresAt ? { expiresAt } : {}) }
-          : action === "ban-ip"
-            ? { action, ip: ip.trim(), reason: trimmedReason, ...(expiresAt ? { expiresAt } : {}) }
-            : action === "op"
-              ? {
-                  action,
-                  name: name.trim(),
-                  ...(stoppedReason ? {} : { level: Number(level), bypassesPlayerLimit: bypass }),
-                }
-              : { action, name: name.trim() };
-    const parsed = PlayerActionRequest.safeParse(raw);
-    if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Check the fields.");
-      return;
-    }
-    setError(null);
-    onSubmit(parsed.data);
-  };
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && !pending && onClose()}>
-      <DialogContent>
-        <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
-          <DialogHeader>
-            <DialogTitle>{ACTION_TITLE[action]}</DialogTitle>
-            <DialogDescription>
-              {stoppedReason
-                ? "The server is running: this is sent as a console command and the server's reply is shown."
-                : "The server is stopped: the list file is edited directly."}
-            </DialogDescription>
-          </DialogHeader>
-          {action === "ban-ip" ? (
-            <Field label="IPv4 address" hint="IP bans only match IPv4 addresses, like 203.0.113.7.">
-              <Input value={ip} onChange={(e) => setIp(e.target.value)} autoFocus spellCheck={false} />
-            </Field>
-          ) : (
-            <div className="flex items-end gap-2">
-              <Field label="Player name" className="flex-1">
-                <Input
-                  value={name}
-                  onChange={(e) => {
-                    setName(e.target.value);
-                    setLookup(null);
-                  }}
-                  readOnly={presetName !== null}
-                  maxLength={16}
-                  autoFocus={presetName === null}
-                  spellCheck={false}
-                />
-              </Field>
-              {needsLookup ? (
-                <Button variant="outline" loading={looking} onClick={() => void doLookup()}>
-                  Look up
-                </Button>
-              ) : null}
-            </div>
-          )}
-          {needsLookup && lookedUp && lookup ? (
-            <p className="text-xs" role="status">
-              <span className="font-medium">{lookup.name}</span> ·{" "}
-              <code className="font-mono">{lookup.uuid}</code> ·{" "}
-              {lookup.source === "mojang"
-                ? "Mojang account"
-                : "offline-mode UUID (the server is not in online mode)"}
-            </p>
-          ) : null}
-          {lookupError ? (
-            <p role="alert" className="text-xs text-danger">
-              {lookupError}
-            </p>
-          ) : null}
-          {action === "kick" || action === "ban" || action === "ban-ip" ? (
-            <Field label="Reason" hint="Optional, one line, at most 200 characters.">
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={200} />
-            </Field>
-          ) : null}
-          {action === "ban" || action === "ban-ip" ? (
-            <Field label="Expires" hint={stoppedReason ?? "Empty = permanent."}>
-              <Input
-                type="datetime-local"
-                value={expires}
-                onChange={(e) => setExpires(e.target.value)}
-                disabled={stoppedReason !== null}
-              />
-            </Field>
-          ) : null}
-          {action === "op" ? (
-            <div className="flex flex-col gap-2">
-              <Field
-                label="Operator level"
-                hint={stoppedReason ?? "4 = every command; lower levels limit commands."}
-              >
-                <Select
-                  value={level}
-                  onValueChange={setLevel}
-                  disabled={stoppedReason !== null}
-                  options={["1", "2", "3", "4"].map((v) => ({ value: v, label: v }))}
-                />
-              </Field>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="op-bypass"
-                  checked={bypass}
-                  onCheckedChange={setBypass}
-                  disabled={stoppedReason !== null}
-                />
-                <Label htmlFor="op-bypass">May join when the server is full</Label>
-              </div>
-              <Callout tone="warning">
-                Operators can run any in-game command, including /op for others.
-              </Callout>
-            </div>
-          ) : null}
-          {error ? (
-            <p role="alert" className="text-sm text-danger">
-              {error}
-            </p>
-          ) : null}
-          <DialogFooter>
-            <Button variant="outline" onClick={onClose} disabled={pending}>
-              Cancel
-            </Button>
-            <Button type="submit" loading={pending} disabled={needsLookup && !lookedUp}>
-              {action === "kick"
-                ? "Kick"
-                : action === "op"
-                  ? "Make operator"
-                  : action === "whitelist-add"
-                    ? "Add"
-                    : "Ban"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function OnlineCard({
   server,
   overview,
@@ -310,7 +80,7 @@ function OnlineCard({
   server: Server;
   overview: PlayersOverview;
   gate: (a: PlayerActionKind) => ReturnType<typeof actionGate>;
-  open: (a: DialogAction, name: string | null) => void;
+  open: (a: DialogAction, name: string | null, uuid?: string | null) => void;
   run: (body: PlayerActionRequest) => void;
 }) {
   const o = overview.online;
@@ -363,7 +133,7 @@ function OnlineCard({
                     gate={gate("ban")}
                     label="Ban"
                     icon={Ban}
-                    onClick={() => open("ban", p.name)}
+                    onClick={() => open("ban", p.name, p.uuid)}
                   />
                   {ops.has(p.name.toLowerCase()) ? (
                     <ActionButton
@@ -372,13 +142,13 @@ function OnlineCard({
                       onClick={() => run({ action: "deop", name: p.name })}
                     />
                   ) : (
-                    <ActionButton gate={gate("op")} label="Op" onClick={() => open("op", p.name)} />
+                    <ActionButton gate={gate("op")} label="Op" onClick={() => open("op", p.name, p.uuid)} />
                   )}
                   {overview.whitelist.enabled && !whitelisted.has(p.name.toLowerCase()) ? (
                     <ActionButton
                       gate={gate("whitelist-add")}
                       label="Whitelist"
-                      onClick={() => run({ action: "whitelist-add", name: p.name })}
+                      onClick={() => open("whitelist-add", p.name, p.uuid)}
                     />
                   ) : null}
                 </span>
@@ -630,108 +400,49 @@ function ListsCard({
   );
 }
 
-function SessionsCard({ server }: { server: Server }) {
-  const [filter, setFilter] = useState("");
-  const name = filter.trim();
-  const valid = name === "" || PlayerName.safeParse(name).success;
-  const q = useInfiniteQuery({
-    queryKey: qk.server(server.id).playerSessions(name),
-    queryFn: ({ signal, pageParam }) =>
-      playersApi.sessions(server.id, { limit: 50, cursor: pageParam, name }, signal),
-    initialPageParam: null as string | null,
-    getNextPageParam: (last) => last.nextCursor,
-    enabled: valid,
-  });
-  const sessions = q.data?.pages.flatMap((p) => p.items) ?? [];
+const DAY = parseTimeRange("24h");
+
+// Below the fold or behind a click: the chart, the sessions table and the action dialog are their
+// own chunks (the dialog is preloaded once the tab is idle).
+const MetricChart = retryableLazy(() =>
+  import("@/components/charts/metric-chart").then((m) => ({ default: m.MetricChart })),
+);
+const SessionsCard = retryableLazy(() => import("./sessions-card"));
+const ActionDialog = retryableLazy(() => import("./action-dialog"));
+
+function ChartCardLoading() {
   return (
-    <Card>
+    <Card aria-busy>
       <CardHeader>
-        <div>
-          <CardTitle>Sessions</CardTitle>
-          <CardDescription>Joins and leaves from the server log (kept 90 days).</CardDescription>
-        </div>
-        <Input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter by name"
-          aria-label="Filter sessions by player name"
-          maxLength={16}
-          className="w-44"
-        />
+        <CardTitle>Players online</CardTitle>
       </CardHeader>
-      {!valid ? (
-        <p className="px-4 pb-3 text-xs text-danger">1–16 letters, digits or underscores.</p>
-      ) : q.isPending ? (
-        <TableSkeleton columns={4} rows={3} />
-      ) : q.isError ? (
-        <ErrorState
-          error={q.error}
-          onRetry={() => void q.refetch()}
-          title="Could not load sessions"
-          compact
-        />
-      ) : sessions.length === 0 ? (
-        <EmptyState
-          icon={Users}
-          title={name ? "No sessions for this name" : "No sessions recorded yet"}
-          compact
-        />
-      ) : (
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow className="hover:bg-transparent">
-                <TableHead>Player</TableHead>
-                <TableHead>Joined</TableHead>
-                <TableHead>Left</TableHead>
-                <TableHead>Duration</TableHead>
-                <TableHead>Reason</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sessions.map((s) => (
-                <TableRow key={s.id}>
-                  <TableCell className="text-sm font-medium">{s.name}</TableCell>
-                  <TableCell className="text-xs">
-                    <Timestamp ts={s.joinedAt} />
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {s.leftAt ? <Timestamp ts={s.leftAt} /> : <Badge tone="success">Online</Badge>}
-                  </TableCell>
-                  <TableCell className="text-xs tabular">
-                    {s.leftAt ? formatDuration(s.leftAt - s.joinedAt) : "—"}
-                  </TableCell>
-                  <TableCell className="max-w-64 text-xs break-words text-muted-foreground">
-                    {s.leaveReason ?? "—"}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-      {q.hasNextPage ? (
-        <div className="flex justify-center p-2">
-          <Button
-            size="sm"
-            variant="outline"
-            loading={q.isFetchingNextPage}
-            onClick={() => void q.fetchNextPage()}
-          >
-            Load older sessions
-          </Button>
-        </div>
-      ) : null}
+      <CardContent>
+        <ChartLoading label="Players online" />
+      </CardContent>
     </Card>
   );
 }
 
-const DAY = parseTimeRange("24h");
+function SessionsLoading() {
+  return (
+    <Card aria-busy>
+      <CardHeader>
+        <CardTitle>Sessions</CardTitle>
+      </CardHeader>
+      <TableSkeleton columns={4} rows={3} />
+    </Card>
+  );
+}
 
 export default function PlayersTab({ server }: { server: Server }) {
   const queryClient = useQueryClient();
   const client = useRealtimeClient();
-  const [dialog, setDialog] = useState<{ action: DialogAction; name: string | null } | null>(null);
+  const [dialog, setDialog] = useState<{
+    action: DialogAction;
+    name: string | null;
+    uuid: string | null;
+  } | null>(null);
+  useEffect(() => preloadWhenIdle(ActionDialog.preload), []);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const overview = useQuery({
     queryKey: qk.server(server.id).players,
@@ -850,33 +561,40 @@ export default function PlayersTab({ server }: { server: Server }) {
           server={server}
           overview={o}
           gate={gate}
-          open={(action, name) => setDialog({ action, name })}
+          open={(action, name, uuid) => setDialog({ action, name, uuid: uuid ?? null })}
           run={run}
         />
-        <MetricChart
-          title="Players online"
-          info="Player count over the last 24 hours, from the server's status samples."
-          target={{ series: "server.players", serverId: server.id }}
-          range={DAY}
-        />
+        <LazySection what="the player chart" loading={<ChartCardLoading />}>
+          <MetricChart
+            title="Players online"
+            info="Player count over the last 24 hours, from the server's status samples."
+            target={{ series: "server.players", serverId: server.id }}
+            range={DAY}
+          />
+        </LazySection>
       </div>
       <ListsCard
         overview={o}
         gate={gate}
-        open={(action, name) => setDialog({ action, name })}
+        open={(action, name) => setDialog({ action, name, uuid: null })}
         run={run}
         pending={act.isPending}
       />
-      <SessionsCard server={server} />
+      <LazySection what="the sessions" loading={<SessionsLoading />}>
+        <SessionsCard server={server} />
+      </LazySection>
       {dialog ? (
-        <ActionDialog
-          server={server}
-          action={dialog.action}
-          presetName={dialog.name}
-          pending={act.isPending}
-          onClose={() => setDialog(null)}
-          onSubmit={run}
-        />
+        <LazyDialog title={ACTION_TITLE[dialog.action]} onClose={() => setDialog(null)}>
+          <ActionDialog
+            server={server}
+            action={dialog.action}
+            presetName={dialog.name}
+            presetUuid={dialog.uuid}
+            pending={act.isPending}
+            onClose={() => setDialog(null)}
+            onSubmit={run}
+          />
+        </LazyDialog>
       ) : null}
     </div>
   );

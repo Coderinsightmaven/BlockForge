@@ -19,33 +19,27 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
-import type { DragEvent, FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent } from "react";
 import { toast } from "sonner";
 import type { FileEntry, Server } from "@blockforge/contracts";
 import { filesApi } from "@/lib/api/files-api";
 import { formatBytes, formatTimestamp } from "@/lib/format";
 import { describeError, isApiError } from "@/lib/api/errors";
 import { toastError, useApiMutation } from "@/lib/mutations";
-import { fileListQuery, fileSearchQuery } from "./file-queries";
 import { qk } from "@/lib/query-keys";
 import { serverActionable, serverCan } from "@/lib/server-permissions";
+import { preloadWhenIdle, retryableLazy } from "@/lib/lazy";
 import { cn } from "@/lib/utils";
+import { LazySection } from "@/components/common/chunk-boundary";
+import { LazyConfirmDialog } from "@/components/common/lazy-confirm-dialog";
+import { LazyDialog } from "@/components/common/lazy-dialog";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/common/states";
-import { ConfirmDialog } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,13 +47,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { Select } from "@/components/ui/select";
 import { TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SpacerRow, VirtualTable, useVirtualRows } from "@/components/ui/virtual-table";
-import { FileEditor } from "./file-editor";
 import {
   EDITOR_MAX_BYTES,
   baseName,
@@ -72,10 +63,27 @@ import {
   validateRelativePath,
 } from "./paths";
 import { reportArchiveResult } from "./archive-result";
+import { fileListQuery, fileSearchQuery } from "./file-queries";
 import { collectDrop, planUploads } from "./drop";
 import type { UploadPlan } from "./drop";
 import { downloadFile, uploadFile } from "./upload";
 import type { UploadProgress } from "./upload";
+
+// The editor and the dialogs are their own chunks, preloaded once the listing has painted.
+const FileEditor = retryableLazy(() => import("./file-editor").then((m) => ({ default: m.FileEditor })));
+const NameDialog = retryableLazy(() => import("./file-dialogs").then((m) => ({ default: m.NameDialog })));
+const CompressDialog = retryableLazy(() =>
+  import("./file-dialogs").then((m) => ({ default: m.CompressDialog })),
+);
+
+function EditorLoading() {
+  return (
+    <div className="flex flex-col gap-3" aria-busy aria-label="Loading the editor">
+      <div className="h-9 w-full max-w-md animate-pulse rounded-md bg-muted" />
+      <div className="h-96 w-full animate-pulse rounded-md bg-muted" />
+    </div>
+  );
+}
 
 type DialogState =
   | { kind: "new-file" | "new-folder" }
@@ -99,63 +107,6 @@ function EntryIcon({ entry }: { entry: FileEntry }) {
     return <Link2 className="size-4 shrink-0 text-muted-foreground" aria-hidden />;
   if (isArchive(entry.name)) return <Archive className="size-4 shrink-0 text-warning" aria-hidden />;
   return <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />;
-}
-
-function NameDialog({
-  title,
-  label,
-  initial,
-  hint,
-  validate,
-  onSubmit,
-  onClose,
-  pending,
-}: {
-  title: string;
-  label: string;
-  initial: string;
-  hint?: string;
-  validate: (v: string) => string | null;
-  onSubmit: (v: string) => void;
-  onClose: () => void;
-  pending: boolean;
-}) {
-  const [value, setValue] = useState(initial);
-  const [error, setError] = useState<string | null>(null);
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    const err = validate(value);
-    setError(err);
-    if (!err) onSubmit(value.trim());
-  };
-  return (
-    <Dialog open onOpenChange={(o) => !o && !pending && onClose()}>
-      <DialogContent>
-        <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
-          <DialogHeader>
-            <DialogTitle>{title}</DialogTitle>
-          </DialogHeader>
-          <Field label={label} error={error} hint={hint}>
-            <Input
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              autoFocus
-              spellCheck={false}
-              className="font-mono"
-            />
-          </Field>
-          <DialogFooter>
-            <Button variant="outline" onClick={onClose} disabled={pending}>
-              Cancel
-            </Button>
-            <Button type="submit" loading={pending}>
-              {title}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 /** Files open in the editor or download; folders navigate. Links and special files do neither. */
@@ -198,6 +149,14 @@ export default function FilesTab({
   const [searchDraft, setSearchDraft] = useState("");
   const [searchQ, setSearchQ] = useState("");
   const [uploads, setUploads] = useState<UploadProgress[]>([]);
+  useEffect(
+    () =>
+      preloadWhenIdle(() => {
+        void NameDialog.preload();
+        void FileEditor.preload();
+      }),
+    [],
+  );
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -362,18 +321,20 @@ export default function FilesTab({
   if (editing || newFile) {
     const p = editing ?? newFile!;
     return (
-      <FileEditor
-        key={p}
-        server={server}
-        path={p}
-        isNew={!editing && !!newFile}
-        onDirtyChange={onEditorDirty}
-        onClose={() => {
-          setNewFile(null);
-          onEdit(null);
-          refresh([parentPath(p)]);
-        }}
-      />
+      <LazySection what="the editor" loading={<EditorLoading />}>
+        <FileEditor
+          key={p}
+          server={server}
+          path={p}
+          isNew={!editing && !!newFile}
+          onDirtyChange={onEditorDirty}
+          onClose={() => {
+            setNewFile(null);
+            onEdit(null);
+            refresh([parentPath(p)]);
+          }}
+        />
+      </LazySection>
     );
   }
 
@@ -743,70 +704,78 @@ export default function FilesTab({
       ) : null}
 
       {dialog?.kind === "new-folder" ? (
-        <NameDialog
-          title="Create folder"
-          label="Folder name"
-          initial=""
-          validate={validateName}
-          pending={mkdir.isPending}
-          onClose={() => setDialog(null)}
-          onSubmit={(name) => mkdir.mutate(name)}
-        />
+        <LazyDialog title="Create folder" onClose={() => setDialog(null)}>
+          <NameDialog
+            title="Create folder"
+            label="Folder name"
+            initial=""
+            validate={validateName}
+            pending={mkdir.isPending}
+            onClose={() => setDialog(null)}
+            onSubmit={(name) => mkdir.mutate(name)}
+          />
+        </LazyDialog>
       ) : null}
       {dialog?.kind === "new-file" ? (
-        <NameDialog
-          title="Create file"
-          label="File name"
-          initial=""
-          validate={(n) =>
-            validateName(n) ??
-            (entries.some((e) => e.name === n.trim()) ? "A file with that name exists." : null)
-          }
-          pending={false}
-          onClose={() => setDialog(null)}
-          onSubmit={(name) => {
-            setDialog(null);
-            setNewFile(joinPath(path, name));
-          }}
-        />
+        <LazyDialog title="Create file" onClose={() => setDialog(null)}>
+          <NameDialog
+            title="Create file"
+            label="File name"
+            initial=""
+            validate={(n) =>
+              validateName(n) ??
+              (entries.some((e) => e.name === n.trim()) ? "A file with that name exists." : null)
+            }
+            pending={false}
+            onClose={() => setDialog(null)}
+            onSubmit={(name) => {
+              setDialog(null);
+              setNewFile(joinPath(path, name));
+            }}
+          />
+        </LazyDialog>
       ) : null}
       {dialog?.kind === "rename" ? (
-        <NameDialog
-          title="Rename"
-          label="New name or path"
-          hint="A plain name renames in place; a relative path like plugins/old/foo.jar moves it."
-          initial={dialog.entry.name}
-          validate={(n) => (n.includes("/") ? validateRelativePath(n) : validateName(n))}
-          pending={rename.isPending}
-          onClose={() => setDialog(null)}
-          onSubmit={(to) =>
-            rename.mutate({
-              from: dialog.entry.path,
-              to: to.includes("/") ? to.replace(/^\.\//, "") : joinPath(parentPath(dialog.entry.path), to),
-            })
-          }
-        />
+        <LazyDialog title="Rename" onClose={() => setDialog(null)}>
+          <NameDialog
+            title="Rename"
+            label="New name or path"
+            hint="A plain name renames in place; a relative path like plugins/old/foo.jar moves it."
+            initial={dialog.entry.name}
+            validate={(n) => (n.includes("/") ? validateRelativePath(n) : validateName(n))}
+            pending={rename.isPending}
+            onClose={() => setDialog(null)}
+            onSubmit={(to) =>
+              rename.mutate({
+                from: dialog.entry.path,
+                to: to.includes("/") ? to.replace(/^\.\//, "") : joinPath(parentPath(dialog.entry.path), to),
+              })
+            }
+          />
+        </LazyDialog>
       ) : null}
       {dialog?.kind === "chmod" ? (
-        <NameDialog
-          title="Change permissions"
-          label="Mode (octal)"
-          hint={`Applies to ${dialog.entries.length} item(s). 644 = owner read/write, others read; 755 adds execute.`}
-          initial={dialog.entries[0]?.mode?.slice(-3) ?? "644"}
-          validate={validateMode}
-          pending={chmod.isPending}
-          onClose={() => setDialog(null)}
-          onSubmit={(mode) => {
-            setPendingChmod({
-              paths: dialog.entries.map((e) => e.path),
-              mode,
-              folders: dialog.entries.filter((e) => e.type === "dir").length,
-            });
-            setDialog(null);
-          }}
-        />
+        <LazyDialog title="Change permissions" onClose={() => setDialog(null)}>
+          <NameDialog
+            title="Change permissions"
+            label="Mode (octal)"
+            hint={`Applies to ${dialog.entries.length} item(s). 644 = owner read/write, others read; 755 adds execute.`}
+            initial={dialog.entries[0]?.mode?.slice(-3) ?? "644"}
+            validate={validateMode}
+            pending={chmod.isPending}
+            onClose={() => setDialog(null)}
+            onSubmit={(mode) => {
+              setPendingChmod({
+                paths: dialog.entries.map((e) => e.path),
+                mode,
+                folders: dialog.entries.filter((e) => e.type === "dir").length,
+              });
+              setDialog(null);
+            }}
+          />
+        </LazyDialog>
       ) : null}
-      <ConfirmDialog
+      <LazyConfirmDialog
         open={pendingChmod !== null}
         onOpenChange={(o) => !o && !chmod.isPending && setPendingChmod(null)}
         title={`Set mode ${pendingChmod?.mode ?? ""} on ${pendingChmod?.paths.length ?? 0} item(s)?`}
@@ -826,14 +795,16 @@ export default function FilesTab({
         }
       />
       {dialog?.kind === "compress" ? (
-        <CompressDialog
-          count={dialog.entries.length}
-          pending={compress.isPending}
-          onClose={() => setDialog(null)}
-          onSubmit={(format) => compress.mutate({ paths: dialog.entries.map((e) => e.path), format })}
-        />
+        <LazyDialog title="Compress" onClose={() => setDialog(null)}>
+          <CompressDialog
+            count={dialog.entries.length}
+            pending={compress.isPending}
+            onClose={() => setDialog(null)}
+            onSubmit={(format) => compress.mutate({ paths: dialog.entries.map((e) => e.path), format })}
+          />
+        </LazyDialog>
       ) : null}
-      <ConfirmDialog
+      <LazyConfirmDialog
         open={dialog?.kind === "delete"}
         onOpenChange={(o) => !o && !pending && setDialog(null)}
         title={`Delete ${dialog?.kind === "delete" ? dialog.entries.length : 0} item(s)?`}
@@ -867,47 +838,5 @@ export default function FilesTab({
         {baseName(path) || "Server root"}
       </span>
     </Card>
-  );
-}
-
-function CompressDialog({
-  count,
-  pending,
-  onClose,
-  onSubmit,
-}: {
-  count: number;
-  pending: boolean;
-  onClose: () => void;
-  onSubmit: (format: "tar.gz" | "zip") => void;
-}) {
-  const [format, setFormat] = useState<"tar.gz" | "zip">("tar.gz");
-  return (
-    <Dialog open onOpenChange={(o) => !o && !pending && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Compress {count} item(s)</DialogTitle>
-          <DialogDescription>The archive is created in the current folder.</DialogDescription>
-        </DialogHeader>
-        <Field label="Format">
-          <Select
-            value={format}
-            onValueChange={setFormat}
-            options={[
-              { value: "tar.gz", label: "tar.gz (keeps permissions)" },
-              { value: "zip", label: "zip (opens everywhere)" },
-            ]}
-          />
-        </Field>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={pending}>
-            Cancel
-          </Button>
-          <Button onClick={() => onSubmit(format)} loading={pending}>
-            Compress
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }

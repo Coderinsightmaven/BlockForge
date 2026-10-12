@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Play, Power, RotateCw, Skull, Square } from "lucide-react";
-import { Suspense, lazy, useState } from "react";
+import { useState } from "react";
 import { SERVER_JOB_ERROR_CODES, canStartOperation } from "@blockforge/contracts";
 import type { Server, ServerOperation } from "@blockforge/contracts";
 import { serversApi } from "@/lib/api/servers-api";
@@ -11,6 +11,7 @@ import { qk } from "@/lib/query-keys";
 import { serverActionable } from "@/lib/server-permissions";
 import { cpuView, diskView, memoryView, playersView } from "@/lib/server-metrics";
 import { cn } from "@/lib/utils";
+import { LazyConfirmDialog } from "@/components/common/lazy-confirm-dialog";
 import { Timestamp } from "@/components/common/timestamp";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,11 +22,6 @@ import { InfoTip, Tooltip } from "@/components/ui/tooltip";
 
 // ---------------------------------------------------------------------------------------------
 // Power
-
-// The kill confirmation is only needed after a click: its dialog code loads then.
-const ConfirmDialog = lazy(() =>
-  import("@/components/ui/alert-dialog").then((m) => ({ default: m.ConfirmDialog })),
-);
 
 export type PowerAction = "start" | "stop" | "restart" | "kill";
 
@@ -110,20 +106,16 @@ export function PowerControls({
           </Tooltip>
         );
       })}
-      {confirmKill ? (
-        <Suspense fallback={null}>
-          <ConfirmDialog
-            open={confirmKill}
-            onOpenChange={setConfirmKill}
-            title={`Kill ${server.name}?`}
-            description="The process is terminated immediately without saving. Unsaved world data and in-flight writes can be lost or corrupted. Use Stop for a clean shutdown."
-            confirmLabel="Kill process"
-            destructive
-            pending={run.isPending}
-            onConfirm={() => run.mutate("kill", { onSuccess: () => setConfirmKill(false) })}
-          />
-        </Suspense>
-      ) : null}
+      <LazyConfirmDialog
+        open={confirmKill}
+        onOpenChange={setConfirmKill}
+        title={`Kill ${server.name}?`}
+        description="The process is terminated immediately without saving. Unsaved world data and in-flight writes can be lost or corrupted. Use Stop for a clean shutdown."
+        confirmLabel="Kill process"
+        destructive
+        pending={run.isPending}
+        onConfirm={() => run.mutate("kill", { onSuccess: () => setConfirmKill(false) })}
+      />
     </div>
   );
 }
