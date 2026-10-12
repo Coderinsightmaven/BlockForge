@@ -221,6 +221,7 @@ permission, the task fails with FORBIDDEN and the run is recorded as failed.
 | GET | `/account/api-keys` | → `ApiKey[]` | session only |
 | POST | `/account/api-keys` | `CreateApiKeyRequest` → `CreatedApiKey` (secret shown once) | session only (MFA-verified) |
 | DELETE | `/account/api-keys/:id` | → 204 | session only |
+| GET | `/account/permissions` | → `AccountPermissions` (role grants + per-server owner/subuser grants) | session or API key |
 
 Every other route accepts `Authorization: Bearer bfk_…` (no CSRF). Key requests are limited to
 `permissions ∩ owner's current effective permissions`, minus `API_KEY_FORBIDDEN_PERMISSIONS`; account routes

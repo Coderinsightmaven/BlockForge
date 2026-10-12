@@ -133,6 +133,18 @@ export const CreateApiKeyRequest = z.object({
     .default([]),
   expiresInDays: z.number().int().min(1).max(3650).nullable().default(90),
 });
+/**
+ * `GET /account/permissions` (session or API key): everything the user currently holds, so UIs (API key
+ * picker, subuser grant matrix) offer only grantable permissions. `servers` lists effective permissions
+ * from ownership and subuser grants per server (role-derived server permissions are covered by `scoped`).
+ */
+export const AccountPermissions = z.object({
+  global: z.array(PermissionSchema),
+  scoped: z.array(z.object({ scopeType: ScopeType, scopeId: Id, permissions: z.array(PermissionSchema) })),
+  servers: z.array(z.object({ serverId: Id, serverName: z.string(), via: z.enum(["owner", "subuser"]), permissions: z.array(PermissionSchema) })),
+});
+export type AccountPermissions = z.infer<typeof AccountPermissions>;
+
 /** Returned once at creation. */
 export const CreatedApiKey = z.object({ key: ApiKey, secret: z.string() });
 /** Permissions an API key can never exercise, regardless of grants. */
