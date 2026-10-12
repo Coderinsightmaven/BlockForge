@@ -60,8 +60,15 @@ func isPreviousDefault(list []string) bool {
 	return false
 }
 
-// DefaultBackupFreeReserveBytes is kept free on the backup filesystem by backup.create/restore.
-const DefaultBackupFreeReserveBytes = 2 << 30
+// Backup defaults.
+const (
+	// DefaultBackupFreeReserveBytes is kept free on the backup filesystem by backup.create/restore.
+	DefaultBackupFreeReserveBytes = 2 << 30
+	// DefaultBackupMaxEntries bounds the directory entries backup.create walks.
+	DefaultBackupMaxEntries = 2_000_000
+	// DefaultBackupMaxUncompressedBytes bounds the logical bytes backup.create reads.
+	DefaultBackupMaxUncompressedBytes = 256 << 30
+)
 
 // DefaultArtifactCacheMaxBytes caps <dataRoot>/cache/artifacts (LRU eviction above it).
 const DefaultArtifactCacheMaxBytes = 10 << 30
@@ -121,6 +128,11 @@ type Config struct {
 	ArtifactCacheMaxBytes int64 `json:"artifactCacheMaxBytes,omitempty"`
 	// BackupFreeReserveBytes is kept free by backup.create/restore (default 2 GiB).
 	BackupFreeReserveBytes int64 `json:"backupFreeReserveBytes,omitempty"`
+	// BackupMaxEntries bounds the entries backup.create walks (default 2,000,000).
+	BackupMaxEntries int64 `json:"backupMaxEntries,omitempty"`
+	// BackupMaxUncompressedBytes bounds the logical (uncompressed) bytes backup.create reads
+	// (default 256 GiB; sparse files count with their logical size).
+	BackupMaxUncompressedBytes int64 `json:"backupMaxUncompressedBytes,omitempty"`
 	// CopyMaxBytes bounds fs.copy (default 10 GiB; also bounded by free space minus 1 GiB).
 	CopyMaxBytes int64      `json:"copyMaxBytes,omitempty"`
 	SFTP         SFTPConfig `json:"sftp"`
@@ -169,6 +181,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.BackupFreeReserveBytes <= 0 {
 		c.BackupFreeReserveBytes = DefaultBackupFreeReserveBytes
+	}
+	if c.BackupMaxEntries <= 0 {
+		c.BackupMaxEntries = DefaultBackupMaxEntries
+	}
+	if c.BackupMaxUncompressedBytes <= 0 {
+		c.BackupMaxUncompressedBytes = DefaultBackupMaxUncompressedBytes
 	}
 	if c.SFTP.Listen == "" {
 		c.SFTP.Listen = "0.0.0.0:2022"

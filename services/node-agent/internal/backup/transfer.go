@@ -312,7 +312,9 @@ func (m *Manager) download(ctx context.Context, raw string, maxBytes int64, prog
 	return tmp, h.Sum(nil), nil
 }
 
-// Restore replaces/merges the stopped workload's data with a backup, verifying it first.
+// Restore replaces/merges the stopped workload's data with a backup, verifying it first. The archive
+// is extracted into a staging directory first; a truncate restore then swaps directories, a merge
+// restore moves the staged entries into place (see fsops.RestoreArchive).
 func (m *Manager) Restore(ctx context.Context, p *protocol.BackupRestorePayload, progress Progress) (*RestoreResult, error) {
 	start := time.Now()
 	release, err := m.Claims.Claim(ctx, p.WorkloadID, workload.ClaimRestore)
@@ -364,16 +366,8 @@ func (m *Manager) Restore(ctx context.Context, p *protocol.BackupRestorePayload,
 	if err != nil {
 		return nil, protocol.Errorf(protocol.CodeInternal, "stat backup: %v", err)
 	}
-	if err := m.Sandbox.EnsureDataDir(p.WorkloadID); err != nil {
-		return nil, protocol.Errorf(protocol.CodeInternal, "prepare data directory: %v", err)
-	}
-	root, err := m.Sandbox.Open(p.WorkloadID)
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
-	last := time.Now()
-	res, err := root.ExtractFrom(f, fi.Size(), ".", fsopsArchiveOptions(p, root, progress, &last))
+	// Staged: the data directory is only touched once the whole archive extracted (fsops.RestoreArchive).
+	res, err := m.Sandbox.RestoreArchive(p.WorkloadID, f, fi.Size(), m.restoreOptions(p, progress))
 	if err != nil {
 		return nil, err
 	}

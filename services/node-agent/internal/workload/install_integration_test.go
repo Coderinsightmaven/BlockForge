@@ -207,3 +207,83 @@ func TestWorkloadClaims(t *testing.T) {
 		t.Fatal("workload data not removed")
 	}
 }
+
+// TestEnsureVersusClaims: workload.ensure answers BUSY while install / restore / backup hold the
+// workload and leaves the persisted spec and the container alone; it works again afterwards
+// (review: agent backups #5). The install case races a real install container.
+func TestEnsureVersusClaims(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	id := newUUID()
+	defer e.d.Remove(ctx, id, true)
+	if _, err := e.d.Ensure(ctx, e.spec(id), nil); err != nil {
+		t.Fatal(err)
+	}
+	specPath := filepath.Join(e.sb.WorkloadBase(id), "spec.json")
+	containerID := func() string {
+		c, err := e.d.inspectManaged(ctx, id)
+		if err != nil || c == nil {
+			t.Fatalf("inspect: %v", err)
+		}
+		return c.ID
+	}
+	changed := e.spec(id)
+	changed.Env = map[string]string{"TZ": "UTC", "CHANGED": "1"}
+	expectBusy := func(what string) {
+		t.Helper()
+		before, _ := os.ReadFile(specPath)
+		cid := containerID()
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := e.d.Ensure(ctx, changed, nil); errCode(err) != protocol.CodeBusy {
+					t.Errorf("ensure during %s: %v", what, err)
+				}
+			}()
+		}
+		wg.Wait()
+		if after, _ := os.ReadFile(specPath); string(after) != string(before) {
+			t.Fatalf("spec rewritten during %s", what)
+		}
+		if containerID() != cid {
+			t.Fatalf("container replaced during %s", what)
+		}
+	}
+	// Restore (workload stopped).
+	rel, err := e.d.Claim(ctx, id, ClaimRestore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectBusy("restore")
+	rel()
+	// Backup.
+	rel, err = e.d.Claim(ctx, id, ClaimBackup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectBusy("backup")
+	rel()
+	// A real install in flight.
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.install(id, "sleep 4\n", time.Minute)
+		done <- err
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for e.d.claimed(id, ClaimInstall) == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("install never claimed the workload")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	expectBusy("install")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.d.Ensure(ctx, changed, nil)
+	if err != nil || !res.Changed {
+		t.Fatalf("ensure after the claims: %+v %v", res, err)
+	}
+}

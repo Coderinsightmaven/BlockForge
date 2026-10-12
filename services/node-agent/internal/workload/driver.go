@@ -415,7 +415,9 @@ type EnsureResult struct {
 type ProgressFunc func(stage, message string, percent *float64)
 
 // Ensure creates or reconciles the workload container (idempotent by spec hash). A running
-// container with a different spec is left running and reported as changed.
+// container with a different spec is left running and reported as changed. It answers BUSY while an
+// exclusive operation (install, restore, backup) holds the workload: those run against the persisted
+// spec, container and data directory, which ensure would otherwise rewrite or replace underneath them.
 func (d *Driver) Ensure(ctx context.Context, spec *protocol.WorkloadSpec, progress ProgressFunc) (*EnsureResult, error) {
 	if !d.o.Images.Allowed(spec.Image) {
 		return nil, protocol.Errorf(protocol.CodeImageNotAllowed, "image %q is not allowed by this agent's image allowlist", spec.Image)
@@ -429,6 +431,10 @@ func (d *Driver) Ensure(ctx context.Context, spec *protocol.WorkloadSpec, progre
 	w := d.state(id)
 	w.opMu.Lock()
 	defer w.opMu.Unlock()
+	// Claims are only added under opMu (Claim), so none can appear while this ensure runs.
+	if what := d.claimed(id, ClaimInstall, ClaimRestore, ClaimBackup); what != "" {
+		return nil, protocol.RetryableErrorf(protocol.CodeBusy, "an operation (%s) is in progress for this workload", what)
+	}
 	c, err := d.inspectManaged(ctx, id)
 	if err != nil {
 		return nil, err

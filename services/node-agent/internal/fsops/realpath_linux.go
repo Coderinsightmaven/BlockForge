@@ -27,3 +27,20 @@ func (r *Root) realRel(f *os.File) (string, bool) {
 	}
 	return "", false
 }
+
+// realIs reports whether f's real location is rel (data-root-relative, "." = root); known is false
+// when /proc is unavailable.
+func (r *Root) realIs(f *os.File, rel string) (ok, known bool) {
+	p, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(int(f.Fd())))
+	if err != nil {
+		return false, false
+	}
+	want := r.realDataDir()
+	if want == "" {
+		return false, false
+	}
+	if rel != "." {
+		want += "/" + rel
+	}
+	return p == want || p == want+" (deleted)", true
+}

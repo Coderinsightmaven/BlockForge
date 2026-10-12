@@ -46,6 +46,11 @@ const (
 	restoreMaxEntries = 5_000_000
 	defaultReserve    = 2 << 30
 	progressEvery     = time.Second
+	// DefaultMaxEntries bounds the entries a backup walks (config backupMaxEntries).
+	DefaultMaxEntries = 2_000_000
+	// DefaultMaxUncompressedBytes bounds the logical (uncompressed) bytes a backup reads, so sparse or
+	// highly compressible files cannot cost unbounded I/O and CPU (config backupMaxUncompressedBytes).
+	DefaultMaxUncompressedBytes = 256 << 30
 )
 
 // Manager runs backup commands.
@@ -66,6 +71,33 @@ type Manager struct {
 	RetryBase    time.Duration
 	// UploadConcurrency is the number of parts in flight (default 3).
 	UploadConcurrency int
+	// MaxEntries / MaxUncompressedBytes bound backup.create (defaults DefaultMaxEntries /
+	// DefaultMaxUncompressedBytes).
+	MaxEntries           int64
+	MaxUncompressedBytes int64
+
+	beforeOpen func(rel string) // test hook: runs right before the walk opens an entry
+}
+
+func (m *Manager) maxEntries() int64 {
+	if m.MaxEntries > 0 {
+		return m.MaxEntries
+	}
+	return DefaultMaxEntries
+}
+
+func (m *Manager) maxUncompressed() int64 {
+	if m.MaxUncompressedBytes > 0 {
+		return m.MaxUncompressedBytes
+	}
+	return DefaultMaxUncompressedBytes
+}
+
+func (m *Manager) logger() *slog.Logger {
+	if m.Logger != nil {
+		return m.Logger
+	}
+	return slog.Default()
 }
 
 func (m *Manager) reserve() int64 {
@@ -171,6 +203,20 @@ func readIgnoreFile(root *fsops.Root, name string) []string {
 	return out
 }
 
+// sourceReader remembers read errors (as opposed to archive write errors).
+type sourceReader struct {
+	f   *os.File
+	err error
+}
+
+func (s *sourceReader) Read(b []byte) (int, error) {
+	n, err := s.f.Read(b)
+	if err != nil && err != io.EOF {
+		s.err = err
+	}
+	return n, err
+}
+
 // zeroReader pads files that shrank while being archived (a running server).
 type zeroReader struct{}
 
@@ -208,36 +254,37 @@ func (m *Manager) Create(ctx context.Context, p *protocol.BackupCreatePayload, p
 	patterns = append(patterns, p.Ignore...)
 	ignore := denylist.New(patterns)
 	prune := !ignore.Negates() // with "!" rules, ignored dirs must still be descended
-	fsys := root.OSRoot().FS()
-
-	skip := func(fp string, d fs.DirEntry) (skipEntry bool, skipDir bool) {
-		if fp == ".blockforge" || strings.HasPrefix(fp, ".blockforge/") {
-			return true, d.IsDir()
-		}
-		if ignore.Denied(fp) {
-			return true, d.IsDir() && prune
-		}
-		return false, false
-	}
-	// Pre-walk for progress percentages.
-	var totalBytes int64
-	_ = fs.WalkDir(fsys, ".", func(fp string, d fs.DirEntry, err error) error {
-		if err != nil || fp == "." {
-			return nil
-		}
-		if se, sd := skip(fp, d); se {
-			if sd {
-				return fs.SkipDir
+	wo := fsops.WalkOptions{
+		MaxEntries: m.maxEntries(),
+		Skip: func(rel string, isDir bool) (bool, bool) {
+			if rel == ".blockforge" || strings.HasPrefix(rel, ".blockforge/") {
+				return true, true
 			}
-			return nil
-		}
-		if d.Type().IsRegular() {
-			if info, err := d.Info(); err == nil {
-				totalBytes += info.Size()
+			if ignore.Denied(rel) {
+				return true, prune
+			}
+			return false, false
+		},
+	}
+	maxUnc := m.maxUncompressed()
+	tooBig := func() error {
+		return protocol.Errorf(protocol.CodeQuotaExceeded, "the data to back up exceeds the agent's uncompressed limit (%d bytes)", maxUnc)
+	}
+	// Pre-walk (no file is opened): totals for progress, and the entry / uncompressed-size limits are
+	// enforced before anything is written. Sizes are logical sizes, so sparse files count in full.
+	var totalBytes int64
+	if _, err := root.WalkTree(ctx, ".", wo, func(e *fsops.TreeEntry) error {
+		if e.Mode.IsRegular() {
+			totalBytes += e.Size
+			if totalBytes > maxUnc {
+				return tooBig()
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return nil, walkError(err)
+	}
+	wo.BeforeOpen = m.beforeOpen // test hook, main walk only
 
 	tmp, err := os.CreateTemp(dir, "."+p.BackupID+".tar.gz.tmp-*")
 	if err != nil {
@@ -258,48 +305,49 @@ func (m *Manager) Create(ctx context.Context, p *protocol.BackupCreatePayload, p
 	res := &CreateResult{}
 	var readBytes int64
 	last := time.Now()
-	walkErr := fs.WalkDir(fsys, ".", func(fp string, d fs.DirEntry, err error) error {
+	// archiveFile streams one regular file and closes it before the walk moves on. Open/read errors
+	// fail the backup; only entries that vanished or were replaced meanwhile are skipped.
+	archiveFile := func(e *fsops.TreeEntry) error {
+		f, fi, err := e.Open()
 		if err != nil {
-			return nil // unreadable entry (raced with deletion): skip
-		}
-		if fp == "." {
-			return nil
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		se, sd := skip(fp, d)
-		if se {
-			if sd {
-				return fs.SkipDir
+			if fsops.Skipped(err) {
+				return nil // counted in the walk stats
 			}
-			return nil
+			return err
 		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
+		size := fi.Size()
+		if readBytes+size > maxUnc {
+			f.Close()
+			return tooBig()
 		}
-		switch {
-		case d.IsDir():
-			return tw.WriteHeader(&tar.Header{Name: fp + "/", Typeflag: tar.TypeDir, Mode: int64(info.Mode().Perm()),
-				ModTime: info.ModTime(), Format: tar.FormatPAX})
-		case d.Type().IsRegular():
-			f, fi, err := root.OpenRegular(fp)
-			if err != nil {
-				return nil // replaced or removed meanwhile
-			}
-			defer f.Close()
-			size := fi.Size()
-			if err := tw.WriteHeader(&tar.Header{Name: fp, Typeflag: tar.TypeReg, Size: size, Mode: int64(fi.Mode().Perm()),
-				ModTime: fi.ModTime(), Format: tar.FormatPAX}); err != nil {
-				return err
-			}
+		err = tw.WriteHeader(&tar.Header{Name: e.Rel, Typeflag: tar.TypeReg, Size: size, Mode: int64(fi.Mode().Perm()),
+			ModTime: fi.ModTime(), Format: tar.FormatPAX})
+		if err == nil {
 			// Exactly `size` bytes: a file growing meanwhile is cut, a shrinking one zero-padded.
-			if _, err := io.CopyN(tw, io.MultiReader(f, zeroReader{}), size); err != nil {
+			src := &sourceReader{f: f}
+			if _, err = io.CopyN(tw, io.MultiReader(src, zeroReader{}), size); err != nil && src.err != nil {
+				err = fsops.MapError("read", e.Rel, src.err)
+			}
+		}
+		f.Close()
+		if err != nil {
+			return err
+		}
+		res.Files++
+		readBytes += size
+		return nil
+	}
+	stats, walkErr := root.WalkTree(ctx, ".", wo, func(e *fsops.TreeEntry) error {
+		switch {
+		case e.Mode.IsDir():
+			if err := tw.WriteHeader(&tar.Header{Name: e.Rel + "/", Typeflag: tar.TypeDir, Mode: int64(e.Info.Mode().Perm()),
+				ModTime: e.Info.ModTime(), Format: tar.FormatPAX}); err != nil {
 				return err
 			}
-			res.Files++
-			readBytes += size
+		case e.Mode.IsRegular():
+			if err := archiveFile(e); err != nil {
+				return err
+			}
 		default:
 			res.SkippedSymlinks++ // symlinks, FIFOs, sockets, devices
 		}
@@ -316,14 +364,11 @@ func (m *Manager) Create(ctx context.Context, p *protocol.BackupCreatePayload, p
 		walkErr = gz.Close()
 	}
 	if walkErr != nil {
-		if pe, ok := protocol.AsError(walkErr); ok {
-			return nil, pe
-		}
-		if errors.Is(walkErr, context.Canceled) || errors.Is(walkErr, context.DeadlineExceeded) {
-			return nil, walkErr
-		}
-		return nil, fsops.MapError("backup", "archive", walkErr)
+		return nil, walkError(walkErr)
 	}
+	// Entries replaced while walking (a symlink or another object swapped in) are skipped and
+	// reported with the other special entries; vanished ones only in the agent log.
+	res.SkippedSymlinks += stats.Changed
 	if err := tmp.Sync(); err != nil {
 		return nil, fsops.MapError("backup", "archive", err)
 	}
@@ -338,11 +383,25 @@ func (m *Manager) Create(ctx context.Context, p *protocol.BackupCreatePayload, p
 	res.SizeBytes = aw.n
 	res.Sha256 = hex.EncodeToString(aw.h.Sum(nil))
 	res.DurationMs = time.Since(start).Milliseconds()
+	m.logger().Info("backup created", "workload", p.WorkloadID, "backup", p.BackupID, "files", res.Files,
+		"bytes", res.SizeBytes, "skippedSpecial", res.SkippedSymlinks-stats.Changed, "skippedChanged", stats.Changed,
+		"skippedVanished", stats.Vanished, "entries", stats.Entries, "durationMs", res.DurationMs)
 	if progress != nil {
 		hundred := 100.0
 		progress("archive", fmt.Sprintf("%d files, %d MiB archive", res.Files, mib(res.SizeBytes)), &hundred)
 	}
 	return res, nil
+}
+
+// walkError maps a walk/archive error to a protocol error (context errors pass through).
+func walkError(err error) error {
+	if pe, ok := protocol.AsError(err); ok {
+		return pe
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fsops.MapError("backup", "archive", err)
 }
 
 // ---------------------------------------------------------------------------

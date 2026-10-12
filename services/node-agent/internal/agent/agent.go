@@ -269,6 +269,8 @@ func (a *Agent) Setup(ctx context.Context) error {
 		}
 		return int64(u.Free), nil
 	}
+	// Before anything can (re)create a data directory: repair restores interrupted by a crash.
+	a.sandbox.RecoverRestores(a.log)
 	if !a.sandbox.Chown && runtime.GOOS != "windows" && os.Geteuid() != a.cfg.WorkloadUID {
 		a.log.Warn("agent runs as a different non-root user than the workloads; files it creates will not be owned by the workload user",
 			"agentUid", os.Geteuid(), "workloadUid", a.cfg.WorkloadUID)
@@ -316,7 +318,8 @@ func (a *Agent) Setup(ctx context.Context) error {
 	}
 	a.backups = &backup.Manager{DataRoot: a.cfg.DataRoot, Sandbox: a.sandbox, Claims: a.driver,
 		FreeSpace: a.sandbox.FreeSpace, Reserve: a.cfg.BackupFreeReserveBytes, Transport: a.BackupTransport,
-		Transfers: a.transfers, Logger: a.log}
+		Transfers: a.transfers, Logger: a.log,
+		MaxEntries: a.cfg.BackupMaxEntries, MaxUncompressedBytes: a.cfg.BackupMaxUncompressedBytes}
 	a.facts = &facts.Collector{DataRoot: a.cfg.DataRoot, ExcludeIfaces: a.cfg.NetIfaceExclude, Docker: a.driver.Client()}
 	if a.sftp != nil {
 		a.facts.SFTP = &protocol.SftpFact{Port: a.sftp.Port(), HostKeyFingerprint: a.sftp.Fingerprint()}

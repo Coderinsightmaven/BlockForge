@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -106,31 +107,29 @@ func (r *Root) Copy(p string) (string, error) {
 		return "", MapError("copy", dst, err)
 	}
 	_ = r.chown(dst)
-	seen := 0
-	walkErr := fs.WalkDir(r.r.FS(), src, func(fp string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// Entries are opened relative to their already-opened parent without following symlinks, so a
+	// symlink swapped in after the deny check is skipped, never copied through.
+	_, walkErr := r.WalkTree(context.Background(), src, WalkOptions{MaxEntries: MaxWalkEntries}, func(e *TreeEntry) error {
+		if e.denied(r.deny) {
+			return denyErr(displayPath(e.Rel))
 		}
-		if fp == src {
-			return nil
-		}
-		seen++
-		if seen > MaxWalkEntries {
-			return protocol.Errorf(protocol.CodeQuotaExceeded, "directory has more than %d entries", MaxWalkEntries)
-		}
-		target := path.Join(dst, strings.TrimPrefix(fp, src+"/"))
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
+		target := path.Join(dst, strings.TrimPrefix(e.Rel, src+"/"))
 		switch {
-		case d.IsDir():
-			if err := r.r.Mkdir(target, info.Mode().Perm()|0o700); err != nil {
+		case e.Mode.IsDir():
+			if err := r.r.Mkdir(target, e.Info.Mode().Perm()|0o700); err != nil {
 				return MapError("copy", target, err)
 			}
 			_ = r.chown(target)
-		case info.Mode().IsRegular():
-			return cp.copyFile(fp, target, info.Mode().Perm())
+		case e.Mode.IsRegular():
+			in, fi, err := e.Open()
+			if err != nil {
+				if Skipped(err) {
+					return nil
+				}
+				return err
+			}
+			defer in.Close() // per entry: this callback returns right after the copy
+			return cp.copyFrom(in, target, fi.Mode().Perm())
 		}
 		return nil // symlinks, sockets, FIFOs: skipped
 	})
@@ -196,12 +195,16 @@ type copier struct {
 }
 
 func (c *copier) copyFile(src, dst string, mode fs.FileMode) error {
-	r := c.r
-	in, _, err := r.OpenRegular(src)
+	in, _, err := c.r.OpenForRead(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	return c.copyFrom(in, dst, mode)
+}
+
+func (c *copier) copyFrom(in *os.File, dst string, mode fs.FileMode) error {
+	r := c.r
 	tf, err := r.CreateTemp(dst, mode)
 	if err != nil {
 		return err
@@ -458,39 +461,65 @@ func (r *Root) Compress(p protocol.FsCompressPayload, now time.Time) (*CompressR
 		}
 		return nil, MapError("compress", destRel, err)
 	}
+	// addFile archives one opened regular file and closes it before the next one is opened.
+	addFile := func(name string, f *os.File, info fs.FileInfo) error {
+		defer f.Close()
+		total += info.Size()
+		if total > p.MaxTotalBytes {
+			return protocol.Errorf(protocol.CodeQuotaExceeded, "input exceeds %d bytes", p.MaxTotalBytes)
+		}
+		entries++
+		return aw.file(name, info, f)
+	}
 	for _, in := range inputs {
-		err := fs.WalkDir(r.r.FS(), in, func(fp string, d fs.DirEntry, err error) error {
+		fi, err := r.r.Stat(in) // an input symlink is resolved inside the root (deny-checked above)
+		if err != nil {
+			return fail(MapError("compress", in, err))
+		}
+		switch {
+		case fi.Mode().IsRegular():
+			f, info, err := r.OpenForRead(in)
+			if err == nil {
+				err = addFile(nameOf(in), f, info)
+			}
 			if err != nil {
-				return err
+				return fail(err)
 			}
-			if fp == dest || path.Base(fp) == tmpBase {
-				return nil // never archive the archive being written
-			}
-			entries++
-			if entries > MaxWalkEntries {
-				return protocol.Errorf(protocol.CodeQuotaExceeded, "more than %d entries", MaxWalkEntries)
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
+			continue
+		case !fi.IsDir():
+			continue // special files are not archived
+		}
+		entries++
+		if err := aw.dir(nameOf(in), fi); err != nil {
+			return fail(err)
+		}
+		// Below an input directory nothing is followed: entries are opened relative to their opened
+		// parent with no-follow semantics, and a symlink swapped in after the deny check is skipped.
+		_, err = r.WalkTree(context.Background(), in, WalkOptions{
+			MaxEntries: MaxWalkEntries,
+			Skip: func(rel string, _ bool) (bool, bool) {
+				skip := rel == dest || path.Base(rel) == tmpBase // never archive the archive being written
+				return skip, skip
+			},
+		}, func(e *TreeEntry) error {
+			if e.denied(r.deny) {
+				return denyErr(displayPath(e.Rel))
 			}
 			switch {
-			case d.IsDir():
-				return aw.dir(nameOf(fp), info)
-			case info.Mode().IsRegular():
-				total += info.Size()
-				if total > p.MaxTotalBytes {
-					return protocol.Errorf(protocol.CodeQuotaExceeded, "input exceeds %d bytes", p.MaxTotalBytes)
-				}
-				f, _, err := r.OpenRegular(fp)
+			case e.Mode.IsDir():
+				entries++
+				return aw.dir(nameOf(e.Rel), e.Info)
+			case e.Mode.IsRegular():
+				f, info, err := e.Open()
 				if err != nil {
+					if Skipped(err) {
+						return nil
+					}
 					return err
 				}
-				defer f.Close()
-				return aw.file(nameOf(fp), info, f)
+				return addFile(nameOf(e.Rel), f, info)
 			}
-			entries-- // symlinks and special files are not archived
-			return nil
+			return nil // symlinks and special files are not archived
 		})
 		if err != nil {
 			return fail(err)
@@ -509,31 +538,4 @@ func (r *Root) Compress(p protocol.FsCompressPayload, now time.Time) (*CompressR
 		return nil, err
 	}
 	return &CompressResult{Path: displayPath(dest), Size: size, Entries: entries}, nil
-}
-
-// Truncate removes every top-level entry of the data root except the named ones (symlinks are
-// removed, never followed).
-func (r *Root) Truncate(keep ...string) error {
-	d, err := r.r.Open(".")
-	if err != nil {
-		return MapError("truncate", "", err)
-	}
-	names, err := d.Readdirnames(-1)
-	d.Close()
-	if err != nil {
-		return MapError("truncate", "", err)
-	}
-	keepSet := map[string]bool{}
-	for _, k := range keep {
-		keepSet[k] = true
-	}
-	for _, n := range names {
-		if keepSet[n] {
-			continue
-		}
-		if err := r.r.RemoveAll(n); err != nil {
-			return MapError("truncate", n, err)
-		}
-	}
-	return nil
 }

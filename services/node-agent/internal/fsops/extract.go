@@ -117,9 +117,9 @@ type ArchiveOptions struct {
 	// KeepPerms applies the archive's permission bits (masked to 0777; never setuid/setgid/sticky)
 	// to regular files instead of 0644. Used for backups the agent wrote itself.
 	KeepPerms bool
-	// BeforeWrite runs after the whole archive has been validated and before anything is written
-	// (backup restore truncates the data dir here).
-	BeforeWrite func() error
+	// Planned runs after the whole archive has been validated, with its entry count and expanded
+	// size, before anything is written (backup restore checks the disk reserve here).
+	Planned func(entries, bytes int64) error
 	// Progress is told about extracted entries and bytes.
 	Progress func(entries, bytes int64)
 }
@@ -134,8 +134,8 @@ func (r *Root) ExtractFrom(f *os.File, size int64, dest string, o ArchiveOptions
 	}
 	ex := &extractor{r: r, dest: dest, maxBytes: o.MaxTotalBytes, maxEntries: o.MaxEntries, keepPerms: o.KeepPerms, progress: o.Progress}
 	begin := func() error {
-		if o.BeforeWrite != nil {
-			if err := o.BeforeWrite(); err != nil {
+		if o.Planned != nil {
+			if err := o.Planned(ex.planEntries, ex.planBytes); err != nil {
 				return err
 			}
 		}
@@ -208,6 +208,8 @@ type extractor struct {
 	keepPerms  bool
 	files      int64
 	progress   func(entries, bytes int64)
+	// planEntries / planBytes: totals of the validation pass.
+	planEntries, planBytes int64
 }
 
 // fileMode is 0644, or the archive's permission bits when keepPerms is set.
@@ -247,6 +249,7 @@ func (ex *extractor) planZip(zr *zip.Reader) error {
 			return ex.quota("archive expands to more than %d bytes", ex.maxBytes)
 		}
 	}
+	ex.planEntries, ex.planBytes = int64(len(zr.File)), int64(declared)
 	return nil
 }
 
@@ -304,6 +307,7 @@ func (ex *extractor) planTar(tr *tar.Reader) error {
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
+			ex.planEntries, ex.planBytes = entries, declared
 			return nil
 		}
 		if err != nil {

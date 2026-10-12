@@ -24,7 +24,7 @@ func TestPhase4AllowlistDefaults(t *testing.T) {
 	if !equalStrings(c.ImageAllowlist, custom) {
 		t.Fatalf("custom list changed: %v", c.ImageAllowlist)
 	}
-	if c.BackupFreeReserveBytes != 2<<30 {
-		t.Fatal("backup reserve default")
+	if c.BackupFreeReserveBytes != 2<<30 || c.BackupMaxEntries != 2_000_000 || c.BackupMaxUncompressedBytes != 256<<30 {
+		t.Fatalf("backup defaults: %d %d %d", c.BackupFreeReserveBytes, c.BackupMaxEntries, c.BackupMaxUncompressedBytes)
 	}
 }

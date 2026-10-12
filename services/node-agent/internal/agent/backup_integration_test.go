@@ -229,6 +229,17 @@ func TestPaperBackupRestoreEndToEnd(t *testing.T) {
 	if es, _ := os.ReadDir(filepath.Join(dataRoot, "backups", ".tmp")); len(es) != 0 {
 		t.Fatal("restore download temp file left")
 	}
+	// Staged restore: the data directory was swapped; no staging copy, old data or journal remains,
+	// and the agent area (.blockforge/) came over from the previous data directory.
+	es, _ := os.ReadDir(filepath.Dir(data))
+	for _, e := range es {
+		if strings.HasPrefix(e.Name(), "data.") || e.Name() == "restore.journal" {
+			t.Fatalf("restore left %s in the workload directory", e.Name())
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(data, ".blockforge")); err != nil || !fi.IsDir() {
+		t.Fatal(".blockforge/ missing after the swap")
+	}
 	// The restored server starts and answers SLP.
 	r.do("workload.start", map[string]any{"workloadId": r.wid}, 5*time.Minute)
 	r.waitLog("workload", "Done (", 8*time.Minute)

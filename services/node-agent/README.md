@@ -78,7 +78,8 @@ upgraded on load), `downloadHostAllowlist`
 hosts), `netIfaceExclude` (glob patterns; default skips `lo`, `veth*`, `docker*`, `br-*` and common CNI
 devices), `dockerHost` (e.g. `unix:///run/user/1000/docker.sock` for rootless Docker or a Podman socket),
 `maxConcurrentCommands`, `artifactCacheMaxBytes` (default 10 GiB), `sftp.enabled` (default true) and
-`sftp.listen` (default `0.0.0.0:2022`), `copyMaxBytes` (default 10 GiB), `backupFreeReserveBytes` (default 2 GiB).
+`sftp.listen` (default `0.0.0.0:2022`), `copyMaxBytes` (default 10 GiB), `backupFreeReserveBytes` (default 2 GiB),
+`backupMaxEntries` (default 2,000,000), `backupMaxUncompressedBytes` (default 256 GiB).
 
 Environment overrides: `BLOCKFORGE_SFTP_LISTEN`, `BLOCKFORGE_SFTP_ENABLED`, `BLOCKFORGE_CONFIG_DIR`, `BLOCKFORGE_DATA_ROOT`, `BLOCKFORGE_LOG_LEVEL`,
 `BLOCKFORGE_HOSTNAME`, `DOCKER_HOST`, and the gopsutil host-path variables `HOST_PROC`, `HOST_SYS`,
@@ -202,15 +203,23 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
 
 ## Backups
 
-* **`backup.create`** archives the data dir (through the `os.Root` sandbox, sorted walk, gzip level 1) to
+* **`backup.create`** archives the data dir (sorted walk, gzip level 1) to
   `<dataRoot>/backups/<workloadId>/<backupId>.tar.gz` (dir 0700, file 0600; temp file + fsync + rename;
   identical data → identical archive). `.blockforge/` is always excluded; `.pteroignore`, `.blockforgeignore`
   and the request's `ignore` (in that order, last match wins, `!` re-includes) use the denylist matcher.
-  Symlinks, FIFOs, sockets and devices are skipped and counted (`skippedSymlinks`). Files that change size
+  The walk never follows a symlink (`fsops.WalkTree`): every directory is opened relative to its
+  already-opened parent with `O_NOFOLLOW|O_DIRECTORY`, every file with `O_NOFOLLOW|O_NONBLOCK`, and the
+  opened object must be the one the directory read saw (device + inode; on Linux also its real path via
+  `/proc/self/fd`) — an entry swapped for a symlink or another object meanwhile is skipped. Symlinks, FIFOs,
+  sockets, devices and such swapped entries are counted in `skippedSymlinks`; files that vanished meanwhile
+  are skipped and logged (`skippedVanished`). Any other open or read error **fails** the backup (no
+  incomplete archive is published). Each file is closed before the next is opened. Files that change size
   while a server runs are cut or zero-padded to the size seen at open — run `save-off` / `save-all flush`
-  first (the control plane does). `maxBytes` bounds the archive; the free-disk reserve
-  (`backupFreeReserveBytes`, default 2 GiB) is checked up front and every 32 MiB → `QUOTA_EXCEEDED`, nothing
-  left behind. Progress frames report files and MiB.
+  first (the control plane does). Limits → `QUOTA_EXCEEDED`, nothing left behind: `maxBytes` (archive),
+  `backupMaxEntries` (entries walked), `backupMaxUncompressedBytes` (logical bytes read — sparse files count
+  with their full size; checked on the pre-walk totals and again while streaming), directory nesting deeper
+  than 512 levels, and the free-disk reserve (`backupFreeReserveBytes`, default 2 GiB; checked up front and
+  every 32 MiB). Progress frames report files and MiB.
 * **`backup.upload`** PUTs `partSize` slices of the archive to the presigned multipart URLs (exactly
   ⌈size/partSize⌉ parts numbered 1..N), 3 in flight, `Content-Length` per part, redirects never followed,
   retries with jittered exponential backoff on network errors / 429 / 5xx (4 attempts), immediate failure on
@@ -219,19 +228,34 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
 * **`backup.restore`** requires the workload to be stopped (`BUSY`, also for start/install/remove during the
   restore). `url` sources are downloaded to `<dataRoot>/backups/.tmp` (redirects refused, size ≤
   `maxTotalBytes`, reserve kept); the sha256 of the archive (local or downloaded) is verified **before** the
-  data dir is touched. The archive is then fully validated with the `fs.extract` rules, and only after that
-  `truncate` removes everything except `.blockforge/`; files get the archive's permission bits (masked to
-  0777) and the workload UID/GID.
+  data dir is touched. The archive is validated with the `fs.extract` rules, then the free space is checked
+  against its expanded size plus the reserve (`QUOTA_EXCEEDED` before anything is written), and it is
+  **extracted into a staging directory**; the data dir only changes once the whole archive extracted:
+  * `truncate`: staging is `<dataRoot>/servers/<id>/data.restore-<ts>` (a sibling of `data`, same filesystem,
+    invisible to the container). The swap writes `restore.journal`, renames `data` → `data.old-<ts>` and
+    the staging dir → `data`, moves the previous `.blockforge/` into the new data dir, removes
+    `data.old-<ts>` and the journal. Any failure before the swap removes the staging dir and leaves `data`
+    untouched. On agent start, `RecoverRestores` repairs a crash: `data` missing + `data.old-*` → rolled
+    back; swap done but not cleaned up → finished; staging leftovers → removed.
+  * merge (no `truncate`): staging is `data/.blockforge/restore-<ts>`; after the whole archive extracted and
+    no file/directory collision was found (`CONFLICT`, nothing moved), entries are renamed into place
+    (missing directories move as a whole). Archive entries under `.blockforge/` are never restored.
+
+  Files get the archive's permission bits (masked to 0777) and the workload UID/GID. SFTP sessions opened
+  before a truncate restore keep the old (removed) directory and should reconnect.
 * **`backup.delete`** is idempotent; **`backup.transfer.push`** streams an archive to `POST
   <cp>/agent/v1/transfers/:id`.
 * A backup may run next to a running server but not during an install, restore or another backup of the
-  same workload. **`workload.remove` with `deleteData` never touches `<dataRoot>/backups/<id>`**: the
+  same workload; `workload.ensure`, `workload.remove` (and, for install/restore, `workload.start`) answer
+  `BUSY` while one of these holds the workload. **`workload.remove` with `deleteData` never touches `<dataRoot>/backups/<id>`**: the
   control plane deletes backups explicitly with `backup.delete`.
 
 ## Denylist (template `fileDenylist`)
 
 Semantics: `packages/contracts/src/denylist.ts` (gitignore subset), implemented in `internal/denylist` and
-pinned by `packages/contracts/fixtures/denylist.json` (both implementations run it). Enforced by SFTP
+pinned by `packages/contracts/fixtures/denylist.json` (both implementations run it). Matching is memoised
+(O(pattern segments × path segments)); patterns with more than 64 segments or more than 8 `**` never match
+(ignore files are workload-controlled); path depth is not capped. Enforced by SFTP
 sessions and by `fs.read/write/mkdir/rename/delete/copy/compress/chmod/extract/transfer.push/transfer.pull`
 when the payload carries `denylist`: a path is refused (`PATH_FORBIDDEN`, `details.reason: "denylist"`) if
 the requested path, any symlink it passes through, or its symlink-resolved location inside the sandbox is
@@ -242,7 +266,9 @@ swapped in after the check is caught, and truncation happens only after that che
 (`fs.list/stat/find/du`, SFTP readdir/stat) still show denied entries, as in Wings.
 
 `fs.copy` is bounded by `copyMaxBytes` (default 10 GiB) and by free space minus 1 GiB, checked up front
-and on the bytes actually copied; a refused copy leaves nothing behind.
+and on the bytes actually copied; a refused copy leaves nothing behind. Directory copies and `fs.compress`
+walk with the same no-follow walker as backups: an entry swapped for a symlink after the denylist check is
+skipped, never followed, and every entry is re-checked against the denylist (walked and real path).
 
 ## Security model (summary)
 

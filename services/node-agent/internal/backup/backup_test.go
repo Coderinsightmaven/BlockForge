@@ -267,7 +267,7 @@ func TestRestoreLocalTruncateAndIntegrity(t *testing.T) {
 			t.Fatalf("permissions not restored: %v", fi.Mode())
 		}
 	}
-	if strings.Join(stages, ",") == "" || !strings.Contains(strings.Join(stages, ","), "truncate") {
+	if strings.Join(stages, ",") == "" || !strings.Contains(strings.Join(stages, ","), "swap") {
 		t.Fatalf("stages %v", stages)
 	}
 	// Without truncate: merge (extra files stay).
