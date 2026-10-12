@@ -211,7 +211,14 @@ export function parseVelocityGlist(lines: readonly string[]): VelocityGlistOutpu
 // --- command feedback -------------------------------------------------------------------------
 
 export type CommandFeedback =
-  | { action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "kick" | "ban-ip" | "pardon-ip"; ok: true; target: string; reason: string | null }
+  | {
+      action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "kick" | "ban-ip" | "pardon-ip";
+      ok: true;
+      target: string;
+      reason: string | null;
+      /** The server message (untrusted console text, prefix removed). */
+      message: string;
+    }
   | { action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "player"; ok: false; message: string };
 
 type Rule = [RegExp, (m: RegExpExecArray, msg: string) => CommandFeedback | null];
@@ -221,9 +228,9 @@ const IP_ACTIONS = new Set(["ban-ip", "pardon-ip"]);
 const ok = (action: Extract<CommandFeedback, { ok: true }>["action"], target: string, reason: string | null = null): CommandFeedback | null => {
   if (IP_ACTIONS.has(action)) {
     const ip = normalizeIp(target);
-    return ip === null ? null : { action, ok: true, target: ip, reason };
+    return ip === null ? null : { action, ok: true, target: ip, reason, message: "" };
   }
-  return isValidPlayerName(target) ? { action, ok: true, target, reason } : null;
+  return isValidPlayerName(target) ? { action, ok: true, target, reason, message: "" } : null;
 };
 const fail = (action: Extract<CommandFeedback, { ok: false }>["action"]) => (_m: RegExpExecArray, msg: string): CommandFeedback => ({ action, ok: false, message: msg });
 
@@ -262,7 +269,10 @@ export function parseCommandFeedback(line: string): CommandFeedback | null {
   if (msg === "") return null;
   for (const [re, make] of FEEDBACK) {
     const m = re.exec(msg);
-    if (m) return make(m, msg);
+    if (m) {
+      const r = make(m, msg);
+      return r && r.ok ? { ...r, message: msg } : r;
+    }
   }
   return null;
 }

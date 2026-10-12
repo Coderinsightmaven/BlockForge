@@ -1,4 +1,4 @@
-import type { ServerSoftware } from "@blockforge/contracts";
+import type { ExtensionProblemCode, ServerSoftware } from "@blockforge/contracts";
 import { parse as parseToml } from "smol-toml";
 import { isMap, isScalar, parseDocument, type Document } from "yaml";
 
@@ -353,7 +353,6 @@ export function parseFabricModJson(text: string): ExtensionMetadata {
   m.license = Array.isArray(license) ? stringList(license).join(", ") || null : clean(license);
   const contact = own(o, "contact");
   if (isRecord(contact)) m.homepage = httpsLink(own(contact, "homepage")) ?? httpsLink(own(contact, "sources"));
-  if (m.environment === "client") m.warnings.push("the mod declares environment \"client\" and is not loaded by dedicated servers");
   return m;
 }
 
@@ -495,9 +494,41 @@ export function parseModsToml(text: string, opts: { neoforge?: boolean; manifest
  * Parses whichever metadata entries were read from one jar (`entries`: path inside the jar → text)
  * and returns every plugin/mod declared, most specific first (paper-plugin.yml before plugin.yml).
  */
-export function parseJarMetadata(entries: Readonly<Record<string, string>>): { extensions: ExtensionMetadata[]; errors: string[] } {
+/** Metadata format read from each jar entry (null for the manifest). */
+export const METADATA_ENTRY_FORMATS: Readonly<Record<(typeof EXTENSION_METADATA_ENTRIES)[number], ExtensionFormat | null>> = {
+  "paper-plugin.yml": "paper",
+  "plugin.yml": "bukkit",
+  "velocity-plugin.json": "velocity",
+  "bungee.yml": "bungeecord",
+  "fabric.mod.json": "fabric",
+  "quilt.mod.json": "quilt",
+  "META-INF/neoforge.mods.toml": "neoforge",
+  "META-INF/mods.toml": "forge",
+  "META-INF/MANIFEST.MF": null,
+};
+
+export interface InvalidMetadataEntry {
+  entry: (typeof EXTENSION_METADATA_ENTRIES)[number];
+  format: ExtensionFormat | null;
+  message: string;
+}
+
+export interface ParsedJarMetadata {
+  extensions: ExtensionMetadata[];
+  /** `"<entry>: <message>"` (kept for display). */
+  errors: string[];
+  /** The same failures, structured. */
+  invalid: InvalidMetadataEntry[];
+}
+
+export function parseJarMetadata(entries: Readonly<Record<string, string>>): ParsedJarMetadata {
   const extensions: ExtensionMetadata[] = [];
   const errors: string[] = [];
+  const invalid: InvalidMetadataEntry[] = [];
+  const fail = (entry: InvalidMetadataEntry["entry"], message: string) => {
+    errors.push(`${entry}: ${message}`);
+    invalid.push({ entry, format: METADATA_ENTRY_FORMATS[entry], message });
+  };
   const get = (k: string): string | undefined => (Object.hasOwn(entries, k) ? entries[k] : undefined);
   const manifestText = get("META-INF/MANIFEST.MF");
   let manifest: Record<string, string> | undefined;
@@ -505,17 +536,17 @@ export function parseJarMetadata(entries: Readonly<Record<string, string>>): { e
     try {
       manifest = parseJarManifest(manifestText);
     } catch (err) {
-      errors.push(`META-INF/MANIFEST.MF: ${(err as Error).message}`);
+      fail("META-INF/MANIFEST.MF", err instanceof ExtensionMetadataError ? err.message : "unreadable");
     }
   }
-  const run = (entry: string, fn: (text: string) => ExtensionMetadata | ExtensionMetadata[]) => {
+  const run = (entry: InvalidMetadataEntry["entry"], fn: (text: string) => ExtensionMetadata | ExtensionMetadata[]) => {
     const text = get(entry);
     if (text === undefined) return;
     try {
       const r = fn(text);
       extensions.push(...(Array.isArray(r) ? r : [r]));
     } catch (err) {
-      errors.push(`${entry}: ${err instanceof ExtensionMetadataError ? err.message : "unreadable"}`);
+      fail(entry, err instanceof ExtensionMetadataError ? err.message : "unreadable");
     }
   };
   run("paper-plugin.yml", parsePaperPluginYml);
@@ -526,7 +557,7 @@ export function parseJarMetadata(entries: Readonly<Record<string, string>>): { e
   run("quilt.mod.json", parseQuiltModJson);
   run("META-INF/neoforge.mods.toml", (t) => parseModsToml(t, manifest ? { neoforge: true, manifest } : { neoforge: true }));
   run("META-INF/mods.toml", (t) => parseModsToml(t, manifest ? { manifest } : {}));
-  return { extensions, errors };
+  return { extensions, errors, invalid };
 }
 
 /** Metadata formats each server software loads, best first. */
@@ -542,35 +573,79 @@ export const LOADABLE_FORMATS: Readonly<Record<ServerSoftware, readonly Extensio
   neoforge: ["neoforge", "forge"],
 };
 
-export interface JarCompatibility {
-  loadable: boolean;
-  /** The metadata entry the server will use. */
-  metadata: ExtensionMetadata | null;
-  warnings: string[];
+/** One compatibility problem (codes and levels of the contracts `ExtensionCompatibility`). */
+export interface ExtensionProblem {
+  code: ExtensionProblemCode;
+  level: "error" | "warning";
+  /** Human-readable, single line, ≤ 512 characters. */
+  message: string;
 }
 
+/** Same shape as the contracts `ExtensionCompatibility`. */
+export interface JarCompatibility {
+  /** False when any problem has level `error`: the server software will not load the jar. */
+  loadable: boolean;
+  /** Index into the metadata list of the entry the server software uses (null = none). */
+  metadataIndex: number | null;
+  problems: ExtensionProblem[];
+}
+
+const MAX_PROBLEMS = 32;
+
 /**
- * Whether a jar (parsed with `parseJarMetadata`) can load on `software` — used to validate
- * uploads before they reach `plugins/` or `mods/`. Folia needs `folia-supported: true`; NeoForge
- * reads legacy `mods.toml` only before Minecraft 1.20.5.
+ * Whether a jar can load on `software` — used to validate uploads before they reach `plugins/` or
+ * `mods/`, and to annotate scanned jars. Pass the `parseJarMetadata` result (so unreadable
+ * metadata files are reported) or just its `extensions`.
+ *
+ * Problems: `NO_EXTENSION_DIR` (the software loads no plugins/mods), `NO_METADATA`, `WRONG_PLATFORM`
+ * (metadata only for other formats), `FOLIA_UNSUPPORTED` (Folia needs `folia-supported: true`) —
+ * errors; `METADATA_INVALID` — an error when the unreadable file is the one the server would read
+ * first, a warning otherwise; `LEGACY_MODS_TOML` (NeoForge reads `mods.toml` only before 1.20.5),
+ * `CLIENT_ONLY` (Fabric `environment: client`: not loaded by dedicated servers),
+ * `METADATA_WARNING` (parser notes of the selected metadata) — warnings.
  */
-export function jarCompatibility(extensions: readonly ExtensionMetadata[], software: ServerSoftware): JarCompatibility {
-  const formats = LOADABLE_FORMATS[software];
-  const warnings: string[] = [];
-  for (const format of formats) {
-    const metadata = extensions.find((e) => e.format === format);
-    if (!metadata) continue;
-    if (software === "folia" && metadata.foliaSupported !== true) {
-      return { loadable: false, metadata, warnings: ["Folia only loads plugins that declare folia-supported: true"] };
-    }
-    if (software === "neoforge" && format === "forge") warnings.push("legacy mods.toml: NeoForge only reads it before Minecraft 1.20.5");
-    if (metadata.environment === "client") warnings.push("client-only mod");
-    return { loadable: true, metadata, warnings: [...warnings, ...metadata.warnings] };
-  }
-  const found = [...new Set(extensions.map((e) => e.format))];
-  return {
-    loadable: false,
-    metadata: null,
-    warnings: [found.length > 0 ? `built for ${found.join(", ")}, not for ${software}` : "no plugin or mod metadata found in the jar"],
+export function jarCompatibility(jar: readonly ExtensionMetadata[] | ParsedJarMetadata, software: ServerSoftware): JarCompatibility {
+  const extensions = "extensions" in jar ? jar.extensions : (jar as readonly ExtensionMetadata[]);
+  const invalid = "invalid" in jar ? jar.invalid : [];
+  const problems: ExtensionProblem[] = [];
+  const add = (code: ExtensionProblemCode, level: ExtensionProblem["level"], message: string) => {
+    if (problems.length < MAX_PROBLEMS) problems.push({ code, level, message: clean(message, 512) ?? code });
   };
+  const formats = LOADABLE_FORMATS[software];
+  if (formats.length === 0) {
+    add("NO_EXTENSION_DIR", "error", `${software} servers do not load plugins or mods`);
+    return { loadable: false, metadataIndex: null, problems };
+  }
+  let metadataIndex: number | null = null;
+  let selectedRank = formats.length;
+  for (const [rank, format] of formats.entries()) {
+    const i = extensions.findIndex((e) => e.format === format);
+    if (i >= 0) {
+      metadataIndex = i;
+      selectedRank = rank;
+      break;
+    }
+  }
+  for (const bad of invalid) {
+    if (bad.format === null) {
+      add("METADATA_INVALID", "warning", `${bad.entry}: ${bad.message}`);
+      continue;
+    }
+    const rank = formats.indexOf(bad.format);
+    // The server reads the highest-ranked metadata file present; if that one is broken, it fails.
+    const fatal = rank >= 0 && rank <= selectedRank;
+    add("METADATA_INVALID", fatal ? "error" : "warning", `${bad.entry}: ${bad.message}`);
+  }
+  if (metadataIndex === null) {
+    const found = [...new Set(extensions.map((e) => e.format))];
+    if (found.length > 0) add("WRONG_PLATFORM", "error", `built for ${found.join(", ")}, not for ${software}`);
+    else if (!invalid.some((b) => b.format !== null && formats.includes(b.format))) add("NO_METADATA", "error", "no plugin or mod metadata found in the jar");
+    return { loadable: !problems.some((p) => p.level === "error"), metadataIndex: null, problems };
+  }
+  const metadata = extensions[metadataIndex]!;
+  if (software === "folia" && metadata.foliaSupported !== true) add("FOLIA_UNSUPPORTED", "error", "Folia only loads plugins that declare folia-supported: true");
+  if (software === "neoforge" && metadata.format === "forge") add("LEGACY_MODS_TOML", "warning", "legacy mods.toml: NeoForge only reads it before Minecraft 1.20.5");
+  if (metadata.environment === "client") add("CLIENT_ONLY", "warning", "the mod declares a client-only environment and is not loaded by dedicated servers");
+  for (const w of metadata.warnings) add("METADATA_WARNING", "warning", w);
+  return { loadable: !problems.some((p) => p.level === "error"), metadataIndex, problems };
 }

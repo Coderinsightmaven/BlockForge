@@ -160,7 +160,7 @@ describe("velocity-plugin.json, bungee.yml, fabric.mod.json, quilt.mod.json", ()
     expect(m.authors).toEqual(["A", "B"]);
     expect(m.minecraftVersion).toBe("1.20.1 || 1.20.2");
     expect(m.dependencies).toEqual([{ id: "x", kind: "optional", versionRange: "*", side: null }]);
-    expect(m.warnings.join(" ")).toMatch(/schemaVersion 0.*client/s);
+    expect(m.warnings).toEqual(["fabric.mod.json schemaVersion 0 is outdated"]); // client-only is reported by jarCompatibility (CLIENT_ONLY)
     expect(() => parseFabricModJson("{not json")).toThrow(ExtensionMetadataError);
     expect(() => parseFabricModJson("[]")).toThrow(ExtensionMetadataError);
     expect(() => parseFabricModJson('{"name":"no id"}')).toThrow(ExtensionMetadataError);
@@ -269,13 +269,36 @@ describe("jar-level parsing and compatibility", () => {
     expect(jarCompatibility(map[which], software).loadable).toBe(loadable);
   });
 
-  it("explains incompatibilities", () => {
-    expect(jarCompatibility(ledger, "paper").warnings).toEqual(["built for fabric, not for paper"]);
-    expect(jarCompatibility([], "paper").warnings).toEqual(["no plugin or mod metadata found in the jar"]);
-    expect(jarCompatibility(ferriteForge, "neoforge").warnings[0]).toMatch(/1\.20\.5/);
+  it("explains incompatibilities with structured problem codes", () => {
+    expect(jarCompatibility(ledger, "paper")).toEqual({
+      loadable: false,
+      metadataIndex: null,
+      problems: [{ code: "WRONG_PLATFORM", level: "error", message: "built for fabric, not for paper" }],
+    });
+    expect(jarCompatibility([], "paper").problems).toEqual([{ code: "NO_METADATA", level: "error", message: "no plugin or mod metadata found in the jar" }]);
+    expect(jarCompatibility(luckpermsBukkit, "vanilla")).toMatchObject({ loadable: false, problems: [{ code: "NO_EXTENSION_DIR", level: "error" }] });
+    expect(jarCompatibility(ferriteForge, "neoforge")).toMatchObject({ loadable: true, metadataIndex: 0, problems: [{ code: "LEGACY_MODS_TOML", level: "warning" }] });
     const noFolia = parsePluginYml("name: X\nmain: a.B\nversion: 1\n");
-    expect(jarCompatibility([noFolia], "folia")).toMatchObject({ loadable: false, warnings: [expect.stringMatching(/folia-supported/)] });
-    expect(jarCompatibility(worldguard, "folia").loadable).toBe(true);
+    expect(jarCompatibility([noFolia], "folia")).toMatchObject({ loadable: false, metadataIndex: 0, problems: [{ code: "FOLIA_UNSUPPORTED", level: "error" }] });
+    expect(jarCompatibility(worldguard, "folia")).toEqual({ loadable: true, metadataIndex: 0, problems: [] });
+    const client = parseFabricModJson('{"schemaVersion":1,"id":"c","environment":"client"}');
+    expect(jarCompatibility([client], "fabric").problems.map((p) => `${p.code}:${p.level}`)).toEqual(["CLIENT_ONLY:warning"]);
+  });
+
+  it("unreadable metadata: an error when it is the file the server reads first, a warning otherwise", () => {
+    // Paper reads paper-plugin.yml before plugin.yml: a broken paper-plugin.yml makes the jar unloadable.
+    const brokenPaper = parseJarMetadata({ "paper-plugin.yml": "name: [", "plugin.yml": ext("luckperms-bukkit-5.5.71.plugin.yml") });
+    expect(jarCompatibility(brokenPaper, "paper")).toMatchObject({ loadable: false, metadataIndex: 0, problems: [{ code: "METADATA_INVALID", level: "error" }] });
+    // Spigot never reads paper-plugin.yml: only a warning there.
+    expect(jarCompatibility(brokenPaper, "spigot")).toMatchObject({ loadable: true, metadataIndex: 0, problems: [{ code: "METADATA_INVALID", level: "warning" }] });
+    // A broken file for another platform next to valid metadata: warning.
+    const mixed = parseJarMetadata({ "plugin.yml": "name: [", "fabric.mod.json": ext("ledger-1.3.5.fabric.mod.json") });
+    expect(jarCompatibility(mixed, "fabric")).toMatchObject({ loadable: true, problems: [{ code: "METADATA_INVALID", level: "warning" }] });
+    expect(mixed.invalid).toEqual([{ entry: "plugin.yml", format: "bukkit", message: expect.stringMatching(/^invalid YAML/) }]);
+    // Only broken metadata of the server's own format: METADATA_INVALID error, no extra NO_METADATA.
+    expect(jarCompatibility(parseJarMetadata({ "fabric.mod.json": "{" }), "fabric").problems).toEqual([
+      { code: "METADATA_INVALID", level: "error", message: "fabric.mod.json: fabric.mod.json is not valid JSON" },
+    ]);
   });
 });
 

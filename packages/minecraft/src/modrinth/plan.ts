@@ -4,7 +4,7 @@ import { assertAllowedUrl } from "../http.js";
 import { MODRINTH_HOSTS, assertModrinthId, type ModrinthClient, type UpdateFilter, type VersionType } from "./client.js";
 import { isClientOnly, loaderMatch, sideSupport, type ModrinthLoaderProfile, type SideSupport } from "./loaders.js";
 import type { ModrinthFileRaw, ModrinthProjectRaw, ModrinthVersionRaw } from "./schemas.js";
-import { assertGameVersion, requireLoaderProfile } from "./search.js";
+import { assertGameVersion, requireLoaderProfile, safeIconUrl } from "./search.js";
 
 /** Largest file the agent's `artifact.fetch` accepts. */
 export const MAX_EXTENSION_FILE_BYTES = 2 * 1024 ** 3;
@@ -154,6 +154,7 @@ export function primaryJarFile(v: ModrinthVersionRaw, cdnHosts: readonly string[
     return { problem: "URL_NOT_ALLOWED" };
   }
   if (file.size > MAX_EXTENSION_FILE_BYTES) return { problem: "TOO_LARGE" };
+  if (file.size < 1) return { problem: "NO_JAR" }; // an empty file is not a jar
   if (!file.hashes.sha512) return { problem: "NO_SHA512" };
   return { file, url, sha512: file.hashes.sha512 };
 }
@@ -710,6 +711,8 @@ export interface ModrinthFileIdentity {
   gameVersions: string[];
   serverSide: SideSupport;
   clientOnly: boolean;
+  /** Project icon on the Modrinth CDN (null when absent or elsewhere). */
+  iconUrl: string | null;
 }
 
 export interface IdentifiedFile {
@@ -763,6 +766,7 @@ export async function identifyModrinthFiles(client: ModrinthClient, files: reado
         gameVersions: v.game_versions,
         serverSide: sideSupport(p?.server_side),
         clientOnly: isClientOnly({ serverSide: p?.server_side ?? null, environment: v.environment ?? null }),
+        iconUrl: safeIconUrl(p?.icon_url, client.cdnHosts),
       },
     };
   });

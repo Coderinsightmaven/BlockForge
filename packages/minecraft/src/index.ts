@@ -67,3 +67,4 @@ export * from "./modrinth/index.js";
 export * from "./extensions/metadata.js";
 export * from "./extensions/scan.js";
 export * from "./players/index.js";
+export * from "./contract.js";
