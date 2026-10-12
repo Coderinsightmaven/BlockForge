@@ -1,0 +1,113 @@
+{
+  "t": "metrics",
+  "ts": 1760000000000,
+  "node": {
+    "ts": 1760000000000,
+    "cpu": {
+      "usagePct": 37.5,
+      "perCorePct": [
+        40.1,
+        35.2,
+        38,
+        36.7
+      ],
+      "load1": 2.1,
+      "load5": 1.9,
+      "load15": 1.7,
+      "iowaitPct": 0.4,
+      "stealPct": 0
+    },
+    "memory": {
+      "totalBytes": 137438953472,
+      "usedBytes": 41231686041,
+      "availableBytes": 96207267431,
+      "cachedBytes": 20000000000,
+      "buffersBytes": 1000000000,
+      "swapTotalBytes": 8589934592,
+      "swapUsedBytes": 0
+    },
+    "filesystems": [
+      {
+        "mount": "/",
+        "device": "/dev/nvme0n1p2",
+        "fsType": "ext4",
+        "totalBytes": 1000204886016,
+        "usedBytes": 250051221504,
+        "freeBytes": 750153664512,
+        "inodesTotal": 61054976,
+        "inodesUsed": 812345
+      }
+    ],
+    "diskIo": [
+      {
+        "device": "nvme0n1",
+        "readBytesPerSec": 1048576,
+        "writeBytesPerSec": 4194304,
+        "readOpsPerSec": 120,
+        "writeOpsPerSec": 340,
+        "busyPct": 3.2,
+        "avgLatencyMs": 0.21
+      }
+    ],
+    "network": [
+      {
+        "iface": "eth0",
+        "rxBytesPerSec": 1250000,
+        "txBytesPerSec": 3400000,
+        "rxPacketsPerSec": 2100,
+        "txPacketsPerSec": 3900,
+        "rxErrorsTotal": 0,
+        "txErrorsTotal": 0,
+        "rxDroppedTotal": 12,
+        "txDroppedTotal": 0
+      }
+    ],
+    "tcp": {
+      "established": 184,
+      "total": 260
+    }
+  },
+  "workloads": [
+    {
+      "workloadId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "ts": 1760000000000,
+      "running": true,
+      "cpuPct": 142.5,
+      "cpuThrottledPeriodsTotal": 17,
+      "memoryUsageBytes": 2684354560,
+      "memoryLimitBytes": 4294967296,
+      "memoryCacheBytes": 104857600,
+      "netRxBytesPerSec": 51200,
+      "netTxBytesPerSec": 204800,
+      "blkReadBytesPerSec": 0,
+      "blkWriteBytesPerSec": 65536,
+      "pids": 61,
+      "diskUsageBytes": 1610612736,
+      "jvm": {
+        "heapUsedBytes": 1503238553,
+        "heapCommittedBytes": 2147483648,
+        "heapMaxBytes": 3435973836,
+        "nonHeapUsedBytes": 201326592,
+        "gcCountTotal": 412,
+        "gcTimeMsTotal": 5230,
+        "threads": 58,
+        "uptimeMs": 3590000,
+        "sampledAt": 1759999998000
+      },
+      "minecraft": {
+        "versionName": "Paper 1.21.8",
+        "protocol": 772,
+        "playersOnline": 2,
+        "playersMax": 20,
+        "playerSample": [
+          {
+            "name": "Steve",
+            "id": "8667ba71-b85a-4004-af54-457a9734eed7"
+          }
+        ],
+        "motd": "A BlockForge server",
+        "latencyMs": 1.8
+      }
+    }
+  ]
+}

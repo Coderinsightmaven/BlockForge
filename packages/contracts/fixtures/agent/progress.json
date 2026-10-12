@@ -1,0 +1,8 @@
+{
+  "t": "progress",
+  "id": "00000000-0000-4000-8000-000000000004",
+  "ts": 1760000000000,
+  "stage": "download",
+  "message": "42 MiB of 48 MiB",
+  "percent": 87.5
+}

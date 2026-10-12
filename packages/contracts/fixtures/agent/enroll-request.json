@@ -1,0 +1,60 @@
+{
+  "token": "bfe_0123456789abcdef_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+  "publicKey": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q",
+  "agentVersion": "0.1.0",
+  "protocolVersion": 1,
+  "facts": {
+    "hostname": "mc-node-1",
+    "os": "linux",
+    "platform": "ubuntu",
+    "platformVersion": "24.04",
+    "kernelVersion": "6.8.0-45-generic",
+    "arch": "amd64",
+    "cpuModel": "AMD EPYC 7543P 32-Core Processor",
+    "cpuPhysicalCores": 32,
+    "cpuLogicalCores": 64,
+    "memoryTotalBytes": 137438953472,
+    "swapTotalBytes": 8589934592,
+    "bootTime": 1759000000000,
+    "timezone": "UTC",
+    "dataRoot": "/var/lib/blockforge",
+    "interfaces": [
+      {
+        "name": "eth0",
+        "mac": "02:42:ac:11:00:02",
+        "mtu": 1500,
+        "addresses": [
+          "10.0.0.11/24"
+        ],
+        "up": true
+      }
+    ],
+    "filesystems": [
+      {
+        "mount": "/",
+        "device": "/dev/nvme0n1p2",
+        "fsType": "ext4",
+        "totalBytes": 1000204886016
+      }
+    ],
+    "containerRuntime": {
+      "name": "docker",
+      "version": "29.8.2",
+      "apiVersion": "1.52",
+      "rootless": false,
+      "cgroupVersion": "2",
+      "storageDriver": "overlay2",
+      "healthy": true
+    },
+    "javaRuntimes": [
+      {
+        "major": 21,
+        "version": "21.0.8+9",
+        "vendor": "Eclipse Adoptium",
+        "source": "image",
+        "ref": "eclipse-temurin:21-jre"
+      }
+    ]
+  },
+  "nodeName": "mc-node-1"
+}

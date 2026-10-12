@@ -1,0 +1,7 @@
+{
+  "nodeId": "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c",
+  "approved": true,
+  "controlPlaneSigningKey": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w",
+  "heartbeatIntervalMs": 15000,
+  "metricsIntervalMs": 5000
+}

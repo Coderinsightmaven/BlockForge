@@ -1,0 +1,14 @@
+{
+  "_comment": "TEST-ONLY Ed25519 keys (seed hex, public key base64url). Never use in production.",
+  "controlPlane": {
+    "seedHex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "publicKey": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"
+  },
+  "agent": {
+    "seedHex": "0202020202020202020202020202020202020202020202020202020202020202",
+    "publicKey": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q"
+  },
+  "nodeId": "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c",
+  "workloadId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "now": 1760000000000
+}

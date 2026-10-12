@@ -1,0 +1,22 @@
+{
+  "t": "logs",
+  "workloadId": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "lines": [
+    {
+      "ts": 1760000000000,
+      "stream": "stdout",
+      "line": "[12:00:00 INFO]: Done (4.211s)! For help, type \"help\""
+    },
+    {
+      "ts": 1760000000005,
+      "stream": "stdout",
+      "line": "[12:00:05 INFO]: Steve joined the game"
+    },
+    {
+      "ts": 1760000000009,
+      "stream": "stderr",
+      "line": "<script>alert(1)</script> \u001b[31mred\u001b[0m"
+    }
+  ],
+  "dropped": 0
+}

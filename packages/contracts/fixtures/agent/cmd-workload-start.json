@@ -1,0 +1,5 @@
+{
+  "t": "cmd",
+  "body": "{\"id\":\"00000000-0000-4000-8000-000000000001\",\"nodeId\":\"6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c\",\"type\":\"workload.start\",\"issuedAt\":1760000000000,\"expiresAt\":1760000300000,\"payload\":{\"workloadId\":\"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\"}}",
+  "sig": "RIBXuFCNQTN4s-udYEA_e5UQOfb-WBBvOR14kJxSHMKnxB0B0eUSMn2OyVhFoxldkZVTl_5ZXbvVPYCxhGJGCA"
+}

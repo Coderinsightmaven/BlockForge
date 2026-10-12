@@ -1,0 +1,11 @@
+{
+  "header": "BFAgent eyJuaWQiOiI2ZjFjMmI5YS00ZDNlLTRmNWEtOWI4Yy03ZDZlNWY0YTNiMmMiLCJhdWQiOiJibG9ja2ZvcmdlLWNvbnRyb2wtcGxhbmUiLCJpYXQiOjE3NjAwMDAwMDAwMDAsImV4cCI6MTc2MDAwMDA2MDAwMCwianRpIjoiZEdWemRDMXFkR2t0TURBd01EQXdNUSJ9.fyW4P4zE8sorSjwETibisfZTFHm93PUdUIhypZNjr8W1q392t_Ewsbo6avukjtlAToXfC_mbxcE2qK0WdDXaDQ",
+  "claims": {
+    "nid": "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c",
+    "aud": "blockforge-control-plane",
+    "iat": 1760000000000,
+    "exp": 1760000060000,
+    "jti": "dGVzdC1qdGktMDAwMDAwMQ"
+  },
+  "signerPublicKey": "gTl3Dqh9F19Wo1Rmw0x-zMuNipG07jeiXfYPW4_Js5Q"
+}

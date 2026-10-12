@@ -1,0 +1,178 @@
+# Agent Protocol v1
+
+The authoritative machine-readable definition is `packages/contracts/src/agent/*.ts` (zod).
+Golden JSON fixtures in `packages/contracts/fixtures/agent/` are loaded by **both** the
+TypeScript tests and the Go tests (`services/node-agent/internal/protocol`), so any drift
+between the two implementations fails CI.
+
+## 1. Encoding conventions
+
+* JSON, UTF-8. WebSocket text frames only.
+* Timestamps: **integer Unix milliseconds** (`ts`, `issuedAt`, `expiresAt`).
+* Byte quantities are integers in bytes; rates are bytes/second (floats allowed).
+* Percentages are 0–100 floats. Per-workload CPU percent is relative to **one core**
+  (200 = two full cores), matching `docker stats`.
+* Base64 means **base64url without padding** (RFC 4648 §5).
+* IDs are UUID v4 strings unless stated.
+* Unknown fields MUST be ignored by receivers (forward compatibility). Unknown command types
+  MUST be answered with error code `UNSUPPORTED_COMMAND`.
+
+## 2. Enrollment
+
+1. An administrator creates an enrollment token in the UI (`POST /api/v1/nodes/enrollment-tokens`).
+   Token string: `bfe_<tokenId>_<secret>` where `tokenId` is 16 lowercase hex chars and
+   `secret` is 32 random bytes base64url. Only `sha256(secret)` is stored. Tokens expire
+   (default 1 h, max 7 d), are single-use, and may require manual approval.
+2. On the node: `blockforge-agent enroll --url https://cp.example.com --token bfe_...`.
+   The agent generates an Ed25519 keypair, stores the private key at
+   `<configDir>/agent.key` (mode 0600), and calls:
+
+```
+POST /agent/v1/enroll
+{ "token": "bfe_…", "publicKey": "<b64url 32 bytes>", "agentVersion": "0.1.0",
+  "protocolVersion": 1, "facts": NodeFacts, "nodeName": "optional-suggested-name" }
+→ 201 { "nodeId": "<uuid>", "approved": true,
+        "controlPlaneSigningKey": "<b64url Ed25519 public key>",
+        "heartbeatIntervalMs": 15000, "metricsIntervalMs": 5000 }
+```
+
+   The agent persists `nodeId`, the control-plane URL and the control-plane signing key
+   (pinned) in `<configDir>/agent.json`. Errors: `401 ENROLLMENT_TOKEN_INVALID` (unknown,
+   used, expired — deliberately indistinguishable), `400 VALIDATION_FAILED`.
+3. Agents refuse `http://` control-plane URLs unless started with
+   `--insecure-allow-http` (intended for localhost development only). `--ca-file` lets an
+   operator pin a private CA.
+
+## 3. Agent authentication (connect + agent HTTP endpoints)
+
+Every agent request carries `Authorization: BFAgent <claims>.<sig>` where `claims` is
+base64url(JSON) and `sig` is base64url(Ed25519 signature over the ASCII bytes of the
+`<claims>` segment).
+
+```json
+{ "nid": "<nodeId>", "aud": "blockforge-control-plane", "iat": 1760000000000,
+  "exp": 1760000060000, "jti": "<16+ random bytes b64url>" }
+```
+
+Control plane verification: signature valid for the node's **current** public key; node
+not revoked; `aud` matches; `exp - iat <= 120000`; `now` within `[iat - 30000, exp]`;
+`jti` not previously seen (kept until `exp`). Pending (unapproved) nodes may connect but
+receive no commands except `node.facts`.
+
+Endpoints: `GET /agent/v1/connect` (WebSocket upgrade), `POST /agent/v1/transfers/:id`
+(agent uploads a file stream), `GET /agent/v1/transfers/:id` (agent downloads a stream).
+
+## 4. Message envelope
+
+### Control plane → agent
+
+```json
+{ "t": "cmd", "body": "<JSON string of CommandBody>", "sig": "<b64url signature over UTF-8 bytes of body>" }
+{ "t": "welcome", "nodeId": "…", "serverTime": 1760000000000, "approved": true,
+  "heartbeatIntervalMs": 15000, "metricsIntervalMs": 5000 }
+```
+
+`CommandBody`:
+
+```json
+{ "id": "<uuid>", "nodeId": "<uuid>", "type": "workload.start",
+  "issuedAt": 1760000000000, "expiresAt": 1760000300000, "payload": { … } }
+```
+
+The signature covers the exact `body` string, so no canonical-JSON scheme is needed.
+Agent checks, in order: signature valid for the pinned control-plane key → `nodeId` equals
+its own → `now <= expiresAt + 30000` → `expiresAt - issuedAt <= 900000` → `id` not in the
+seen-set. A duplicate `id` re-sends the cached result if the command finished (results
+cached 15 min) or is ignored while still running (idempotent retry). Failed checks are
+answered with `result` + error code `COMMAND_REJECTED` and logged locally.
+
+### Agent → control plane
+
+| `t` | Shape | Purpose |
+|-----|-------|---------|
+| `hello` | `{agentVersion, protocolVersion, ts, facts: NodeFacts, capabilities: string[], workloads: WorkloadStatus[]}` | First frame after connect; control plane replies `welcome`. |
+| `heartbeat` | `{ts, uptimeMs}` | Every `heartbeatIntervalMs`. Node becomes `unreachable` after 3 missed intervals. |
+| `progress` | `{id, ts, stage, message?, percent?}` | Long-running command progress. |
+| `result` | `{id, ts, ok: true, data}` or `{id, ts, ok: false, error: {code, message, retryable, details?}}` | Exactly one per command. |
+| `metrics` | `{ts, node: NodeMetricSample, workloads: WorkloadMetricSample[]}` | Every `metricsIntervalMs` (batched up to 2 samples per frame). |
+| `event` | `{ts, event: "workload.state" \| "workload.oom" \| "agent.warning", data}` | Asynchronous state changes. |
+| `logs` | `{workloadId, lines: [{ts, stream: "stdout"\|"stderr", line}], dropped?: n}` | Continuous stdout/stderr of managed workloads (≤ 200 lines/s/workload sustained, burst 2000; excess dropped and counted). Lines truncated at 8 KiB. |
+
+## 5. Error codes
+
+`VALIDATION_FAILED`, `UNSUPPORTED_COMMAND`, `COMMAND_REJECTED`, `NOT_FOUND`,
+`ALREADY_EXISTS`, `CONFLICT` (e.g. `ifMatchSha256` mismatch), `PATH_FORBIDDEN`,
+`QUOTA_EXCEEDED`, `CHECKSUM_MISMATCH`, `DOWNLOAD_FAILED`, `HOST_NOT_ALLOWED`,
+`RUNTIME_ERROR` (Docker failure), `TIMEOUT`, `BUSY`, `INTERNAL`.
+
+## 6. Command catalogue
+
+All workload-scoped paths are **relative to the workload data root**
+(`<dataRoot>/servers/<workloadId>/data`). The agent resolves them with symlink-safe
+logic (`openat`-style walk / `filepath.EvalSymlinks` + prefix check, reject `..`, absolute
+paths, NUL bytes, Windows drive letters and device names) and refuses anything outside.
+
+| Type | Payload | Result |
+|------|---------|--------|
+| `node.facts` | `{}` | `NodeFacts` |
+| `node.probe` | `{host, port, kind: "tcp"\|"minecraft", timeoutMs}` | `{reachable, latencyMs?, error?, minecraft?: SlpStatus}` |
+| `workload.ensure` | `WorkloadSpec` | `{created, changed, status: WorkloadStatus}` |
+| `workload.start` | `{workloadId}` | `WorkloadStatus` |
+| `workload.stop` | `{workloadId, timeoutMs}` — writes `spec.stopCommand` to stdin, waits, then SIGTERM, then SIGKILL after 15 s | `WorkloadStatus` |
+| `workload.kill` | `{workloadId}` | `WorkloadStatus` |
+| `workload.remove` | `{workloadId, deleteData}` | `{}` |
+| `workload.status` | `{workloadId?}` | `{workloads: WorkloadStatus[]}` |
+| `workload.console` | `{workloadId, line}` — `line` ≤ 1024 chars, no CR/LF/NUL | `{}` |
+| `workload.logs.tail` | `{workloadId, lines (≤5000), sinceTs?}` | `{lines: LogLine[]}` |
+| `fs.list` | `{workloadId, path}` | `{entries: FileEntry[]}` |
+| `fs.stat` | `{workloadId, path}` | `FileEntry` |
+| `fs.read` | `{workloadId, path, maxBytes (≤ 5 MiB)}` | `{content, encoding: "utf8"\|"base64", sha256, size, truncated}` |
+| `fs.write` | `{workloadId, path, content, encoding, ifMatchSha256: string\|null\|undefined, createParents}` — `null` = must not exist; temp file + fsync + rename | `{sha256, size}` |
+| `fs.mkdir` | `{workloadId, path}` | `{}` |
+| `fs.rename` | `{workloadId, from, to}` | `{}` |
+| `fs.delete` | `{workloadId, path, recursive}` | `{}` |
+| `fs.du` | `{workloadId, path, depth (≤3), top (≤50)}` | `{totalBytes, children: [{path, bytes}], largestFiles: [{path, bytes}]}` |
+| `fs.extract` | `{workloadId, archivePath, destPath, maxTotalBytes, maxEntries}` — zip/tar/tar.gz; rejects symlinks, hardlinks, absolute paths, `..`, devices | `{entries, bytes}` |
+| `fs.transfer.push` | `{workloadId, path, transferId}` — agent streams file to `POST /agent/v1/transfers/:id` | `{bytes, sha256}` |
+| `fs.transfer.pull` | `{workloadId, path, transferId, maxBytes}` — agent streams from `GET /agent/v1/transfers/:id` into temp file then renames | `{bytes, sha256}` |
+| `artifact.fetch` | `{workloadId, url, destPath, checksum: {algorithm: "sha1"\|"sha256"\|"sha512", value} \| null, maxBytes}` — HTTPS only, host must be on the agent's allowlist, no redirects to non-allowlisted hosts | `{bytes, sha256}` |
+| `backup.create` | Phase 6 | |
+| `backup.restore` | Phase 6 | |
+| `credentials.rotate` | `{}` — agent generates new key, returns it; old key valid until reconnect | `{publicKey}` |
+
+`WorkloadSpec` (see `packages/contracts/src/agent/workload.ts`):
+
+```ts
+{ workloadId, kind: "minecraft" | "velocity",
+  image: string,                 // must match agent image allowlist (default: eclipse-temurin:*)
+  command: string[],             // argv, no shell; e.g. ["java","-Xms1G","-Xmx4G","-jar","server.jar","nogui"]
+  env: Record<string,string>,    // keys must match ^[A-Z][A-Z0-9_]{0,63}$
+  memoryLimitBytes, cpuLimitMillicores, pidsLimit,
+  ports: [{ containerPort, hostPort, hostIp, protocol: "tcp"|"udp" }],
+  networks: [{ name, aliases }], // agent creates bridge networks named bf-* on demand
+  stopCommand: "stop" | "end" | null, stopTimeoutMs,
+  restartPolicy: { mode: "never"|"on-failure"|"always", maxRetries, backoffMs },
+  jvmProbe: boolean, labels: Record<string,string> }
+```
+
+Container hardening applied by the agent regardless of spec: run as UID/GID 1000 (or the
+configured unprivileged ID), `no-new-privileges`, drop all capabilities, read-only image
+root filesystem with tmpfs `/tmp`, data root bind-mounted read-write at `/data`, working dir
+`/data`, `pids-limit`, no privileged mode, no host networking, no Docker socket mounts.
+
+`WorkloadStatus`: `{workloadId, exists, state: "created"|"running"|"restarting"|"exited"|"dead"|"missing", exitCode?, oomKilled?, startedAt?, finishedAt?, restartCount, image, containerId?}`.
+
+## 7. Telemetry samples
+
+See `packages/contracts/src/agent/metrics.ts`. Node sample: CPU (total, per core,
+load averages, iowait/steal where supported), memory (total/used/available/cached/buffers/
+swap), filesystems (per mount usage + inodes), disk I/O per device (bytes/s, ops/s, busy %,
+average latency ms where computable), network per interface (bytes/s, packets/s, cumulative
+errors/drops), TCP connection counts. Workload sample: container CPU %, throttled periods,
+memory usage/limit/cache, network rx/tx bytes/s (attributable because each workload has its
+own network namespace), block I/O bytes/s, pids, optional JVM stats (from the JVM probe:
+heap used/committed/max, non-heap, GC count/time, threads, process uptime) and optional
+Minecraft SLP status (players online/max/sample, version, latency).
+
+Fields that a platform cannot provide are **omitted** (never zero-filled) so the UI can
+render "not available" instead of a misleading value.

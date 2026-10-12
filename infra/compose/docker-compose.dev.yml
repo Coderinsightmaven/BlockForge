@@ -1,0 +1,29 @@
+# Development dependencies. Ports are offset to avoid clashing with services already on the host.
+name: blockforge-dev
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: blockforge
+      POSTGRES_PASSWORD: blockforge-dev-only
+      POSTGRES_DB: blockforge
+    ports: ["127.0.0.1:55432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data", "./init-test-db.sql:/docker-entrypoint-initdb.d/10-test-db.sql:ro"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockforge -d blockforge"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.153.0
+    command: ["-retentionPeriod=30d", "-search.latencyOffset=0s", "-dedup.minScrapeInterval=1s"]
+    ports: ["127.0.0.1:58428:8428"]
+    volumes: ["vmdata:/victoria-metrics-data"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8428/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  pgdata: {}
+  vmdata: {}

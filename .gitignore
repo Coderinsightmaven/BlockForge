@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.turbo/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+/services/node-agent/bin/
+/.data/
+playwright-report/
+test-results/
+*.tsbuildinfo
