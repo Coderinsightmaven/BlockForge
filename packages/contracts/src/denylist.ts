@@ -14,7 +14,13 @@
  * sandbox is denied; tree operations (recursive delete, rename, copy, compress, extract) also refuse when
  * any entry below the source/destination is denied. The control plane's own check on the requested path
  * is only a fast first layer.
+ *
+ * Complexity: matching is memoised (O(pattern segments × path segments) per rule), and patterns with more
+ * than `MAX_PATTERN_SEGMENTS` segments or more than `MAX_DOUBLE_STARS` `**` segments are treated like
+ * malformed globs (they never match) — ignore files such as `.blockforgeignore` are workload-controlled.
  */
+export const MAX_PATTERN_SEGMENTS = 64;
+export const MAX_DOUBLE_STARS = 8;
 
 interface DenyRule {
   negate: boolean;
@@ -47,6 +53,7 @@ export function compileDenylist(patterns: readonly string[]): Denylist {
     p = cleanPath(p);
     if (p === "") continue;
     rule.segs = p.split("/");
+    if (rule.segs.length > MAX_PATTERN_SEGMENTS || rule.segs.filter((x) => x === "**").length > MAX_DOUBLE_STARS) continue;
     rules.push(rule);
   }
   return {
@@ -79,20 +86,25 @@ function ruleMatches(r: DenyRule, segs: string[]): boolean {
   return prefixMatch(r.segs, segs);
 }
 
-/** The pattern matches the path or any of its ancestors. */
+/**
+ * The pattern matches the path or any of its ancestors, i.e. some non-empty prefix `segs[0..k)`.
+ * Memoised over (pattern index, path index): O(pattern segments × path segments).
+ */
 function prefixMatch(pat: string[], segs: string[]): boolean {
-  for (let k = 1; k <= segs.length; k++) if (globSegs(pat, segs.slice(0, k))) return true;
-  return false;
-}
-
-function globSegs(pat: string[], segs: string[]): boolean {
-  if (pat.length === 0) return segs.length === 0;
-  if (pat[0] === "**") {
-    for (let i = 0; i <= segs.length; i++) if (globSegs(pat.slice(1), segs.slice(i))) return true;
-    return false;
-  }
-  if (segs.length === 0 || !globMatch(pat[0]!, segs[0]!)) return false;
-  return globSegs(pat.slice(1), segs.slice(1));
+  const width = segs.length + 1;
+  const memo = new Uint8Array((pat.length + 1) * width); // 0 = unknown, 1 = false, 2 = true
+  const go = (i: number, j: number): boolean => {
+    const key = i * width + j;
+    const known = memo[key]!;
+    if (known !== 0) return known === 2;
+    let result: boolean;
+    if (i === pat.length) result = j >= 1;
+    else if (pat[i] === "**") result = go(i + 1, j) || (j < segs.length && go(i, j + 1));
+    else result = j < segs.length && globMatch(pat[i]!, segs[j]!) && go(i + 1, j + 1);
+    memo[key] = result ? 2 : 1;
+    return result;
+  };
+  return go(0, 0);
 }
 
 // ---------------------------------------------------------------------------

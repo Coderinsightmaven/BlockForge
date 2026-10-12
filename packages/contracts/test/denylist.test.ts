@@ -26,3 +26,14 @@ describe("SFTP username", () => {
     expect(SFTP_USERNAME_PATTERN.test("ow.e2f2e77b")).toBe(false);
   });
 });
+
+describe("denylist complexity", () => {
+  it("pathological ** patterns on deep paths finish quickly", () => {
+    const deep = Array.from({ length: 400 }, (_, i) => `d${i}`).join("/") + "/zzz";
+    const list = compileDenylist(["**/**/**/**/**/**/**/**/x*y*z*q", "a/**/b/**/c/**/d/**/e"]);
+    const t0 = performance.now();
+    for (let i = 0; i < 50; i++) list.denied(deep);
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(list.denied(deep)).toBe(false);
+  });
+});

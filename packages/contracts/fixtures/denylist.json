@@ -2,7 +2,16 @@
   "_comment": "Shared fileDenylist fixtures: packages/contracts/src/denylist.ts and services/node-agent/internal/sftpd/denylist.go must both pass every set.",
   "sets": [
     {
-      "patterns": ["# comment", "", "*.secret", "/config/private/", "plugins/**/token.yml", "logs", "!logs/keep.log", "\\windows\\style"],
+      "patterns": [
+        "# comment",
+        "",
+        "*.secret",
+        "/config/private/",
+        "plugins/**/token.yml",
+        "logs",
+        "!logs/keep.log",
+        "\\windows\\style"
+      ],
       "cases": {
         "forwarding.secret": true,
         "a/b/c.secret": true,
@@ -28,7 +37,13 @@
       }
     },
     {
-      "patterns": ["server-?.jar", "[a-c]*.key", "[^x]y.dat", "/root\\*star", "/../escape/../kept"],
+      "patterns": [
+        "server-?.jar",
+        "[a-c]*.key",
+        "[^x]y.dat",
+        "/root\\*star",
+        "/../escape/../kept"
+      ],
       "cases": {
         "server-1.jar": true,
         "server-12.jar": false,
@@ -45,19 +60,58 @@
       }
     },
     {
-      "patterns": ["[invalid", "bad\\", "[]x]", "[a-]", "**"],
+      "patterns": [
+        "[invalid",
+        "bad\\",
+        "[]x]",
+        "[a-]",
+        "**"
+      ],
       "cases": {
         "[invalid": true,
         "anything/at/all": true
       }
     },
     {
-      "patterns": ["[invalid", "bad\\", "[]x]", "[a-]"],
+      "patterns": [
+        "[invalid",
+        "bad\\",
+        "[]x]",
+        "[a-]"
+      ],
       "cases": {
         "[invalid": false,
         "bad\\": false,
         "x": false,
         "a": false
+      }
+    },
+    {
+      "patterns": [
+        "**/**/**/**/**/**/**/**/a"
+      ],
+      "cases": {
+        "a": true,
+        "x/y/a": true,
+        "x/y/b": false,
+        "a/below": true
+      }
+    },
+    {
+      "patterns": [
+        "**/**/**/**/**/**/**/**/**/a"
+      ],
+      "cases": {
+        "a": false,
+        "x/a": false
+      }
+    },
+    {
+      "patterns": [
+        "/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d"
+      ],
+      "cases": {
+        "d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d/d": false
       }
     }
   ]
