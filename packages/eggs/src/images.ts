@@ -77,6 +77,10 @@ export const DEFAULT_AGENT_IMAGE_ALLOWLIST: readonly string[] = [
   "ghcr.io/pterodactyl/installers:*",
   "ghcr.io/parkervcp/yolks:*",
   "ghcr.io/parkervcp/installers:*",
+  "ghcr.io/parkervcp/steamcmd:*",
+  "ghcr.io/pelican-eggs/yolks:*",
+  "ghcr.io/pelican-eggs/installers:*",
+  "ghcr.io/pelican-eggs/steamcmd:*",
 ];
 
 /** Whether `image` is allowed by `allowlist` (agent semantics). Invalid references are never allowed. */
