@@ -15,6 +15,8 @@ export interface BrowserTransfer {
   maxBytes: number;
   /** Set for backup downloads (`backup.transfer.push` instead of a file). */
   backupId?: string;
+  /** Set for extension uploads (staged in `.blockforge/extensions/uploads/`, `servers.extensions.manage`). */
+  extensionUploadId?: string;
   expiresAt: number;
 }
 

@@ -34,14 +34,24 @@ export const conflict = (message: string, details?: unknown) => new AppError(409
 export const preconditionFailed = (message: string, details?: unknown) =>
   new AppError(412, "PRECONDITION_FAILED", message, details);
 export const invalidState = (message: string, details?: unknown) => new AppError(409, "INVALID_STATE", message, details);
-export const rateLimited = (retryAfterSeconds: number) =>
-  new AppError(
+/**
+ * 429 with contracts `RateLimitedErrorDetails` (`{retryAfterMs, retryAfterSeconds, upstream?}`) and a
+ * `Retry-After` header. `upstream` names a throttling third party (Modrinth, Mojang).
+ */
+export const rateLimited = (retryAfterSeconds: number, opts: { upstream?: "modrinth" | "mojang"; message?: string } = {}) => {
+  // Whole seconds (as `Retry-After`): sub-second precision would make otherwise identical refusals
+  // distinguishable (login lockout of a real vs an unknown account).
+  const seconds = Math.max(1, Math.ceil(retryAfterSeconds));
+  return new AppError(
     429,
     "RATE_LIMITED",
-    "Too many requests, try again later",
-    { retryAfterSeconds: Math.max(1, Math.ceil(retryAfterSeconds)) },
-    { "retry-after": String(Math.max(1, Math.ceil(retryAfterSeconds))) },
+    opts.message ?? "Too many requests, try again later",
+    { retryAfterMs: seconds * 1000, retryAfterSeconds: seconds, ...(opts.upstream ? { upstream: opts.upstream } : {}) },
+    { "retry-after": String(seconds) },
   );
+};
+/** 422 `PRECONDITION_FAILED` (api.md: unsupported software, upload policy refusals). */
+export const unprocessable = (message: string, details?: unknown) => new AppError(422, "PRECONDITION_FAILED", message, details);
 export const nodeUnavailable = (message = "Node is not connected") => new AppError(503, "NODE_UNAVAILABLE", message);
 export const upstreamError = (message: string, details?: unknown) => new AppError(502, "UPSTREAM_ERROR", message, details);
 

@@ -35,6 +35,11 @@ import type { SettingsService } from "./settings/service.js";
 import type { SshKeysService } from "./account/ssh-keys.js";
 import type { ApiKeysService } from "./apikeys/service.js";
 import type { BackupJobDeps } from "./backups/jobs.js";
+import type { ExtensionsService } from "./extensions/service.js";
+import type { Upstreams } from "./extensions/upstream.js";
+import type { PlayersService } from "./players/service.js";
+import type { PlayerSessionTracker } from "./players/sessions.js";
+import type { ServerEventPublisher } from "./realtime/server-events.js";
 import type { BackupsService } from "./backups/service.js";
 import type { BackupStorage } from "./backups/storage.js";
 import type { Scheduler } from "./schedules/scheduler.js";
@@ -108,5 +113,10 @@ export interface AppContext {
   schedules: SchedulesService;
   scheduler: Scheduler;
   consoleBackfill: ConsoleBackfill;
+  upstreams: Upstreams;
+  serverEvents: ServerEventPublisher;
+  extensions: ExtensionsService;
+  players: PlayersService;
+  playerSessions: PlayerSessionTracker;
   sftp: SftpService;
 }

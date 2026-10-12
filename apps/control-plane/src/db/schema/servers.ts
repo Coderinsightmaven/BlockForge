@@ -145,51 +145,6 @@ export const softwareBuilds = pgTable(
   ],
 );
 
-export const installedExtensions = pgTable(
-  "installed_extensions",
-  {
-    id: uuid("id").primaryKey(),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => servers.id, { onDelete: "cascade" }),
-    kind: text("kind").notNull(),
-    source: text("source").notNull(),
-    projectId: text("project_id"),
-    versionId: text("version_id"),
-    name: text("name").notNull(),
-    filename: text("filename").notNull(),
-    sha256: text("sha256").notNull(),
-    enabled: boolean("enabled").notNull().default(true),
-    installedAt: tsz("installed_at").notNull().defaultNow(),
-    installedBy: uuid("installed_by").references(() => users.id, { onDelete: "set null" }),
-  },
-  (t) => [
-    enumCheck("installed_extensions_kind_check", t.kind, ["plugin", "mod", "datapack"]),
-    enumCheck("installed_extensions_source_check", t.source, ["modrinth", "upload", "url"]),
-    index("installed_extensions_server_idx").on(t.serverId),
-  ],
-);
-
-export const extensionHistory = pgTable(
-  "extension_history",
-  {
-    id: uuid("id").primaryKey(),
-    serverId: uuid("server_id")
-      .notNull()
-      .references(() => servers.id, { onDelete: "cascade" }),
-    action: text("action").notNull(),
-    fromVersion: text("from_version"),
-    toVersion: text("to_version"),
-    actor: uuid("actor").references(() => users.id, { onDelete: "set null" }),
-    at: tsz("at").notNull().defaultNow(),
-    jobId: uuid("job_id").references(() => jobs.id, { onDelete: "set null" }),
-  },
-  (t) => [
-    enumCheck("extension_history_action_check", t.action, ["install", "update", "remove", "rollback", "enable", "disable"]),
-    index("extension_history_server_idx").on(t.serverId),
-  ],
-);
-
 export const worlds = pgTable(
   "worlds",
   {

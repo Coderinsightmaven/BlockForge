@@ -86,12 +86,17 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
     const { token } = parse(TokenParams, req.params, "Path");
     const t = ctx.browserTransfers.consume(token, requesterBinding(req), "upload");
     if (!t) throw notFound("Transfer");
-    // Current access (revoked grants, suspension) decides, not the state when the URL was issued.
-    const a = await access.require(req, t.serverId, "servers.files.write");
     const body = req.body as Readable | undefined;
     if (!body || typeof body.pipe !== "function") {
       throw new AppError(415, "VALIDATION_FAILED", "Uploads must be sent as application/octet-stream", validationDetails("content-type must be application/octet-stream"));
     }
+    if (t.extensionUploadId) {
+      // Extension uploads land in the staging area (not a file-manager path): extension permission.
+      const ea = await access.require(req, t.serverId, "servers.extensions.manage");
+      return ctx.extensions.receiveUpload(ea, t, body, actorOf(req));
+    }
+    // Current access (revoked grants, suspension) decides, not the state when the URL was issued.
+    const a = await access.require(req, t.serverId, "servers.files.write");
     return f.receiveUpload(a, t, body, actorOf(req));
   });
 

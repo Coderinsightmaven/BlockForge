@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { CommandBody, FileEntry, NodeMetricSample, WorkloadMetricSample, WorkloadSpec, WorkloadStatus } from "@blockforge/contracts";
 import { compileDenylist, type AgentCommandType } from "@blockforge/contracts";
 import { loadFixture, type FakeAgent } from "./fake-agent.js";
+import { readCentralDirectory, readEntry, ZipFormatError, ZipLimitError } from "./zip.js";
 
 type Entry = { type: "file" | "dir" | "symlink"; data: Buffer; mode: number; mtime: number; target?: string };
 
@@ -47,6 +48,12 @@ export interface SimOptions {
   saveOnConfirm?: boolean;
   /** The workload exits (crash) while it is being archived (no event: only `workload.status` shows it). */
   exitDuringBackup?: boolean;
+  /** Effective budgets (like the agent's 16 MiB frame guard): `BUDGET_EXCEEDED` past these totals. */
+  budgets?: { hashBytes?: number; jarBytes?: number };
+  /** Paths `fs.hash` / `jar.readEntries` answer with `IO_ERROR` (the file changed while being read). */
+  ioErrorPaths?: string[];
+  /** Raw console lines the server prints in answer to an exact command line (`list uuids`, `op Steve`, …). */
+  consoleReplies?: Record<string, string[]>;
   /** Offset of the agent's clock in console line timestamps (clock skew between node and control plane). */
   clockSkewMs?: number;
   /** What `workload.logs.tail` returns (the agent's ring buffer / Docker logs). */
@@ -132,6 +139,11 @@ export class SimNode {
   readonly archives = new Map<string, Record<string, string>>();
   /** Local backup archives (`<workloadId>:<backupId>`). */
   readonly backupArchives = new Map<string, SimArchive>();
+  /**
+   * Bytes served for `artifact.fetch` URLs (the node's download). A registered URL is verified against
+   * the command's checksum (`CHECKSUM_MISMATCH`); unregistered URLs get placeholder bytes, unverified.
+   */
+  readonly artifacts = new Map<string, Buffer>();
 
   constructor(
     readonly agent: FakeAgent,
@@ -180,9 +192,98 @@ export class SimNode {
     on("artifact.fetch", (p) => {
       const id = String(p.workloadId);
       this.fetched.push({ workloadId: id, url: String(p.url), destPath: String(p.destPath) });
-      const data = Buffer.from(`artifact:${String(p.url)}`);
+      const registered = this.artifacts.get(String(p.url));
+      const data = registered ?? Buffer.from(`artifact:${String(p.url)}`);
+      const checksum = p.checksum as { algorithm: "sha1" | "sha256" | "sha512"; value: string } | null;
+      if (registered && checksum && createHash(checksum.algorithm).update(data).digest("hex") !== checksum.value.toLowerCase()) {
+        throw new SimError("CHECKSUM_MISMATCH", `${checksum.algorithm} mismatch`);
+      }
+      if (registered && data.length > Number(p.maxBytes)) throw new SimError("TOO_LARGE", "artifact larger than maxBytes");
       this.put(id, String(p.destPath), data);
       return { bytes: data.length, sha256: sha(data), cached: false };
+    });
+
+    // --- extension scans (agent-protocol.md "Extension scans"): per-file results, never a failed command
+    on("fs.hash", (p) => {
+      const id = String(p.workloadId);
+      const algorithms = p.algorithms as ("sha1" | "sha256" | "sha512")[];
+      const maxPerFile = Number(p.maxBytesPerFile);
+      const maxTotal = Math.min(Number(p.maxTotalBytes ?? 16 * 1024 ** 3), this.options.budgets?.hashBytes ?? Infinity);
+      let total = 0;
+      let exhausted = false;
+      let attempted = 0;
+      return {
+        files: (p.paths as string[]).map((path) => {
+          if (exhausted) return { ok: false, path, error: "BUDGET_EXCEEDED" };
+          const opened = this.openRegular(p, id, path);
+          if ("error" in opened) return { ok: false, path, error: opened.error };
+          const e = opened.entry;
+          if (e.data.length > maxPerFile) return { ok: false, path, error: "TOO_LARGE" };
+          if (attempted > 0 && total + e.data.length > maxTotal) {
+            exhausted = true;
+            return { ok: false, path, error: "BUDGET_EXCEEDED" };
+          }
+          attempted++;
+          total += e.data.length;
+          const digests = Object.fromEntries(algorithms.map((a) => [a, createHash(a).update(e.data).digest("hex")]));
+          return { ok: true, path, sizeBytes: e.data.length, mtime: e.mtime, ...digests };
+        }),
+      };
+    });
+
+    on("jar.readEntries", (p) => {
+      const id = String(p.workloadId);
+      const names = p.entries as string[];
+      const maxEntry = Number(p.maxEntryBytes);
+      const maxJar = Number(p.maxJarBytes);
+      const maxTotal = Math.min(Number(p.maxTotalBytes ?? 4 * 1024 * 1024), this.options.budgets?.jarBytes ?? Infinity);
+      const hash = (p.hash as ("sha1" | "sha512")[] | undefined) ?? [];
+      let total = 0;
+      let exhausted = false;
+      return {
+        jars: (p.paths as string[]).map((path, index) => {
+          if (exhausted) return { ok: false, path, error: "BUDGET_EXCEEDED" };
+          const opened = this.openRegular(p, id, path);
+          if ("error" in opened) return { ok: false, path, error: opened.error };
+          const e = opened.entry;
+          if (e.data.length > maxJar) return { ok: false, path, error: "TOO_LARGE" };
+          let central;
+          try {
+            central = readCentralDirectory(e.data, { maxRecords: 65_536, maxBytes: 16 * 1024 * 1024 });
+          } catch (err) {
+            return { ok: false, path, error: err instanceof ZipLimitError ? "TOO_LARGE" : "NOT_A_ZIP" };
+          }
+          const entries: { name: string; content: string; size: number; truncated: boolean }[] = [];
+          const missing: string[] = [];
+          let size = 0;
+          for (const name of names) {
+            const found = central.filter((c) => c.name === name);
+            if (found.length > 1) return { ok: false, path, error: "AMBIGUOUS_ENTRY" };
+            if (found.length === 0) {
+              missing.push(name);
+              continue;
+            }
+            let read;
+            try {
+              read = readEntry(e.data, found[0]!, maxEntry);
+            } catch (err) {
+              if (err instanceof ZipFormatError) return { ok: false, path, error: "NOT_A_ZIP" };
+              throw err;
+            }
+            const text = jsonCapped(sanitizeEntryText(read.data.toString("utf8")), maxEntry);
+            entries.push({ name, content: text.content, size: found[0]!.size, truncated: read.truncated || text.cut });
+            size += text.jsonBytes;
+          }
+          // The first jar of a command is always returned (a retry always makes progress).
+          if (index > 0 && total + size > maxTotal) {
+            exhausted = true;
+            return { ok: false, path, error: "BUDGET_EXCEEDED" };
+          }
+          total += size;
+          const digests = Object.fromEntries(hash.map((a) => [a, createHash(a).update(e.data).digest("hex")]));
+          return { ok: true, path, sizeBytes: e.data.length, mtime: e.mtime, ...digests, entries, missing };
+        }),
+      };
     });
 
     on("workload.start", (p) => {
@@ -239,6 +340,8 @@ export class SimNode {
       // Minecraft responses (vanilla/Paper wording) for the backup save cycle.
       const out = (msg: string) =>
         this.agent.trySend({ t: "logs", workloadId: id, lines: [{ ts: Date.now() + (this.options.clockSkewMs ?? 0), stream: "stdout", line: `[12:00:00 INFO]: ${msg}` }] });
+      const replies = this.options.consoleReplies?.[line];
+      if (replies?.length) setTimeout(() => this.agent.trySend({ t: "logs", workloadId: id, lines: replies.map((l) => ({ ts: Date.now(), stream: "stdout", line: l })) }), 5);
       if (line === "save-off" && this.options.saveOffConfirm !== false) setTimeout(() => out("Automatic saving is now disabled"), 5);
       if (line === "save-on" && this.options.saveOnConfirm !== false) setTimeout(() => out("Automatic saving is now enabled"), 5);
       if (line === "save-all flush") {
@@ -507,6 +610,28 @@ export class SimNode {
   }
 
   /** Enforces a received `denylist` (contracts semantics) on every given path. */
+  /** A regular file opened without following a final symlink (fs.hash / jar.readEntries semantics). */
+  private openRegular(p: Record<string, unknown>, id: string, path: string): { entry: Entry } | { error: "NOT_FOUND" | "NOT_REGULAR" | "PATH_FORBIDDEN" | "IO_ERROR" } {
+    if (this.options.ioErrorPaths?.includes(path)) return { error: "IO_ERROR" };
+    // The agent opens every component without following symlinks: a symlinked parent is not a regular path.
+    const parts = norm(path).split("/").filter(Boolean);
+    for (let i = 1; i < parts.length; i++) {
+      if (this.files(id).get(parts.slice(0, i).join("/"))?.type === "symlink") return { error: "NOT_REGULAR" };
+    }
+    let resolved: string;
+    try {
+      resolved = this.resolve(id, path, false);
+      this.deny(p, [norm(path), resolved]);
+    } catch (err) {
+      if (err instanceof SimError && err.code === "PATH_FORBIDDEN") return { error: "PATH_FORBIDDEN" };
+      throw err;
+    }
+    const e = this.files(id).get(resolved);
+    if (!e) return { error: "NOT_FOUND" };
+    if (e.type !== "file") return { error: "NOT_REGULAR" };
+    return { entry: e };
+  }
+
   private deny(p: Record<string, unknown>, paths: readonly string[]): void {
     const list = p.denylist as string[] | undefined;
     if (!list?.length) return;
@@ -618,4 +743,28 @@ export class SimNode {
   emitState(workloadId: string): void {
     this.agent.trySend({ t: "event", ts: Date.now(), event: "workload.state", data: this.status(workloadId) });
   }
+}
+
+/** `jar.readEntries` content rules: control characters other than TAB/LF/CR become U+FFFD (invalid UTF-8 already does). */
+function sanitizeEntryText(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "\ufffd");
+}
+
+/** Cuts at a code point so the JSON string literal as sent (UTF-8 bytes, quotes included, no HTML escaping) is ≤ `max`. */
+function jsonCapped(s: string, max: number): { content: string; cut: boolean; jsonBytes: number } {
+  const bytes = (x: string) => Buffer.byteLength(JSON.stringify(x), "utf8");
+  let n = bytes(s);
+  if (n <= max) return { content: s, cut: false, jsonBytes: n };
+  const cps = [...s];
+  let lo = 0;
+  let hi = cps.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (bytes(cps.slice(0, mid).join("")) <= max) lo = mid;
+    else hi = mid - 1;
+  }
+  const content = cps.slice(0, lo).join("");
+  n = bytes(content);
+  return { content, cut: true, jsonBytes: n };
 }

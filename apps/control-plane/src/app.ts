@@ -78,6 +78,16 @@ import { registerBackupRoutes } from "./backups/routes.js";
 import { BackupsService } from "./backups/service.js";
 import { BackupStorage } from "./backups/storage.js";
 import { registerScheduleRoutes } from "./schedules/routes.js";
+import { registerExtensionRoutes } from "./extensions/routes.js";
+import { extensionJobDefinitions } from "./extensions/jobs.js";
+import { ExtensionsService } from "./extensions/service.js";
+import type { ExtensionDeps } from "./extensions/model.js";
+import { Upstreams } from "./extensions/upstream.js";
+import { registerPlayerRoutes } from "./players/routes.js";
+import { PlayersService } from "./players/service.js";
+import { PlayerSessionTracker } from "./players/sessions.js";
+import { ServerEventPublisher } from "./realtime/server-events.js";
+import { APP_VERSION } from "./lib/version.js";
 import { Scheduler } from "./schedules/scheduler.js";
 import { SchedulesService } from "./schedules/service.js";
 import { registerAllocationRoutes } from "./allocations/routes.js";
@@ -126,6 +136,10 @@ export interface BuildAppOptions {
   scheduler?: { sleep?: (ms: number, signal: AbortSignal) => Promise<void> };
   /** Server job timing (tests shorten the readiness wait). */
   serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number; saveTimeoutMs?: number; saveToggleTimeoutMs?: number };
+  /** Modrinth / Mojang test seams (recorded fixtures, rate-limiter clock). */
+  upstream?: { fetchImpl?: typeof fetch; lookup?: LookupFn; limiter?: { now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number } };
+  /** Player action timing (tests shorten the feedback wait). */
+  players?: { feedbackTimeoutMs?: number };
 }
 
 export interface BuiltApp {
@@ -313,6 +327,17 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     schedules: () => schedulesService!,
     ...(opts.scheduler?.sleep ? { sleep: opts.scheduler.sleep } : {}),
   });
+  const upstreams = new Upstreams({ logger: logger.child({ module: "upstream" }), version: APP_VERSION, contact: config.modrinthContact, ...(opts.upstream ?? {}) });
+  const serverEvents = new ServerEventPublisher(hub, serverAccess, logger.child({ module: "server-events" }));
+  const extensionDeps: ExtensionDeps = {
+    db, clock, logger: logger.child({ module: "extensions" }), gateway, audit, upstreams, settings, events: serverEvents, jobs, access: serverAccess, browser: browserTransfers, transfers,
+  };
+  for (const def of extensionJobDefinitions(extensionDeps)) jobs.define(def as JobDefinition<unknown>);
+  const extensions = new ExtensionsService(extensionDeps);
+  const playerSessions = new PlayerSessionTracker({ db, clock, logger: logger.child({ module: "player-sessions" }), events: serverEvents });
+  const players = new PlayersService({
+    db, clock, logger: logger.child({ module: "players" }), gateway, consoles, latest, upstreams, audit, sessions: playerSessions, ...(opts.players ?? {}),
+  });
   schedulesService = new SchedulesService({ db, clock, logger: logger.child({ module: "schedules" }), audit, hub, access: serverAccess, execute: (id) => scheduler.execute(id), lease: () => scheduler.lease() });
   for (const def of files.jobDefinitions()) jobs.define(def as JobDefinition<unknown>);
 
@@ -321,6 +346,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     signer, authenticator, rotations, tracker, gateway, enrollment, ownership, consoles, transfers, nodes, latest, vmWriter,
     vmClient, metricsQuery, overview, overviewPublisher, alerts, alertEvaluator, notifications,
     templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, apiKeys, sftp, backups: backupsService, backupStorage, backupJobs: backupDeps, schedules: schedulesService, scheduler, consoleBackfill,
+    upstreams, serverEvents, extensions, players, playerSessions,
   };
 
   // --- Seed & wiring -------------------------------------------------------------------
@@ -345,6 +371,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     setTimeout(() => void retryPendingSaveOn(backupDeps, nodeId).catch((err: unknown) => logger.warn({ err, nodeId }, "save-on retry failed")), 500).unref();
   });
   reconciler.attach(gateway, tracker);
+  playerSessions.attach(gateway, bus);
   serverState.onChange((serverId) => {
     void servers.publishUpdated(serverId);
     overviewPublisher.markDirty();
@@ -407,6 +434,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
       registerFileRoutes(api, ctx);
       registerBackupRoutes(api, ctx);
       registerScheduleRoutes(api, ctx);
+      registerExtensionRoutes(api, ctx);
+      registerPlayerRoutes(api, ctx);
       registerAccountRoutes(api, ctx);
       registerRealtimeRoutes(api, ctx);
     },
@@ -446,6 +475,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
         await abortStaleUploads(backupDeps);
         await retryPendingSaveOn(backupDeps);
         await apiKeys.pruneUsage();
+        await extensions.prune();
+        await playerSessions.prune();
       },
       logger,
     ),

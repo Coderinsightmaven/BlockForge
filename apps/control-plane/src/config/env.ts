@@ -68,6 +68,8 @@ const EnvSchema = z
     METRICS_FLUSH_INTERVAL_MS: intFrom(50, 60_000).default(1000),
     /** Requests per minute and personal API key. */
     API_KEY_RATE_LIMIT_PER_MIN: intFrom(1, 100_000).default(120),
+    /** Contact in the Modrinth User-Agent (`BlockForge/<version> (<contact>)`); default: PUBLIC_URL. Printable ASCII, no parentheses. */
+    MODRINTH_CONTACT: z.string().regex(/^[ -'*-~]{1,128}$/).optional(),
     /** Scheduler tick (due schedules are claimed with FOR UPDATE SKIP LOCKED). */
     SCHEDULER_INTERVAL_MS: intFrom(100, 300_000).default(15_000),
   })
@@ -120,6 +122,7 @@ export interface AppConfig {
   alertEvalIntervalMs: number;
   metricsFlushIntervalMs: number;
   apiKeyRateLimitPerMin: number;
+  modrinthContact: string;
   schedulerIntervalMs: number;
 }
 
@@ -176,6 +179,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, cwd = proces
     alertEvalIntervalMs: e.ALERT_EVAL_INTERVAL_MS,
     metricsFlushIntervalMs: e.METRICS_FLUSH_INTERVAL_MS,
     apiKeyRateLimitPerMin: e.API_KEY_RATE_LIMIT_PER_MIN,
+    modrinthContact: e.MODRINTH_CONTACT ?? publicUrl,
     schedulerIntervalMs: e.SCHEDULER_INTERVAL_MS,
   };
 }

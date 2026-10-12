@@ -197,9 +197,12 @@ export class FakeAgent {
     this.ws.send(text);
   }
 
+  /** Capabilities sent in `hello` (the real agent's list; tests override it to simulate an older agent). */
+  capabilities: string[] = ["docker", "fs.sandbox", "artifact.fetch", "logs", "console", "backup", "fs.hash", "jar.readEntries"];
+
   async hello(workloads: WorkloadStatus[] = [], facts: NodeFacts = FIXTURE_FACTS, ts = Date.now()): Promise<Record<string, unknown>> {
     const welcome = this.waitFor((f) => f.t === "welcome");
-    this.send({ t: "hello", agentVersion: "0.1.0-test", protocolVersion: 1, ts, facts, capabilities: ["docker"], workloads });
+    this.send({ t: "hello", agentVersion: "0.1.0-test", protocolVersion: 1, ts, facts, capabilities: this.capabilities, workloads });
     return welcome;
   }
 

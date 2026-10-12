@@ -1,4 +1,4 @@
-import { BackupStorageSettings } from "@blockforge/contracts";
+import { BackupStorageSettings, ExtensionUploadSettings } from "@blockforge/contracts";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
@@ -14,6 +14,8 @@ export const SETTINGS = {
     // `secretId`: the current secret version (backups.storage.ts); the secret itself never is in settings.
     BackupStorageSettings.options[1].omit({ secretAccessKey: true }).extend({ secretId: z.uuid().optional() }),
   ]),
+  /** Policy of `POST /servers/:id/extensions/uploads` (api.md "Plugins & mods"). */
+  "extensions.uploads": ExtensionUploadSettings,
 } as const;
 
 /** Keys with dedicated routes (not writable through the generic `/settings/:key`). */
@@ -24,6 +26,7 @@ export type SettingValue<K extends SettingKey> = z.infer<(typeof SETTINGS)[K]>;
 const DEFAULTS: { [K in SettingKey]: SettingValue<K> } = {
   "notifications.webhookAllowlist": [],
   "backups.storage": { type: "local" },
+  "extensions.uploads": { allowed: true, requireMetadata: true },
 };
 
 export class SettingsService {
