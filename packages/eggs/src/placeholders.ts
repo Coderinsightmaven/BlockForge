@@ -76,21 +76,103 @@ export function resolvePlaceholderKey(key: string, ctx: PlaceholderContext): str
   return null;
 }
 
-/** Replaces known placeholders; returns the result and the unresolved keys. */
-export function resolvePlaceholders(text: string, ctx: PlaceholderContext): { value: string; unresolved: string[] } {
+/**
+ * Replaces known placeholders; returns the result and the unresolved keys. `escape` transforms
+ * each substituted VALUE (never the egg-authored text around it), e.g. `$` → `$$` when the result
+ * is used as a regex replacement template.
+ */
+export function resolvePlaceholders(
+  text: string,
+  ctx: PlaceholderContext,
+  escape: (value: string) => string = (v) => v,
+): { value: string; unresolved: string[] } {
   const unresolved: string[] = [];
-  const value = text.replace(PLACEHOLDER_PATTERN, (whole, key: string) => {
+  // A replacer function: `$` sequences in values are never interpreted by String.replace.
+  const value = text.replace(PLACEHOLDER_PATTERN, (whole: string, key: string) => {
     const v = resolvePlaceholderKey(key, ctx);
     if (v === null) {
       unresolved.push(key);
       return whole;
     }
-    return v;
+    return escape(v);
   });
   return { value, unresolved };
+}
+
+/** Escapes `$` for Go/RE2 replacement templates. */
+export function escapeReplacementTemplate(value: string): string {
+  return value.replace(/\$/g, "$$$$");
 }
 
 /** All placeholder keys in a string, in order of appearance. */
 export function placeholderKeys(text: string): string[] {
   return [...text.matchAll(PLACEHOLDER_PATTERN)].map((m) => m[1]!);
+}
+
+/** C0 control characters (except TAB) and DEL — never allowed in line-oriented config values. */
+export function hasLineBreakingControl(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f) return true;
+  }
+  return false;
+}
+
+export interface QuotedResolution {
+  value: string;
+  unresolved: string[];
+  /** Placeholders whose value cannot be inserted safely at their position (with the reason). */
+  unsafe: string[];
+}
+
+/**
+ * Resolves placeholders in a line-oriented template (the `file` parser), escaping each value for
+ * its position in the egg-authored text: inside "…" `\\` and `"` are backslash-escaped, inside '…'
+ * `\\` and `'` are; outside quotes values containing `"`, `'`, `;` or `\\` are refused (they
+ * could start a new token or command). Values with control characters are always refused.
+ */
+export function resolvePlaceholdersQuoted(text: string, ctx: PlaceholderContext): QuotedResolution {
+  const unresolved: string[] = [];
+  const unsafe: string[] = [];
+  let out = "";
+  let quote: '"' | "'" | null = null;
+  let i = 0;
+  const re = new RegExp(PLACEHOLDER_PATTERN.source, "g");
+  let m: RegExpExecArray | null;
+  const advance = (to: number) => {
+    for (; i < to; i++) {
+      const c = text[i]!;
+      out += c;
+      if (c === "\\" && quote !== "'") {
+        if (i + 1 < to) out += text[++i]!;
+        continue;
+      }
+      if (quote === null && (c === '"' || c === "'")) quote = c;
+      else if (quote !== null && c === quote) quote = null;
+    }
+  };
+  while ((m = re.exec(text)) !== null) {
+    advance(m.index);
+    const key = m[1]!;
+    const v = resolvePlaceholderKey(key, ctx);
+    i = m.index + m[0].length;
+    if (v === null) {
+      unresolved.push(key);
+      out += m[0];
+      continue;
+    }
+    if (hasLineBreakingControl(v)) {
+      unsafe.push(`{{${key}}} contains line breaks or control characters`);
+      out += m[0];
+      continue;
+    }
+    if (quote === '"') out += v.replace(/[\\"]/g, (c) => `\\${c}`);
+    else if (quote === "'") out += v.replace(/[\\']/g, (c) => `\\${c}`);
+    else if (/["';\\]/.test(v)) {
+      unsafe.push(`{{${key}}} is used outside quotes and its value contains quotes, ";" or "\\"`);
+      out += m[0];
+    } else out += v;
+  }
+  advance(text.length);
+  return { value: out, unresolved, unsafe };
 }

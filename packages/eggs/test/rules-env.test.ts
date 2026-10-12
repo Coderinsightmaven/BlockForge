@@ -18,17 +18,26 @@ const v = (rules: string) => ({ name: "Field", envName: "FIELD", rules });
 const ok = (rules: string, value: string) => validateVariableValue(v(rules), value);
 
 describe("variable rules (Laravel semantics)", () => {
-  it("required / nullable / empty values", () => {
+  it("required / nullable / empty values (review #5)", () => {
     expect(ok("required|string", "")).toBe("Field is required.");
     expect(ok("required|string", "   ")).toBe("Field is required.");
     expect(ok("nullable|integer", "")).toBeNull();
-    expect(ok("integer|max:5", "")).toBeNull(); // non-implicit rules are skipped for empty strings
+    // without nullable, "" is validated by the other rules
+    expect(ok("integer|max:5", "")).toMatch(/integer/);
+    expect(ok("string|max:5", "")).toBeNull();
+    expect(ok("in:a,b", "")).toMatch(/one of/);
+    // whitespace is not "empty": it is validated like any value
+    expect(ok("nullable|integer", "  ")).toMatch(/integer/);
+    expect(ok("nullable|alpha_num", " ")).toMatch(/letters and numbers/);
   });
 
   it("integer / numeric / boolean", () => {
     expect(ok("integer", "42")).toBeNull();
     expect(ok("integer", "-7")).toBeNull();
-    expect(ok("integer", "007")).toMatch(/integer/);
+    expect(ok("integer", "007")).toBeNull(); // review #5: leading zeros accepted
+    expect(ok("integer", " 5")).toMatch(/integer/); // surrounding whitespace refused
+    expect(ok("integer", "5 ")).toMatch(/integer/);
+    expect(ok("numeric", " 5")).toMatch(/number/);
     expect(ok("integer", "4.2")).toMatch(/integer/);
     expect(ok("integer", "9223372036854775808")).toMatch(/integer/);
     expect(ok("numeric", "4.2e3")).toBeNull();
@@ -97,7 +106,10 @@ describe("variable rules (Laravel semantics)", () => {
     expect(unsupportedRules("required|string|uuid|json|required_with:X")).toEqual(["uuid", "json", "required_with"]);
     expect(unsupportedRules("nullable|string|max:20")).toEqual([]);
     expect(unsupportedRules("regex:/(?>atomic)/")).toEqual(["regex"]);
-    expect(() => pcreToRegExp("/a++/")).toThrow(/PCRE-only/);
+    expect(unsupportedRules("required|int|bool")).toEqual([]); // review #6 aliases
+    expect(() => pcreToRegExp("/a++/")).toThrow(/possessive/);
+    expect(() => pcreToRegExp("/(a)\\1/")).toThrow(/backreferences/);
+    expect(() => pcreToRegExp("/a(?=b)/")).toThrow(/lookarounds/);
     expect(pcreToRegExp("/\\Aabc\\z/").source).toBe("^abc$");
     expect(pcreToRegExp("/(?P<n>x)/").test("x")).toBe(true);
     expect(() => pcreToRegExp("noDelimiter")).toThrow();
@@ -140,7 +152,7 @@ describe("buildEggEnvironment", () => {
     const e = buildEggEnvironment({ template: t, values: { WORLD_SEED: "" }, memoryLimitBytes: 1024 ** 3, primary: { ip: "1.2.3.4", port: 1 }, serverId: "x", location: "eu", allocationLimit: 0, timezone: "UTC" });
     expect(e["WORLD_SEED"]).toBe("");
     expect(e["P_SERVER_LOCATION"]).toBe("eu");
-    expect(() => buildEggEnvironment({ template: t, values: { HOSTNAME: "a\0b" }, memoryLimitBytes: 1024 ** 3, primary: { ip: "1", port: 1 }, serverId: "x", location: null, allocationLimit: 0, timezone: "UTC" })).toThrow(/NUL/);
+    expect(() => buildEggEnvironment({ template: t, values: { HOSTNAME: "a\0b" }, memoryLimitBytes: 1024 ** 3, primary: { ip: "1", port: 1 }, serverId: "x", location: null, allocationLimit: 0, timezone: "UTC" })).toThrow(/control characters/);
   });
 
   it("resolves the startup command for display, hiding non-viewable values", () => {

@@ -272,6 +272,9 @@ importers:
       '@blockforge/minecraft':
         specifier: workspace:*
         version: link:../minecraft
+      re2js:
+        specifier: 2.8.6
+        version: 2.8.6
       smol-toml:
         specifier: ^1.9.1
         version: 1.9.1
@@ -3512,6 +3515,10 @@ packages:
         optional: true
       '@types/react-dom':
         optional: true
+
+  re2js@2.8.6:
+    resolution: {integrity: sha512-xLgQil4kIUCrAzVk9fRSkxkFNwmygLFjVxXrLc65aE1F0+Zsb8rxumFBy4XKyvgMCTL6kilDq3EZ0piE2dP/Dg==}
+    engines: {node: '>=18.0.0'}
 
   react-dom@19.3.0:
     resolution: {integrity: sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==}
@@ -7116,6 +7123,8 @@ snapshots:
     optionalDependencies:
       '@types/react': 19.3.0
       '@types/react-dom': 19.3.0(@types/react@19.3.0)
+
+  re2js@2.8.6: {}
 
   react-dom@19.3.0(react@19.3.0):
     dependencies:

@@ -1,8 +1,9 @@
 /**
  * Minimal source-preserving XML editor with Wings' semantics (wings/parser/parser.go
  * `parseXmlFile`, etree): `Root.Child.Leaf` addresses elements from the root element; `*` matches
- * any element name; without a wildcard missing elements are created; a value of the form
- * `[attr='value']` sets an attribute, any other value replaces the element's leading text.
+ * any element name; without a wildcard missing elements are created; an edit with `attribute`
+ * (the egg template's `[attr='value']` form) sets that attribute, otherwise the value replaces the
+ * element's leading text.
  * Unlike Wings (which re-indents the whole document) only the edited ranges change.
  * Comments, CDATA, processing instructions and DOCTYPE are skipped by the tokenizer; entity
  * declarations are not expanded.
@@ -173,12 +174,15 @@ function lineIndent(text: string, pos: number): string {
   return /^[ \t]*/.exec(text.slice(ls, pos))![0];
 }
 
-const ATTR_VALUE = /^\[([\w]+)='(.*)'\]$/;
-
 export interface XmlEdit {
   match: string;
   ifValue: string | null;
   value: string;
+  /**
+   * Attribute to write instead of the element text. Set from the egg template's `[attr='…']`
+   * form before placeholders are substituted — a user value is always written as text.
+   */
+  attribute?: string | null;
 }
 
 /** Leading text of an element (unescaped), or the attribute value for `[attr='…']` reads. */
@@ -238,19 +242,23 @@ export function editXml(input: string, edits: readonly XmlEdit[]): { text: strin
     const targets = findAll(root, parts);
     // apply from the end so earlier offsets stay valid
     for (const el of [...targets].sort((a, b) => b.start - a.start)) {
-      const attr = ATTR_VALUE.exec(e.value);
-      if (attr) {
-        const [, name, val] = attr;
+      if (e.attribute) {
+        const name = e.attribute;
+        const val = e.value;
+        if (!/^[A-Za-z_][\w.-]*$/.test(name)) {
+          warnings.push(`invalid attribute name "${name}"`);
+          break;
+        }
         const existing = el.attrs.find((a) => a.name === name);
         if (e.ifValue !== null && unescapeXml(existing ? text.slice(existing.valueStart, existing.valueEnd) : "") !== e.ifValue) continue;
         if (existing) {
-          const escaped = escapeXmlAttr(val!, existing.quote);
+          const escaped = escapeXmlAttr(val, existing.quote);
           if (text.slice(existing.valueStart, existing.valueEnd) === escaped) continue;
           text = text.slice(0, existing.valueStart) + escaped + text.slice(existing.valueEnd);
         } else {
           let at = el.openTagEnd;
           while (at > el.start && /\s/.test(text[at - 1]!)) at--;
-          text = `${text.slice(0, at)} ${name}="${escapeXmlAttr(val!, '"')}"${text.slice(at)}`;
+          text = `${text.slice(0, at)} ${name}="${escapeXmlAttr(val, '"')}"${text.slice(at)}`;
         }
         continue;
       }

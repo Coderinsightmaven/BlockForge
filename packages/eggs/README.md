@@ -12,12 +12,18 @@ network access. Also hosts the shared source-preserving YAML editor used by `@bl
 | `parseEgg(raw, { category, game?, imageAllowlist? }) → TemplateImportPreview` | PTDL_v1, PTDL_v2, PLCN_v1/v2/v3. Never throws; any error issue → `template: null`. Output validated with the contract schema. |
 | `exportEgg(template, { exportedAt? })` | PTDL_v2 object (Pterodactyl-importable: `config.*` JSON strings, `field_type`, no `sort`). |
 | `validateVariableValue(variable, value) → string \| null`, `unsupportedRules(rules)` | Laravel rule subset (`SUPPORTED_VARIABLE_RULES`). |
-| `buildEggEnvironment({ template, values, memoryLimitBytes, primary, serverId, location, allocationLimit, timezone })` | `STARTUP` (verbatim), `SERVER_MEMORY` (MiB), `SERVER_IP`, `SERVER_PORT`, `P_SERVER_UUID`, `P_SERVER_LOCATION`, `P_SERVER_ALLOCATION_LIMIT`, `TZ` + every variable (`value ?? default`). |
+| `buildEggEnvironment({ template, values, memoryLimitBytes, primary, serverId, location, allocationLimit, timezone }, { adminOverride? })` | `STARTUP` (verbatim), `SERVER_MEMORY` (MiB), `SERVER_IP`, `SERVER_PORT`, `P_SERVER_UUID`, `P_SERVER_LOCATION`, `P_SERVER_ALLOCATION_LIMIT`, `TZ` + every variable (`value ?? default`). Values of non-editable variables are ignored unless `adminOverride: true`; CR/LF/C0 (TAB allowed) in values, serverId, location, timezone or IP throw `EggEnvironmentError`. |
 | `resolveStartupForDisplay(template, values, isViewable)` | `{{VAR}}` → value or `[hidden]`. |
 | `applyConfigFileRule(rule, current \| null, ctx: PlaceholderContext) → { content, changed, warnings }` | Never throws for bad file content; `file` parser skips missing files. |
 | `createDoneMatcher(patterns)` | Substring / `regex:` matching after ANSI stripping (Wings semantics). |
 | `parseImageRef`, `imageAllowed`, `DEFAULT_AGENT_IMAGE_ALLOWLIST` | Port of the agent's image allowlist logic. |
 | `yamlSetMany`, `yamlGet`, `yamlMaskPaths` | Source-level YAML editing (in-place scalars, line insertion, BOM/CRLF preserved; `fallback: "fail" \| "reserialize"`). |
+
+## Security properties (Grok review 2026-10-12, `docs/reviews/2026-10-12-eggs.md`)
+
+* Prototype pollution: `__proto__`, `constructor`, `prototype` are never used as keys — rejected in paths, editors and at import (`CONFIG_KEY_FORBIDDEN`); writes use own properties only.
+* Linear time: all egg-authored regexes (done lines, `regex:` conditions, `regex:` rules) run on `re2js` (RE2); what RE2 cannot express is reported at import and fails closed; inputs are capped at 8 KiB; ANSI stripping is a single-pass scanner.
+* Injection: INI and `file` writers refuse line breaks/control characters; the `file` parser escapes values for their quote context in the egg template and refuses risky unquoted values; one replacement per line; XML attribute writes only from the egg template; `$` in values never expands in regex replacements.
 
 ## Semantics (sources, verified 2026-10-12)
 
@@ -25,7 +31,7 @@ network access. Also hosts the shared source-preserving YAML editor used by `@bl
 * **Stop**: Wings `power.go`: `^C`/`^SIGINT` → SIGINT, `^SIGTERM`, `^SIGKILL`, `^SIGQUIT`; unsupported signals → SIGTERM with a warning.
 * **Placeholders**: Pterodactyl `EggConfigurationService` + Wings `LookupConfigurationValue` + Pelican `UPGRADE_VARIABLES` spellings (`TEMPLATE_PLACEHOLDERS`, `TEMPLATE_PLACEHOLDER_PREFIXES`). Unknown placeholders stay as written (Pterodactyl blanks them) and are reported.
 * **Config writers**: Wings `parser/parser.go` + `helpers.go` (pterodactyl/wings `develop` @ `5d9e2c34`): dotted paths, `[n]` indices, `*` wildcards, `regex:` conditions (json/yaml), integer coercion (`strconv.Atoi`). Deviations: conditional (map) entries only apply when the current value matches (Wings also writes missing json/yaml paths); every writer preserves the file layout (Wings re-serialises yaml/json/ini/xml/properties); properties escape non-ASCII as `\uXXXX` like Wings.
-* **Rules**: Laravel validator semantics — empty values only fail `required`; `boolean` = `"0"`/`"1"`; size rules numeric with `integer`/`numeric`, else character length; PCRE → JS for the common subset (PCRE-only syntax is reported as unsupported).
+* **Rules**: Laravel validator semantics — `""` fails `required` and skips the other rules only with `nullable`; whitespace-only fails `required` and is otherwise validated; `int`/`bool` alias `integer`/`boolean`; `integer` allows leading zeros but no surrounding whitespace; `boolean` = `"0"`/`"1"`; size rules numeric with `integer`/`numeric`, else character length; parameters parsed as CSV (`in:"a,b",c`); `regex:` PCRE → RE2 (unsupported or unclosed patterns fail closed).
 
 ## Fixtures (`test/fixtures`, captured 2026-10-12)
 

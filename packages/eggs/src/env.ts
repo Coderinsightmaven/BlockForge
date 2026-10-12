@@ -7,10 +7,15 @@ import { defineOwn, hasOwn, isForbiddenKey } from "./safe.js";
  * `STARTUP` (verbatim — the yolk entrypoint turns `{{VAR}}` into `${VAR}` and evals it),
  * `SERVER_MEMORY` (MiB), `SERVER_IP`, `SERVER_PORT`, `P_SERVER_UUID`, `P_SERVER_LOCATION`,
  * `P_SERVER_ALLOCATION_LIMIT`, `TZ`.
+ *
+ * Values are untrusted: CR, LF and other control characters (TAB excepted) are refused in every
+ * variable value and in the server id, location, timezone and IP — they end up in config files and
+ * in a startup command the image's shell evaluates. Values for variables that are not
+ * user-editable are ignored (the default applies) unless `adminOverride` is set.
  */
 export interface EggEnvironmentInput {
   template: Pick<Template, "startup" | "variables">;
-  /** User-supplied values by env name. Unknown names are ignored. */
+  /** Values by env name. Unknown names are ignored; non-editable ones too unless `adminOverride`. */
   values: Readonly<Record<string, string>>;
   memoryLimitBytes: number;
   primary: { ip: string; port: number };
@@ -31,11 +36,35 @@ export function memoryMiB(memoryLimitBytes: number): number {
   return Math.floor(memoryLimitBytes / (1024 * 1024));
 }
 
-export function buildEggEnvironment(input: EggEnvironmentInput): Record<string, string> {
+export interface EggEnvironmentOptions {
+  /** Apply `values` for variables that are not user-editable (admin-only callers). */
+  adminOverride?: boolean;
+}
+
+/** C0 control characters except TAB, and DEL. */
+function hasControl(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f) return true;
+  }
+  return false;
+}
+
+export function buildEggEnvironment(input: EggEnvironmentInput, opts: EggEnvironmentOptions = {}): Record<string, string> {
   const env: Record<string, string> = {};
+  for (const [name, v] of [
+    ["serverId", input.serverId],
+    ["location", input.location ?? ""],
+    ["timezone", input.timezone],
+    ["primary.ip", input.primary.ip],
+  ] as const) {
+    if (hasControl(v)) throw new EggEnvironmentError(`${name} contains line breaks or control characters`);
+  }
   for (const v of input.template.variables) {
-    const value = hasOwn(input.values, v.envName) ? input.values[v.envName]! : v.defaultValue;
     if (isForbiddenKey(v.envName)) throw new EggEnvironmentError(`variable name ${v.envName} is not allowed`);
+    const supplied = hasOwn(input.values, v.envName) && (v.userEditable || opts.adminOverride === true);
+    const value = supplied ? input.values[v.envName]! : v.defaultValue;
+    if (typeof value !== "string" || hasControl(value)) throw new EggEnvironmentError(`value of ${v.envName} contains line breaks or control characters`);
     defineOwn(env, v.envName, value);
   }
   Object.assign(env, {

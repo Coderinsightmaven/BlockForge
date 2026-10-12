@@ -187,12 +187,15 @@ describe("xml (Trackmania egg)", () => {
   it("sets attributes with [attr='value'] and handles self-closing elements", () => {
     const x = '<cfg>\n  <port value="1"/>\n  <name/>\n</cfg>\n';
     const r = editXml(x, [
-      { match: "cfg.port", ifValue: null, value: "[value='25570']" },
+      { match: "cfg.port", ifValue: null, value: "25570", attribute: "value" },
       { match: "cfg.name", ifValue: null, value: "hi" },
-      { match: "cfg.extra", ifValue: null, value: "[enabled='true']" },
+      { match: "cfg.extra", ifValue: null, value: "true", attribute: "enabled" },
     ]);
     expect(r.text).toBe('<cfg>\n  <port value="25570"/>\n  <name>hi</name>\n  <extra enabled="true"></extra>\n</cfg>\n');
     expect(() => editXml("<a><b></a>", [{ match: "a.b", ifValue: null, value: "x" }])).toThrow();
+    // the egg template's [attr='…'] form goes through applyConfigFileRule
+    const viaRule = applyConfigFileRule({ path: "c.xml", parser: "xml", find: { "cfg.port": "[value='{{server.build.default.port}}']" } }, x, ctx);
+    expect(viaRule.content).toContain('<port value="25570"/>');
     expect(applyConfigFileRule({ path: "x.xml", parser: "xml", find: { "a.b": "1" } }, "<a><b></a>", ctx).warnings.join(" ")).toMatch(/not valid XML/);
     expect(applyConfigFileRule({ path: "x.xml", parser: "xml", find: { "root.port": "{{server.build.default.port}}" } }, null, ctx).content).toBe(
       '<?xml version="1.0" encoding="utf-8"?>\n<root>\n  <port>25570</port>\n</root>\n',

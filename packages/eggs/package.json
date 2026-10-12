@@ -23,8 +23,9 @@
   "dependencies": {
     "@blockforge/contracts": "workspace:*",
     "@blockforge/minecraft": "workspace:*",
-    "yaml": "^2.9.1",
+    "re2js": "2.8.6",
     "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1",
     "zod": "^4.6.6"
   },
   "devDependencies": {

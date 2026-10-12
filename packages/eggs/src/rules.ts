@@ -1,25 +1,37 @@
 import { SUPPORTED_VARIABLE_RULES, type TemplateVariable } from "@blockforge/contracts";
+import { MAX_REGEX_INPUT, type LinearRegex, RegexUnsupportedError, compilePcre } from "./regex.js";
 
 /**
  * Laravel validation rules as used by egg variables (Pterodactyl `VariableValidatorService`,
- * Pelican stores the same rules as an array). Semantics follow Laravel 10/11:
- *  - a value that is empty or whitespace-only only fails `required`; every other rule is skipped
- *    (Validator::presentOrRuleIsImplicit) — so `nullable` changes nothing for strings;
- *  - `min`/`max`/`between`/`size` compare numerically when the rule set contains `integer` or
- *    `numeric`, otherwise by character length (mb_strlen);
- *  - `boolean` accepts exactly "0" and "1" for string input (Laravel's strict in_array);
- *  - `integer` = PHP FILTER_VALIDATE_INT, `numeric` = PHP is_numeric (PHP 8);
- *  - `regex:` patterns are PCRE; the common subset is translated to JavaScript.
- * Rules outside SUPPORTED_VARIABLE_RULES are reported by `unsupportedRules` and not enforced.
+ * Pelican stores the same rules as an array).
+ *  - Only the empty string is "empty": it fails `required`; with `nullable` every other rule is
+ *    skipped; without `nullable` the other rules are evaluated against "" (Laravel converts empty
+ *    input to null, which `nullable` alone lets through). Whitespace-only values fail `required`
+ *    and are otherwise validated like any other value.
+ *  - `min`/`max`/`between`/`size` compare numerically when the rule set contains `integer`/`int`
+ *    or `numeric`, otherwise by character length (mb_strlen).
+ *  - Aliases used by real eggs: `int` → `integer`, `bool` → `boolean`.
+ *  - `boolean` accepts exactly "0" and "1" for string input (Laravel's strict in_array).
+ *  - `integer`: optional sign + digits (leading zeros allowed, surrounding whitespace not — stricter
+ *    than PHP's FILTER_VALIDATE_INT about spaces, which matter in startup commands), 64-bit range;
+ *    `numeric`: decimal/exponent notation without surrounding whitespace.
+ *  - Rule parameters are parsed as CSV (`in:"a,b",c`), then trimmed.
+ *  - `regex:` patterns are PCRE, translated to RE2 (linear time). Patterns RE2 cannot express
+ *    (backreferences, lookarounds, …) and unclosed patterns fail closed: every non-empty value is
+ *    rejected, and the import reports them.
+ * Other rules outside SUPPORTED_VARIABLE_RULES are reported by `unsupportedRules` and not enforced.
  */
 
 export interface ParsedRule {
   name: string;
   params: string[];
   raw: string;
+  /** `regex:` token whose closing delimiter is missing (fails closed). */
+  unclosed?: boolean;
 }
 
 const SUPPORTED = new Set<string>(SUPPORTED_VARIABLE_RULES);
+const ALIASES: Record<string, string> = { int: "integer", bool: "boolean" };
 
 /** True when a `regex:` rule token is complete (the closing delimiter and flags are present). */
 function regexComplete(token: string): boolean {
@@ -27,55 +39,106 @@ function regexComplete(token: string): boolean {
   if (body.length < 2) return false;
   const d = body[0]!;
   const close = d === "(" ? ")" : d === "{" ? "}" : d === "[" ? "]" : d === "<" ? ">" : d;
-  const m = new RegExp(`\\${close}[a-zA-Z]*$`).exec(body);
-  if (!m || m.index === 0) return false;
+  let end = body.length;
+  while (end > 1 && /[a-zA-Z]/.test(body[end - 1]!)) end--;
+  if (end <= 1 || body[end - 1] !== close) return false;
   // the closing delimiter must not be escaped
   let backslashes = 0;
-  for (let i = m.index - 1; i >= 0 && body[i] === "\\"; i--) backslashes++;
+  for (let i = end - 2; i >= 0 && body[i] === "\\"; i--) backslashes++;
   return backslashes % 2 === 0;
 }
 
-/** Splits a rule string on `|`, keeping `|` inside `regex:` patterns (as Pelican's array form allows). */
-export function splitRules(rules: string | readonly string[]): string[] {
-  if (Array.isArray(rules)) return rules.map((r) => String(r).trim()).filter((r) => r !== "");
+export interface SplitRule {
+  raw: string;
+  unclosed: boolean;
+  /** For unclosed regexes: the rule tokens that follow it (kept as separate rules). */
+  following?: string[];
+}
+
+/**
+ * Splits a rule string on `|`, keeping `|` inside a `regex:` pattern when the pattern closes
+ * later (`regex:/^(a|b)$/`). A pattern that never closes does not swallow the following rules: it
+ * is kept alone and marked unclosed.
+ */
+export function splitRulesDetailed(rules: string | readonly string[]): SplitRule[] {
+  if (Array.isArray(rules)) {
+    return rules
+      .map((r) => String(r).trim())
+      .filter((r) => r !== "")
+      .map((raw) => ({ raw, unclosed: /^(?:not_)?regex:/i.test(raw) && !regexComplete(raw) }));
+  }
   const tokens = String(rules).split("|");
-  const out: string[] = [];
+  const out: SplitRule[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    let t = tokens[i]!;
-    if (/^\s*(?:not_)?regex:/.test(t)) {
-      while (!regexComplete(t.trim()) && i + 1 < tokens.length) t += `|${tokens[++i]!}`;
+    const t = tokens[i]!;
+    if (/^\s*(?:not_)?regex:/i.test(t) && !regexComplete(t.trim())) {
+      let merged = t;
+      let j = i;
+      while (!regexComplete(merged.trim()) && j + 1 < tokens.length) merged += `|${tokens[++j]!}`;
+      if (regexComplete(merged.trim())) {
+        out.push({ raw: merged.trim(), unclosed: false });
+        i = j;
+        continue;
+      }
+      out.push({ raw: t.trim(), unclosed: true, following: tokens.slice(i + 1).map((x) => x.trim()).filter((x) => x !== "") });
+      continue;
     }
-    t = t.trim();
-    if (t !== "") out.push(t);
+    if (t.trim() !== "") out.push({ raw: t.trim(), unclosed: false });
+  }
+  return out;
+}
+
+export function splitRules(rules: string | readonly string[]): string[] {
+  return splitRulesDetailed(rules).map((r) => r.raw);
+}
+
+/** PHP `str_getcsv` (`,` separator, `"` enclosure, `""` or `\"` escapes), each field trimmed. */
+export function parseCsvParams(s: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  for (;;) {
+    while (s[i] === " " || s[i] === "\t") i++;
+    let field = "";
+    if (s[i] === '"') {
+      i++;
+      for (;;) {
+        const c = s[i];
+        if (c === undefined) break;
+        if (c === "\\" && s[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else if (c === '"' && s[i + 1] === '"') {
+          field += '"';
+          i += 2;
+        } else if (c === '"') {
+          i++;
+          break;
+        } else {
+          field += c;
+          i++;
+        }
+      }
+      while (i < s.length && s[i] !== ",") field += s[i++];
+    } else {
+      while (i < s.length && s[i] !== ",") field += s[i++];
+    }
+    out.push(field.trim());
+    if (i >= s.length) break;
+    i++; // skip ","
   }
   return out;
 }
 
 export function parseRules(rules: string | readonly string[]): ParsedRule[] {
-  return splitRules(rules).map((raw) => {
+  return splitRulesDetailed(rules).map(({ raw, unclosed }) => {
     const i = raw.indexOf(":");
-    const name = (i === -1 ? raw : raw.slice(0, i)).trim().toLowerCase();
+    const lower = (i === -1 ? raw : raw.slice(0, i)).trim().toLowerCase();
+    const name = ALIASES[lower] ?? lower;
     if (i === -1) return { name, params: [], raw };
     const rest = raw.slice(i + 1);
-    const params = name === "regex" || name === "not_regex" ? [rest] : rest.split(",").map((p) => p.trim());
-    return { name, params, raw };
+    const params = name === "regex" || name === "not_regex" ? [rest] : parseCsvParams(rest);
+    return unclosed ? { name, params, raw, unclosed: true } : { name, params, raw };
   });
-}
-
-/** Rule names in `rules` that BlockForge does not enforce. */
-export function unsupportedRules(rules: string): string[] {
-  const out: string[] = [];
-  for (const r of parseRules(rules)) {
-    if (!SUPPORTED.has(r.name)) out.push(r.name);
-    else if (r.name === "regex") {
-      try {
-        pcreToRegExp(r.params[0] ?? "");
-      } catch {
-        out.push("regex");
-      }
-    }
-  }
-  return [...new Set(out)];
 }
 
 export class RuleError extends Error {
@@ -85,51 +148,67 @@ export class RuleError extends Error {
   }
 }
 
-/** Translates a PHP/PCRE pattern (`/…/flags`, also `#…#`, `~…~`, `{…}`) into a JavaScript RegExp. */
-export function pcreToRegExp(pattern: string): RegExp {
-  if (pattern.length < 2) throw new RuleError("empty regex");
-  const open = pattern[0]!;
-  if (/[A-Za-z0-9\\\s]/.test(open)) throw new RuleError("regex needs a delimiter");
-  const close = open === "(" ? ")" : open === "{" ? "}" : open === "[" ? "]" : open === "<" ? ">" : open;
-  const end = pattern.lastIndexOf(close);
-  if (end <= 0) throw new RuleError("regex is missing its closing delimiter");
-  let body = pattern.slice(1, end);
-  const flags = pattern.slice(end + 1);
-  if (!/^[imsxuUDA]*$/.test(flags)) throw new RuleError(`unsupported regex flags "${flags}"`);
-  if (/[xUA]/.test(flags)) throw new RuleError(`regex flag "${flags.replace(/[imsuD]/g, "")}" is not supported`);
-  // \A / \z / \Z at the ends map to ^ / $; anything else PCRE-only is rejected (possessive and
-  // atomic groups, \G \K \R, recursion, conditionals, inline comments).
-  body = body.replace(/^\\A/, "^").replace(/\\[zZ]$/, "$");
-  if (/\(\?>|\*\+|\+\+|\?\+|\}\+|\\[AzZGKR]|\(\?R\)|\(\?\d|\(\?[+-]\d|\(\?&|\(\?P>|\(\?\(|\(\?#/.test(body)) {
-    throw new RuleError("regex uses PCRE-only syntax");
-  }
-  body = body.replace(/\(\?P<([A-Za-z_][A-Za-z0-9_]*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_][A-Za-z0-9_]*)\)/g, "\\k<$1>");
-  let jsFlags = "";
-  if (flags.includes("i")) jsFlags += "i";
-  if (flags.includes("m")) jsFlags += "m";
-  if (flags.includes("s")) jsFlags += "s";
-  if (flags.includes("u") || /\\p\{|\\P\{|\\X/.test(body)) jsFlags += "u";
-  // PCRE `$` also matches before a final newline unless D is set; JS never does. Values are
-  // single-line in practice, so the difference is ignored.
+/** Translates a PHP/PCRE `regex:` pattern to a linear-time matcher; throws RuleError when impossible. */
+export function compileRuleRegex(pattern: string): LinearRegex {
   try {
-    return new RegExp(body, jsFlags);
+    return compilePcre(pattern);
   } catch (e) {
-    throw new RuleError(`invalid regex: ${(e as Error).message}`);
+    if (e instanceof RegexUnsupportedError) throw new RuleError(e.message);
+    throw e;
   }
+}
+
+/** @deprecated kept for API compatibility; returns an RE2-backed matcher with `test`. */
+export const pcreToRegExp = compileRuleRegex;
+
+export interface RuleProblem {
+  rule: string;
+  message: string;
+}
+
+/** Problems with a rule string for the import report (unsupported names, unusable regexes). */
+export function ruleProblems(rules: string): RuleProblem[] {
+  const out: RuleProblem[] = [];
+  const split = splitRulesDetailed(rules);
+  for (const r of parseRules(rules)) {
+    if (r.name === "regex") {
+      if (r.unclosed) {
+        const following = split.find((s) => s.raw === r.raw && s.unclosed)?.following ?? [];
+        const names = following.map((f) => f.split(":")[0]!.trim()).filter((x) => x !== "");
+        out.push({
+          rule: "regex",
+          message: `regex rule "${r.raw}" is not closed; it rejects every value${names.length > 0 ? ` (the following rule${names.length > 1 ? "s" : ""} ${names.join(", ")} would have been swallowed and are kept as separate rules)` : ""}`,
+        });
+        continue;
+      }
+      try {
+        compileRuleRegex(r.params[0] ?? "");
+      } catch (e) {
+        out.push({ rule: "regex", message: `regex rule "${r.raw}" cannot be enforced (${(e as Error).message}); it rejects every value` });
+      }
+      continue;
+    }
+    if (!SUPPORTED.has(r.name)) out.push({ rule: r.name, message: `rule ${r.name} is not enforced` });
+  }
+  return out;
+}
+
+/** Rule names in `rules` that BlockForge does not enforce as written (regex problems included). */
+export function unsupportedRules(rules: string): string[] {
+  return [...new Set(ruleProblems(rules).map((p) => p.rule))];
 }
 
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 
-function isPhpInt(v: string): boolean {
-  const t = v.trim();
-  if (!/^[+-]?(?:0|[1-9]\d*)$/.test(t)) return false;
-  const n = BigInt(t);
+function isInt(v: string): boolean {
+  if (!/^[+-]?\d+$/.test(v)) return false;
+  const n = BigInt(v);
   return n >= INT64_MIN && n <= INT64_MAX;
 }
 
-function isPhpNumeric(v: string): boolean {
-  return /^\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*$/.test(v);
+function isNumeric(v: string): boolean {
+  return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(v);
 }
 
 function isIp(v: string): boolean {
@@ -167,7 +246,8 @@ function num(p: string | undefined, rule: string): number {
 
 /**
  * Validates a value against the variable's rules. Returns an error message or `null`.
- * Rules BlockForge does not support are skipped (they were reported at import).
+ * Rules BlockForge does not support are skipped (they were reported at import); regex rules that
+ * cannot be enforced reject every non-empty value.
  */
 export function validateVariableValue(variable: Pick<TemplateVariable, "name" | "envName" | "rules">, value: string): string | null {
   const label = variable.name || variable.envName;
@@ -175,15 +255,15 @@ export function validateVariableValue(variable: Pick<TemplateVariable, "name" | 
   const names = new Set(rules.map((r) => r.name));
   const numericContext = names.has("integer") || names.has("numeric");
   const length = [...value].length;
-  if (value.trim() === "") {
-    return names.has("required") ? `${label} is required.` : null;
+  if (value === "" || value.trim() === "") {
+    if (names.has("required")) return `${label} is required.`;
+    if (value === "" && names.has("nullable")) return null;
   }
-  const size = (rule: string): number => {
+  const size = (): number => {
     if (numericContext) {
-      if (!isPhpNumeric(value)) throw new RuleError(`${label} must be a number.`);
-      return Number(value.trim());
+      if (!isNumeric(value)) throw new RuleError(`${label} must be a number.`);
+      return Number(value);
     }
-    void rule;
     return length;
   };
   const unit = numericContext ? "" : " characters";
@@ -197,10 +277,10 @@ export function validateVariableValue(variable: Pick<TemplateVariable, "name" | 
         case "string":
           break;
         case "integer":
-          if (!isPhpInt(value)) return `${label} must be an integer.`;
+          if (!isInt(value)) return `${label} must be an integer.`;
           break;
         case "numeric":
-          if (!isPhpNumeric(value)) return `${label} must be a number.`;
+          if (!isNumeric(value)) return `${label} must be a number.`;
           break;
         case "boolean":
           if (value !== "0" && value !== "1") return `${label} must be 0 or 1.`;
@@ -228,24 +308,24 @@ export function validateVariableValue(variable: Pick<TemplateVariable, "name" | 
           break;
         case "min": {
           const m = num(p[0], "min");
-          if (size("min") < m) return `${label} must be at least ${m}${unit}.`;
+          if (size() < m) return `${label} must be at least ${m}${unit}.`;
           break;
         }
         case "max": {
           const m = num(p[0], "max");
-          if (size("max") > m) return `${label} may not be greater than ${m}${unit}.`;
+          if (size() > m) return `${label} may not be greater than ${m}${unit}.`;
           break;
         }
         case "between": {
           const lo = num(p[0], "between");
           const hi = num(p[1], "between");
-          const s = size("between");
+          const s = size();
           if (s < lo || s > hi) return `${label} must be between ${lo} and ${hi}${unit}.`;
           break;
         }
         case "size": {
           const m = num(p[0], "size");
-          if (size("size") !== m) return `${label} must be ${m}${unit}.`;
+          if (size() !== m) return `${label} must be ${m}${unit}.`;
           break;
         }
         case "digits": {
@@ -260,13 +340,14 @@ export function validateVariableValue(variable: Pick<TemplateVariable, "name" | 
           break;
         }
         case "regex": {
-          let re: RegExp;
+          if (r.unclosed) return `${label} cannot be validated: its regex rule is not closed.`;
+          let re: LinearRegex;
           try {
-            re = pcreToRegExp(p[0] ?? "");
+            re = compileRuleRegex(p[0] ?? "");
           } catch {
-            break; // reported as unsupported at import
+            return `${label} cannot be validated: its regex rule is not supported.`;
           }
-          if (!re.test(value)) return `${label} has an invalid format.`;
+          if (value.length > MAX_REGEX_INPUT || !re.test(value)) return `${label} has an invalid format.`;
           break;
         }
         default:

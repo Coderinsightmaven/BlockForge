@@ -1,10 +1,12 @@
-export { parseEgg, slugify, templateFromPreview, SUPPORTED_EGG_FORMATS, MAX_INSTALL_SCRIPT_BYTES } from "./parse.js";
+export { parseEgg, slugify, templateFromPreview, unquotedStartupVariables, SUPPORTED_EGG_FORMATS, MAX_INSTALL_SCRIPT_BYTES } from "./parse.js";
 export type { ParseEggOptions, ImportedTemplate } from "./parse.js";
 export { exportEgg } from "./export.js";
-export { validateVariableValue, unsupportedRules, parseRules, splitRules, pcreToRegExp, RuleError } from "./rules.js";
+export { validateVariableValue, unsupportedRules, ruleProblems, parseRules, splitRules, splitRulesDetailed, parseCsvParams, compileRuleRegex, pcreToRegExp, RuleError } from "./rules.js";
+export { compileLinear, compilePcre, expandGoTemplate, stripAnsiLinear, RegexUnsupportedError, MAX_REGEX_INPUT } from "./regex.js";
+export type { LinearRegex } from "./regex.js";
 export type { ParsedRule } from "./rules.js";
 export { buildEggEnvironment, resolveStartupForDisplay, memoryMiB, HIDDEN_VALUE, EggEnvironmentError } from "./env.js";
-export type { EggEnvironmentInput } from "./env.js";
+export type { EggEnvironmentInput, EggEnvironmentOptions } from "./env.js";
 export {
   resolvePlaceholders,
   resolvePlaceholderKey,
@@ -12,6 +14,9 @@ export {
   isKnownConfigPlaceholder,
   envNameOfPlaceholder,
   PLATFORM_ENV_NAMES,
+  escapeReplacementTemplate,
+  resolvePlaceholdersQuoted,
+  hasLineBreakingControl,
 } from "./placeholders.js";
 export type { PlaceholderContext } from "./placeholders.js";
 export { applyConfigFileRule, resolveReplacements, MAX_CONFIG_FILE_BYTES } from "./config-files/index.js";

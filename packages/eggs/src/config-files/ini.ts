@@ -24,6 +24,14 @@ function split(text: string): IniLine[] {
   return out;
 }
 
+function hasControl(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c < 0x20 && c !== 0x09) || c === 0x7f) return true;
+  }
+  return false;
+}
+
 export function iniKeyPath(match: string): { section: string; key: string } {
   let depth = 0;
   for (let i = 0; i < match.length; i++) {
@@ -73,6 +81,12 @@ export function editIni(text: string, edits: readonly IniEdit[]): { text: string
   let changed = false;
   for (const e of edits) {
     const { section, key } = iniKeyPath(e.match);
+    // A CR/LF (or other control character) in a value or name would start a new line — i.e. inject
+    // arbitrary keys. Such edits are refused.
+    if (hasControl(e.value) || hasControl(e.match) || /[\]=]/.test(section) || /^\[|[=:]/.test(key) || key.trim() === "") {
+      warnings.push(`${e.match}: value or key contains line breaks, control characters or INI syntax; not written`);
+      continue;
+    }
     const { entries, sections } = parseLines(lines);
     const hits = entries.filter((x) => x.section === section && x.key === key);
     const sepStyle = entries[0]?.sep ?? "=";

@@ -11,7 +11,8 @@ import {
 } from "@blockforge/contracts";
 import { DEFAULT_AGENT_IMAGE_ALLOWLIST, imageAllowed, parseImageRef } from "./images.js";
 import { isKnownConfigPlaceholder, placeholderKeys } from "./placeholders.js";
-import { unsupportedRules } from "./rules.js";
+import { compileLinear } from "./regex.js";
+import { ruleProblems } from "./rules.js";
 import { defineOwn, isForbiddenKey } from "./safe.js";
 
 /**
@@ -66,6 +67,38 @@ function bool(v: unknown, fallback: boolean): boolean {
 
 function utf8Length(s: string): number {
   return new TextEncoder().encode(s).length;
+}
+
+/**
+ * Names of `{{VAR}}`, `${VAR}` and `$VAR` references in a shell command that are not inside
+ * single or double quotes.
+ */
+export function unquotedStartupVariables(startup: string): string[] {
+  const out = new Set<string>();
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < startup.length; i++) {
+    const c = startup[i]!;
+    if (c === "\\" && quote !== "'") {
+      i++;
+      continue;
+    }
+    if (quote === null && (c === '"' || c === "'")) {
+      quote = c;
+      continue;
+    }
+    if (quote !== null && c === quote) {
+      quote = null;
+      continue;
+    }
+    if (quote !== null) continue;
+    const rest = startup.slice(i);
+    const m = /^\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/.exec(rest) ?? /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}/.exec(rest) ?? /^\$([A-Za-z_][A-Za-z0-9_]*)/.exec(rest);
+    if (m) {
+      out.add(m[1]!);
+      i += m[0].length - 1;
+    }
+  }
+  return [...out];
 }
 
 /** Slug from an egg name: lowercase, `-` separated, 3–48 chars. */
@@ -302,9 +335,9 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
   for (const d of startupDone) {
     if (d.startsWith("regex:")) {
       try {
-        new RegExp(d.slice(6));
-      } catch {
-        issue("warning", "DONE_REGEX_INVALID", `Done pattern "${d}" is not a valid regex; it is matched as literal text (like Wings).`, "config.startup.done");
+        compileLinear(d.slice(6));
+      } catch (e) {
+        issue("warning", "DONE_REGEX_INVALID", `Done pattern "${d}" cannot be used as a regex (${(e as Error).message}); it is matched as literal text (like Wings).`, "config.startup.done");
       }
     }
   }
@@ -411,9 +444,13 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
       issue("error", "VARIABLE_RULES_TOO_LONG", `Rules of ${envName} are longer than 2048 characters.`, `${p}.rules`);
       return;
     }
-    const unsupported = unsupportedRules(rules);
-    if (unsupported.length > 0) {
-      issue("warning", "VARIABLE_RULES_UNSUPPORTED", `${envName}: rule(s) ${unsupported.join(", ")} are not enforced by BlockForge.`, `${p}.rules`);
+    const problems = ruleProblems(rules);
+    const unenforced = [...new Set(problems.filter((x) => x.rule !== "regex").map((x) => x.rule))];
+    if (unenforced.length > 0) {
+      issue("warning", "VARIABLE_RULES_UNSUPPORTED", `${envName}: rule(s) ${unenforced.join(", ")} are not enforced by BlockForge.`, `${p}.rules`);
+    }
+    for (const x of problems.filter((y) => y.rule === "regex")) {
+      issue("warning", "VARIABLE_REGEX_UNUSABLE", `${envName}: ${x.message}.`, `${p}.rules`);
     }
     const sortRaw = rv["sort"];
     const sortOrder = typeof sortRaw === "number" && Number.isInteger(sortRaw) ? sortRaw : typeof sortRaw === "string" && /^-?\d+$/.test(sortRaw) ? Number(sortRaw) : idx + 1;
@@ -434,6 +471,16 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
   variables.sort((a, b) => a.sortOrder - b.sortOrder);
   const editableNotViewable = variables.filter((v) => v.userEditable && !v.userViewable);
   for (const v of editableNotViewable) issue("info", "VARIABLE_EDITABLE_HIDDEN", `${v.envName} is editable but not viewable; users can overwrite it without seeing it.`, "variables");
+
+  // --- user-editable variables used unquoted in the startup command ----------------------------
+  // The image's shell evaluates STARTUP after turning {{VAR}} into ${VAR}: an unquoted value is
+  // word-split and globbed, so only the variable's rules stand between the user and the command line.
+  for (const name of unquotedStartupVariables(startup)) {
+    const v = variables.find((x) => x.envName === name);
+    if (v && v.userEditable) {
+      issue("warning", "STARTUP_VARIABLE_UNQUOTED", `User-editable variable ${name} is used unquoted in the startup command; values with spaces or shell characters change the command (only its rules "${v.rules}" restrict it).`, "startup");
+    }
+  }
 
   // --- placeholders -------------------------------------------------------------------------
   const varNames = new Set(variables.map((v) => v.envName));
@@ -474,7 +521,8 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
   }
   const knownYolk = images.some((i) => {
     try {
-      return /^ghcr\.io\/(pterodactyl|parkervcp)\/(yolks|games|images)$/.test(parseImageRef(i.image).repo);
+      // Pterodactyl / parkervcp / Pelican yolk images evaluate STARTUP in their entrypoint.
+      return /^ghcr\.io\/(pterodactyl|parkervcp|pelican-eggs)\/(yolks|games|images|steamcmd)$/.test(parseImageRef(i.image).repo);
     } catch {
       return false;
     }

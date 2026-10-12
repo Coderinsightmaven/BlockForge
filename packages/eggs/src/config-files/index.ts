@@ -1,6 +1,6 @@
 import type { ConfigFileRule } from "@blockforge/contracts";
 import { getProperty, parseProperties, serializeProperties, setProperties } from "@blockforge/minecraft";
-import { type PlaceholderContext, resolvePlaceholders } from "../placeholders.js";
+import { type PlaceholderContext, escapeReplacementTemplate, hasLineBreakingControl, resolvePlaceholders, resolvePlaceholdersQuoted } from "../placeholders.js";
 import { YamlEditError, parseYamlStrict, yamlSetMany } from "../yaml-source.js";
 import { editIni } from "./ini.js";
 import { type Replacement, applyReplacements } from "./paths.js";
@@ -21,19 +21,40 @@ export const MAX_CONFIG_FILE_BYTES = 8 * 1024 * 1024;
  * a string value replaces unconditionally; a map value yields one conditional replacement per
  * entry (`current value → replacement`, `regex:<expr>` keys for json/yaml).
  */
-export function resolveReplacements(rule: Pick<ConfigFileRule, "find">, ctx: PlaceholderContext): { replacements: Replacement[]; unresolved: string[] } {
+export function resolveReplacements(
+  rule: Pick<ConfigFileRule, "find"> & Partial<Pick<ConfigFileRule, "parser">>,
+  ctx: PlaceholderContext,
+): { replacements: Replacement[]; unresolved: string[] } {
   const replacements: Replacement[] = [];
   const unresolved: string[] = [];
+  const one = (match: string, ifValue: string | null, template: string): Replacement => {
+    if (rule.parser === "file") {
+      // Line-oriented files: values are escaped for their quote context or refused.
+      const r = resolvePlaceholdersQuoted(template, ctx);
+      unresolved.push(...r.unresolved);
+      return r.unsafe.length > 0 ? { match, ifValue, replaceWith: r.value, unsafe: r.unsafe } : { match, ifValue, replaceWith: r.value };
+    }
+    if (rule.parser === "xml") {
+      // The attribute form is recognised on the egg-authored template only, never on a user value.
+      const attr = /^\[(\w+)='([\s\S]*)'\]$/.exec(template);
+      if (attr) {
+        const r = resolvePlaceholders(attr[2]!, ctx);
+        unresolved.push(...r.unresolved);
+        return { match, ifValue, replaceWith: r.value, attribute: attr[1]! };
+      }
+    }
+    const r = resolvePlaceholders(template, ctx, ifValue !== null && ifValue.startsWith("regex:") ? escapeReplacementTemplate : undefined);
+    unresolved.push(...r.unresolved);
+    return { match, ifValue, replaceWith: r.value };
+  };
   for (const [match, spec] of Object.entries(rule.find)) {
     if (typeof spec === "string") {
-      const r = resolvePlaceholders(spec, ctx);
-      unresolved.push(...r.unresolved);
-      replacements.push({ match, ifValue: null, replaceWith: r.value });
+      replacements.push(one(match, null, spec));
     } else {
       for (const [ifValue, replaceWith] of Object.entries(spec)) {
-        const r = resolvePlaceholders(replaceWith, ctx);
-        unresolved.push(...r.unresolved);
-        replacements.push({ match, ifValue, replaceWith: r.value });
+        // `regex:` conditions use the replacement as a Go template ($1 …): substituted values are
+        // escaped so a user value like "$1" or "$'" stays literal; egg-authored "$2" keeps working.
+        replacements.push(one(match, ifValue, replaceWith));
       }
     }
   }
@@ -136,17 +157,30 @@ function applyProperties(current: string | null, replacements: Replacement[], wa
   return out === (current ?? "") && current !== null ? null : out;
 }
 
-function applyText(current: string, replacements: Replacement[]): string | null {
+function applyText(current: string, replacements: Replacement[], warnings: string[]): string | null {
   // Wings: every line that starts with `match` is replaced by `replace_with` (conditions ignored).
-  const parts = current.split(/(\r\n|\n)/);
+  // BlockForge uses only the most specific (longest) matching prefix per line — Wings concatenates
+  // all matches into one line — and skips replacements whose values were unsafe.
+  const parts = current.split(/(\r\n|\n|\r)/);
   let changed = false;
+  const reported = new Set<string>();
   for (let i = 0; i < parts.length; i += 2) {
     const line = parts[i]!;
-    const hits = replacements.filter((r) => line.startsWith(r.match));
-    if (hits.length === 0) continue;
-    const replaced = hits.map((r) => r.replaceWith).join("");
-    if (replaced !== line) {
-      parts[i] = replaced;
+    const hits = replacements.filter((r) => line.startsWith(r.match)).sort((a, b) => b.match.length - a.match.length);
+    const r = hits[0];
+    if (!r) continue;
+    if (r.unsafe && r.unsafe.length > 0) {
+      if (!reported.has(r.match)) warnings.push(`line "${r.match}…" not rewritten: ${r.unsafe.join("; ")}`);
+      reported.add(r.match);
+      continue;
+    }
+    if (hasLineBreakingControl(r.replaceWith)) {
+      if (!reported.has(r.match)) warnings.push(`line "${r.match}…" not rewritten: the replacement contains line breaks or control characters`);
+      reported.add(r.match);
+      continue;
+    }
+    if (r.replaceWith !== line) {
+      parts[i] = r.replaceWith;
       changed = true;
     }
   }
@@ -186,7 +220,7 @@ export function applyConfigFileRule(rule: ConfigFileRule, current: string | null
       }
       case "xml": {
         try {
-          const r = editXml(current ?? "", replacements.map((x) => ({ match: x.match, ifValue: x.ifValue, value: x.replaceWith })));
+          const r = editXml(current ?? "", replacements.map((x) => ({ match: x.match, ifValue: x.ifValue, value: x.replaceWith, attribute: x.attribute ?? null })));
           warnings.push(...r.warnings);
           out = r.changed || current === null ? r.text : null;
         } catch (e) {
@@ -200,7 +234,7 @@ export function applyConfigFileRule(rule: ConfigFileRule, current: string | null
           warnings.push(`${rule.path} does not exist yet; text replacements are skipped until it does`);
           return { content: "", changed: false, warnings };
         }
-        out = applyText(current, replacements);
+        out = applyText(current, replacements, warnings);
         break;
     }
   } catch (e) {

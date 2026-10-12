@@ -12,6 +12,7 @@
  * The changed concrete paths are recorded so source-preserving writers can replay them.
  */
 
+import { type LinearRegex, compileLinear } from "../regex.js";
 import { defineOwn, getOwn, hasOwn, isForbiddenKey, nullProtoObject } from "../safe.js";
 
 export type Seg = string | number;
@@ -21,6 +22,10 @@ export interface Replacement {
   match: string;
   ifValue: string | null;
   replaceWith: string;
+  /** XML: write this attribute (from the egg template's `[attr='…']` form) instead of the text. */
+  attribute?: string;
+  /** Values that could not be substituted safely; the replacement is skipped. */
+  unsafe?: string[];
 }
 
 export interface PathEdit {
@@ -140,10 +145,6 @@ export function expandWildcards(root: unknown, path: Path): Path[] {
   return keys.flatMap((k) => expandWildcards(root, [...prefix, k, ...rest]));
 }
 
-/** Converts a Go RE2 replacement regex to JS (named groups) — `$n` works in both. */
-function goRegex(expr: string): RegExp {
-  return new RegExp(expr.replace(/\(\?P<([A-Za-z_][A-Za-z0-9_]*)>/g, "(?<$1>"), "g");
-}
 
 /**
  * Applies replacements to `root` in order (mutating it) and returns the concrete edits plus
@@ -166,18 +167,19 @@ export function applyReplacements(root: Container, replacements: readonly Replac
       let value: string | number;
       if (r.ifValue !== null && r.ifValue.startsWith("regex:")) {
         if (!cur.found) continue;
-        let re: RegExp;
+        let re: LinearRegex;
         try {
-          re = goRegex(r.ifValue.slice(6));
-        } catch {
-          warnings.push(`invalid regex in "${r.match}" condition; replacement skipped`);
+          // Wings compiles these with Go's regexp (RE2 syntax); RE2 runs in linear time.
+          re = compileLinear(r.ifValue.slice(6));
+        } catch (e) {
+          warnings.push(`regex in "${r.match}" condition cannot be used (${(e as Error).message}); replacement skipped`);
           continue;
         }
         const text = textOf(cur.value);
-        re.lastIndex = 0;
         if (!re.test(text)) continue;
-        re.lastIndex = 0;
-        value = text.replace(re, r.replaceWith);
+        // Go ReplaceAllString template: `$1`/`${1}`/`$name`; `$$` is a literal "$". Placeholder
+        // values were escaped (`$` → `$$`) before substitution, so user input is never expanded.
+        value = re.replaceAll(text, r.replaceWith);
       } else {
         // Stricter than Wings (which also writes when the path is missing): a conditional
         // replacement only applies when the current value matches.
