@@ -1,11 +1,15 @@
 import { z } from "zod";
 import { Bytes, EpochMs, Id, PageQuery, Sha1Hex, Sha512Hex, page } from "../common.js";
-import type { Permission } from "../permissions.js";
 import { ServerSoftware } from "./servers.js";
 import { TransferUrlResponse } from "./files.js";
 import { ExtensionScanStatus } from "./extension-events.js";
 
-export { ExtensionScanStatus, ExtensionsUpdatedEvent } from "./extension-events.js";
+export {
+  EXTENSIONS_MANAGE_PERMISSION,
+  EXTENSIONS_READ_PERMISSION,
+  ExtensionScanStatus,
+  ExtensionsUpdatedEvent,
+} from "./extension-events.js";
 
 /**
  * Plugins & mods (Phase 4b): `/servers/:id/extensions/*`.
@@ -24,12 +28,6 @@ export { ExtensionScanStatus, ExtensionsUpdatedEvent } from "./extension-events.
  * `restartRequired: true` whenever the server is not stopped/crashed.
  */
 
-/**
- * Permission checked for extension *reads* (list, search, project, plan, updates, history). Mutations need
- * `servers.extensions.manage`.
- */
-export const EXTENSIONS_READ_PERMISSION: Permission = "servers.extensions.view";
-export const EXTENSIONS_MANAGE_PERMISSION: Permission = "servers.extensions.manage";
 
 export const ExtensionKind = z.enum(["plugin", "mod"]);
 export type ExtensionKind = z.infer<typeof ExtensionKind>;

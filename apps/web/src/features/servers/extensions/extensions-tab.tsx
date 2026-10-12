@@ -14,6 +14,7 @@ import {
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import {
   EXTENSIONS_MANAGE_PERMISSION,
+  EXTENSION_UPDATE_PROBLEMS,
   ModrinthCategoryTag,
   REALTIME_EVENT_PAYLOADS,
 } from "@blockforge/contracts";
@@ -713,7 +714,7 @@ function UpdatesSection({
                     ) : null}
                     {u.problem ? (
                       <span className="block text-xs text-danger">
-                        Can't be applied: {u.problem.replaceAll("_", " ").toLowerCase()}
+                        Can't be applied: {EXTENSION_UPDATE_PROBLEMS[u.problem]}.
                       </span>
                     ) : null}
                   </label>

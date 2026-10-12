@@ -1,5 +1,6 @@
 import {
   Allocation,
+  ConsoleLinesEvent,
   ArtifactPlan,
   AuditEvent,
   CreateAllocationsResponse,
@@ -35,7 +36,6 @@ import type {
   UpdateTemplateRequest,
 } from "@blockforge/contracts";
 import { z } from "zod";
-import { ConsoleLinesEvent } from "../realtime/protocol";
 import { apiClient } from "./client";
 import type { AuditFilters } from "./endpoints";
 

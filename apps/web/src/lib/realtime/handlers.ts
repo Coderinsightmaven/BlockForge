@@ -1,11 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
+import { REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type { Node, NodeMetricSample } from "@blockforge/contracts";
 import { upsertNodeInCache } from "../node-cache";
 import { qk } from "../query-keys";
 import { useRealtimeTopic } from "./provider";
-import { SHELL_EVENT_PAYLOADS } from "./payloads";
 
 export { upsertNodeInCache };
 
@@ -17,7 +17,7 @@ export { upsertNodeInCache };
 
 /** `node.metrics` payload `{nodeId, sample}` → the sample, if it is for `nodeId`. */
 export function extractNodeSample(data: unknown, nodeId?: string): NodeMetricSample | null {
-  const parsed = SHELL_EVENT_PAYLOADS["node.metrics"].safeParse(data);
+  const parsed = REALTIME_EVENT_PAYLOADS["node.metrics"].safeParse(data);
   if (!parsed.success) return null;
   if (nodeId && parsed.data.nodeId !== nodeId) return null;
   return parsed.data.sample;
@@ -25,7 +25,7 @@ export function extractNodeSample(data: unknown, nodeId?: string): NodeMetricSam
 
 /** `node.updated` payload: the bare `Node` DTO. */
 export function extractNode(data: unknown): Node | null {
-  const parsed = SHELL_EVENT_PAYLOADS["node.updated"].safeParse(data);
+  const parsed = REALTIME_EVENT_PAYLOADS["node.updated"].safeParse(data);
   return parsed.success ? parsed.data : null;
 }
 
@@ -93,7 +93,7 @@ export function useOverviewRealtime(enabled: boolean): void {
   const invalidate = useThrottledInvalidate(qk.overview, 3000);
   useRealtimeTopic(enabled ? "overview" : null, (event) => {
     if (event.type !== "overview.updated") return;
-    const parsed = SHELL_EVENT_PAYLOADS["overview.updated"].safeParse(event.data);
+    const parsed = REALTIME_EVENT_PAYLOADS["overview.updated"].safeParse(event.data);
     if (parsed.success) queryClient.setQueryData(qk.overview, parsed.data);
     else invalidate();
   });

@@ -1,5 +1,6 @@
-import { SUBUSER_ASSIGNABLE_PERMISSIONS } from "@blockforge/contracts";
+import { EXTENSIONS_READ_PERMISSION, SUBUSER_ASSIGNABLE_PERMISSIONS } from "@blockforge/contracts";
 import type { Me, Permission, Server, ServerSoftware } from "@blockforge/contracts";
+import { extensionDirFor } from "@blockforge/minecraft";
 import { canAny, hasGlobal } from "./permissions";
 
 /*
@@ -37,35 +38,13 @@ export type ServerTab =
   | "activity"
   | "settings";
 
-/**
- * `EXTENSIONS_READ_PERMISSION` of the contract, spelled out so the always-loaded bundle does not pull
- * in the whole Plugins & mods contract module (pinned by a test).
- */
-export const EXTENSIONS_VIEW: Permission = "servers.extensions.view";
-
 /** What tab gating reads from a server (the optional fields may be absent in partial fixtures). */
 export type TabServer = Pick<Server, "myPermissions"> &
   Partial<Pick<Server, "backupLimit" | "software" | "game">>;
 
-/**
- * Where the server software loads plugins/mods from (same mapping as `extensionDirFor` in
- * @blockforge/minecraft, pinned by a test): none for vanilla and non-Minecraft servers.
- */
+/** Where the server software loads plugins/mods from: none for vanilla and non-Minecraft servers. */
 export function extensionInstallDir(software: ServerSoftware | null | undefined): "plugins" | "mods" | null {
-  switch (software) {
-    case "paper":
-    case "purpur":
-    case "folia":
-    case "spigot":
-    case "velocity":
-      return "plugins";
-    case "fabric":
-    case "forge":
-    case "neoforge":
-      return "mods";
-    default:
-      return null;
-  }
+  return software ? extensionDirFor(software) : null;
 }
 
 /** Plugins & mods: only for software that loads them (unknown in partial fixtures → shown). */
@@ -99,7 +78,7 @@ export const SERVER_TABS: ServerTabDef[] = [
   {
     id: "extensions",
     label: "Plugins & mods",
-    anyOf: [EXTENSIONS_VIEW],
+    anyOf: [EXTENSIONS_READ_PERMISSION],
     visible: extensionsTabVisible,
   },
   { id: "players", label: "Players", anyOf: ["servers.players.view"], visible: playersTabVisible },

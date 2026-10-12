@@ -1,32 +1,14 @@
 import type { InfiniteData } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
 import {
   BACKUP_JOB_ERROR_CODES,
-  ConsoleLinesEvent as ContractConsoleLines,
   EXTENSIONS_READ_PERMISSION,
-  MutableRelativePath,
-  REALTIME_EVENT_PAYLOADS,
-  RealtimeEventType as ContractEventType,
-  RelativePath,
   SERVER_JOB_ERROR_CODES,
-  ServerFrame as ContractServerFrame,
-  ServerSoftware,
-  TOPIC_PATTERNS as CONTRACT_TOPICS,
 } from "@blockforge/contracts";
 import type { Page, PlayerSession, PlayersOverview } from "@blockforge/contracts";
-import { extensionDirFor } from "@blockforge/minecraft";
 import { ApiError } from "@/lib/api/errors";
 import { describeJobError } from "@/lib/job-errors";
-import { SHELL_EVENT_PAYLOADS } from "@/lib/realtime/payloads";
-import {
-  ConsoleLinesEvent,
-  RealtimeEventType,
-  ServerFrame,
-  TOPIC_PATTERNS,
-  Topic,
-} from "@/lib/realtime/protocol";
-import { EXTENSIONS_VIEW, extensionInstallDir, visibleServerTabs } from "@/lib/server-permissions";
+import { SERVER_TABS, visibleServerTabs } from "@/lib/server-permissions";
 import { SERVER_ID, makeServer } from "@/test/fixtures";
 import {
   checkUploadFile,
@@ -48,56 +30,10 @@ import {
   sessionsLeft,
   stoppedOnlyReason,
 } from "@/features/servers/players/player-model";
-import { isMutableRelativePath, isRelativePath } from "@/features/servers/server-search";
 
-const json = (s: z.ZodType) => z.toJSONSchema(s, { unrepresentable: "any", io: "input" });
-
-describe("first-load copies of contract schemas stay identical (bundle budget)", () => {
-  it("realtime protocol: topics, event types, frames, console lines", () => {
-    expect(Object.fromEntries(Object.entries(TOPIC_PATTERNS).map(([k, v]) => [k, v.source]))).toEqual(
-      Object.fromEntries(Object.entries(CONTRACT_TOPICS).map(([k, v]) => [k, v.source])),
-    );
-    expect(RealtimeEventType.options).toEqual(ContractEventType.options);
-    expect(json(ServerFrame)).toEqual(json(ContractServerFrame));
-    expect(json(ConsoleLinesEvent)).toEqual(json(ContractConsoleLines));
-    expect(Topic.safeParse(`server:${SERVER_ID}`).success).toBe(true);
-    expect(Topic.safeParse("server:nope").success).toBe(false);
-  });
-  it("shell payload schemas match REALTIME_EVENT_PAYLOADS entry by entry", () => {
-    for (const [type, schema] of Object.entries(SHELL_EVENT_PAYLOADS)) {
-      const contract = REALTIME_EVENT_PAYLOADS[type as keyof typeof REALTIME_EVENT_PAYLOADS];
-      expect(json(schema), type).toEqual(json(contract));
-    }
-  });
-  it("permission name and relative-path rules", () => {
-    expect(EXTENSIONS_VIEW).toBe(EXTENSIONS_READ_PERMISSION);
-    const corpus = [
-      "",
-      ".",
-      "./",
-      "a",
-      "a/b",
-      "/abs",
-      "\\abs",
-      "C:\\x",
-      "c:/x",
-      "a/../b",
-      "..",
-      "a\\..\\b",
-      "a\u0000b",
-      "x".repeat(1024),
-      "x".repeat(1025),
-      "plugins/x.jar",
-      " ./world",
-    ];
-    for (const p of corpus) {
-      expect(isRelativePath(p), JSON.stringify(p)).toBe(RelativePath.safeParse(p).success);
-      expect(isMutableRelativePath(p), JSON.stringify(p)).toBe(MutableRelativePath.safeParse(p).success);
-    }
-  });
-  it("install dir per server software matches the Minecraft library", () => {
-    for (const s of ServerSoftware.options) expect(extensionInstallDir(s), s).toBe(extensionDirFor(s));
-    expect(extensionInstallDir(null)).toBeNull();
+describe("Plugins & mods tab permission", () => {
+  it("is the contract's read permission", () => {
+    expect(SERVER_TABS.find((t) => t.id === "extensions")?.anyOf).toEqual([EXTENSIONS_READ_PERMISSION]);
   });
 });
 

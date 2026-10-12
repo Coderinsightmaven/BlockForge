@@ -424,7 +424,23 @@ describe("Plugins & mods — updates, history, uploads", () => {
   it("checks for updates and applies the selected ones", async () => {
     const calls = routeFetch([
       ["GET", /\/extensions$/, ok(makeExtensionList())],
-      ["GET", /\/extensions\/updates/, ok(makeUpdates())],
+      [
+        "GET",
+        /\/extensions\/updates/,
+        ok({
+          ...makeUpdates(),
+          items: [
+            ...makeUpdates().items,
+            {
+              ...makeUpdates().items[0]!,
+              extensionId: EXT_ID_2,
+              path: "plugins/big.jar",
+              file: null,
+              problem: "TOO_LARGE",
+            },
+          ],
+        }),
+      ],
       ["POST", /\/updates\/apply$/, ok({ jobId: JOB_ID }, 202)],
       ["GET", /\/jobs\//, ok(job)],
     ]);
@@ -432,7 +448,14 @@ describe("Plugins & mods — updates, history, uploads", () => {
     wrap(<ExtensionsTab server={owner} me={makeMe()} />);
     await user.click(await screen.findByRole("tab", { name: "Updates" }));
     await user.click(screen.getByRole("button", { name: "Check for updates" }));
-    expect(await screen.findByText("2.21.0 → 2.22.0")).toBeTruthy();
+    expect((await screen.findAllByText("2.21.0 → 2.22.0")).length).toBe(2);
+    // Problems use the contract's descriptions; such updates can't be selected.
+    expect(
+      screen.getByText(/Can't be applied: The new version's file is larger than BlockForge installs/),
+    ).toBeTruthy();
+    expect(
+      (screen.getByRole("checkbox", { name: "Update plugins/big.jar" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     await user.click(screen.getByRole("checkbox", { name: "Update EssentialsX" }));
     await user.click(screen.getByRole("button", { name: /Apply 1 update/ }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/apply"))).toBe(true));
@@ -539,7 +562,9 @@ describe("Plugins & mods — updates, history, uploads", () => {
   });
 
   it("hides uploads when the list reports the policy off", async () => {
-    routeFetch([["GET", /\/extensions$/, ok(makeExtensionList({ uploads: { allowed: false, requireMetadata: true } }))]]);
+    routeFetch([
+      ["GET", /\/extensions$/, ok(makeExtensionList({ uploads: { allowed: false, requireMetadata: true } }))],
+    ]);
     wrap(<ExtensionsTab server={owner} me={makeMe()} />);
     expect(await screen.findByText("EssentialsX")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Upload .jar" })).toBeNull();

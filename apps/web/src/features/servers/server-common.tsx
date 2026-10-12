@@ -11,7 +11,7 @@ import {
   Square,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { SERVER_JOB_ERROR_CODES, canStartOperation } from "@blockforge/contracts";
+import { REALTIME_EVENT_PAYLOADS, SERVER_JOB_ERROR_CODES, canStartOperation } from "@blockforge/contracts";
 import type { JobLogLine, Server, ServerOperation } from "@blockforge/contracts";
 import { jobsApi, serversApi } from "@/lib/api/servers-api";
 import { describeError } from "@/lib/api/errors";
@@ -35,7 +35,6 @@ import { Meter } from "@/components/ui/meter";
 import { JOB_STATUS_META, StatusBadge, statusMeta } from "@/components/ui/status";
 import { InfoTip, Tooltip } from "@/components/ui/tooltip";
 import { JobLog } from "./job-log";
-import { SHELL_EVENT_PAYLOADS } from "@/lib/realtime/payloads";
 
 // ---------------------------------------------------------------------------------------------
 // Power
@@ -291,11 +290,11 @@ export function JobProgress({ jobId, title }: { jobId: string; title: string }) 
 
   useRealtimeTopic(`job:${jobId}`, (event) => {
     if (event.type === "job.updated") {
-      const parsed = SHELL_EVENT_PAYLOADS["job.updated"].safeParse(event.data);
+      const parsed = REALTIME_EVENT_PAYLOADS["job.updated"].safeParse(event.data);
       if (parsed.success) queryClient.setQueryData(qk.jobs.detail(jobId), parsed.data);
       else void queryClient.invalidateQueries({ queryKey: qk.jobs.detail(jobId) });
     } else if (event.type === "job.log") {
-      const parsed = SHELL_EVENT_PAYLOADS["job.log"].safeParse(event.data);
+      const parsed = REALTIME_EVENT_PAYLOADS["job.log"].safeParse(event.data);
       if (parsed.success && parsed.data.jobId === jobId) {
         const { jobId: _j, ...line } = parsed.data;
         setLogs((p) => mergeJobLogs(p, [line]));
@@ -425,7 +424,7 @@ export function PowerJobNotice({
   });
   useRealtimeTopic(`job:${jobId}`, (event) => {
     if (event.type !== "job.updated") return;
-    const parsed = SHELL_EVENT_PAYLOADS["job.updated"].safeParse(event.data);
+    const parsed = REALTIME_EVENT_PAYLOADS["job.updated"].safeParse(event.data);
     if (parsed.success) queryClient.setQueryData(qk.jobs.detail(jobId), parsed.data);
   });
   const data = job.data;

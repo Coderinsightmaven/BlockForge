@@ -1,8 +1,17 @@
 import { z } from "zod";
 import { EpochMs, Id } from "../common.js";
+import type { Permission } from "../permissions.js";
 
-/* Realtime payloads of the extensions API, kept apart from `extensions.ts` so that `realtime.ts` (loaded on
- * every page of the web app) does not pull in the whole extensions API. Re-exported by `extensions.ts`. */
+/* Permission names and realtime payloads of the extensions API, kept apart from `extensions.ts` so that
+ * `realtime.ts` and the web app's tab gating (loaded on every page) do not pull in the whole extensions API.
+ * Re-exported by `extensions.ts`. */
+
+/**
+ * Permission checked for extension *reads* (list, search, project, plan, updates, history). Mutations need
+ * `servers.extensions.manage`.
+ */
+export const EXTENSIONS_READ_PERMISSION: Permission = "servers.extensions.view";
+export const EXTENSIONS_MANAGE_PERMISSION: Permission = "servers.extensions.manage";
 
 export const ExtensionScanStatus = z.object({
   status: z.enum(["never", "running", "completed", "failed"]),
