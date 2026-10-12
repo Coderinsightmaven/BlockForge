@@ -54,6 +54,7 @@ export const AIKAR_MIN_HEAP_BYTES = 4 * GiB;
 export interface LaunchIssue {
   code:
     | "FORBIDDEN_JVM_FLAG"
+    | "UNSUPPORTED_JVM_FLAG"
     | "HEAP_FLAG_CONFLICT"
     | "HEAP_ABOVE_LIMIT"
     | "HEAP_TOO_SMALL"
@@ -99,7 +100,15 @@ export function defaultHeapBytes(memoryLimitBytes: number): number {
   return Math.floor(Math.max(heap, floor) / MiB) * MiB;
 }
 
-/** Flags that load code, run commands or replace what the JVM executes. */
+/**
+ * JVM option policy (defence in depth — the image, argv and data mount are fixed by BlockForge):
+ *  - options that load code, run commands or read further options from files are forbidden;
+ *  - `-D` system properties must be on a tight allowlist (Java 8's `java.ext.dirs` /
+ *    `java.endorsed.dirs`, `java.library.path`, logging/security config files etc. load code);
+ *  - `-XX:` options are allowed except a denylist (GC/JIT tuning is legitimate and vast);
+ *  - other `-X` / `--` options must be on an allowlist.
+ * Denylist matching is case-insensitive.
+ */
 const FORBIDDEN_PREFIXES: ReadonlyArray<[string, string]> = [
   ["-javaagent", "loads a Java agent (arbitrary code)"],
   ["-agentlib", "loads a native agent library"],
@@ -108,6 +117,11 @@ const FORBIDDEN_PREFIXES: ReadonlyArray<[string, string]> = [
   ["-xx:onerror", "runs a command on a fatal JVM error"],
   ["-xx:vmoptionsfile", "reads further JVM options from a file"],
   ["-xx:flags", "reads further JVM options from a file"],
+  ["-xx:+enabledynamicagentloading", "allows loading agents at runtime"],
+  ["-xx:crac", "restores a process image from a checkpoint file"],
+  ["-xx:sharedarchivefile", "maps a class-data archive from a file"],
+  ["-xx:aot", "loads ahead-of-time compiled code from a file"],
+  ["-xx:jvmcilibpath", "loads a native compiler library"],
   ["-xbootclasspath", "changes the boot class path"],
   ["-jar", "changes the launched program"],
   ["-cp", "changes the class path"],
@@ -116,18 +130,74 @@ const FORBIDDEN_PREFIXES: ReadonlyArray<[string, string]> = [
   ["--module-path", "changes the module path"],
   ["--upgrade-module-path", "changes the module path"],
   ["--patch-module", "patches JDK modules"],
+  ["--module", "changes the launched program"],
+  ["-m", "changes the launched program"],
+  ["--source", "launches a source file"],
   ["-p", "changes the module path"],
   ["-djava.system.class.loader", "replaces the system class loader"],
+  ["-djava.ext.dirs", "loads extension jars (Java 8)"],
+  ["-djava.endorsed.dirs", "overrides JDK classes with jars from a directory (Java 8)"],
+  ["-djava.library.path", "loads native libraries from a directory"],
+  ["-djava.class.path", "changes the class path"],
+  ["-djava.home", "changes the Java installation"],
+  ["-djava.security.", "changes the security manager or policy"],
+  ["-djava.rmi.server.codebase", "loads remote classes"],
+  ["-djava.util.logging.config", "loads logging configuration code"],
+  ["-dlog4j.configuration", "loads a logging configuration file"],
+  ["-dlog4j2.configuration", "loads a logging configuration file"],
   ["-djdk.attach.allowattachself", "allows self-attach of agents"],
-  ["-xx:+enabledynamicagentloading", "allows loading agents at runtime"],
+  ["-djna.library.path", "loads native libraries from a directory"],
+  ["-dorg.lwjgl.librarypath", "loads native libraries from a directory"],
+  ["-dio.netty.native.workdir", "loads native libraries from a directory"],
   ["-splash", "GUI option"],
 ];
 
+/** Options that are only forbidden as the whole token (or `--opt=value`), not as a prefix. */
+const EXACT_OPTIONS = new Set(["-p", "-cp", "-jar", "-m", "-classpath", "--class-path", "--module-path", "--upgrade-module-path", "--patch-module", "--module", "--source"]);
+
+/** `-D` properties users may set (exact names). */
+export const SYSTEM_PROPERTY_ALLOWLIST: ReadonlySet<string> = new Set([
+  "file.encoding",
+  "sun.jnu.encoding",
+  "sun.stdout.encoding",
+  "sun.stderr.encoding",
+  "stdout.encoding",
+  "stderr.encoding",
+  "user.timezone",
+  "user.language",
+  "user.country",
+  "user.region",
+  "java.awt.headless",
+  "java.net.preferIPv4Stack",
+  "java.net.preferIPv6Addresses",
+  "terminal.jline",
+  "terminal.ansi",
+  "jline.terminal",
+  "log4j2.formatMsgNoLookups",
+  "log4j.skipJansi",
+  "log4j2.skipJansi",
+  "com.mojang.eula.agree",
+  "using.aikars.flags",
+  "aikars.new.flags",
+  "disable.watchdog",
+  "IReallyKnowWhatIAmDoingISwear",
+  "io.netty.leakDetection.level",
+  "io.netty.leakDetectionLevel",
+  "io.netty.eventLoopThreads",
+  "io.netty.allocator.type",
+  "io.netty.transport.noNative",
+  "io.netty.tryReflectionSetAccessible",
+]);
+
+/** `-D` property prefixes owned by the server software itself (case-sensitive). */
+export const SYSTEM_PROPERTY_PREFIXES: readonly string[] = ["paper.", "Paper.", "purpur.", "velocity.", "fml.", "forge.", "neoforge.", "fabric.log."];
+
+/** Non-`-XX` options users may pass: exact tokens, or prefixes followed by a value. */
+const OTHER_OPTIONS_EXACT = new Set(["-server", "-client", "-d64", "-ea", "-da", "-esa", "-dsa", "-enableassertions", "-disableassertions", "-xint", "-xbatch", "-xcomp", "-xmixed", "-xrs", "-xnoclassgc", "-xdiag", "-xcheck:jni", "-verbose", "-showversion", "--enable-preview"]);
+const OTHER_OPTIONS_PREFIX = ["-xss", "-xmn", "-xlog:", "-xshare:", "-verbose:", "--add-opens=", "--add-exports=", "--add-reads=", "--add-modules=", "--enable-native-access=", "--illegal-access=", "--sun-misc-unsafe-memory-access=", "-ea:", "-da:"];
+
 const HEAP_SIZING = ["-xx:maxrampercentage", "-xx:initialrampercentage", "-xx:minrampercentage", "-xx:maxram="];
 const GC_FLAGS = ["-XX:+UseG1GC", "-XX:+UseZGC", "-XX:+UseShenandoahGC", "-XX:+UseParallelGC", "-XX:+UseSerialGC", "-XX:+UseEpsilonGC"];
-
-/** Options that are only forbidden as the whole token (or `--opt=value`), not as a prefix. */
-const EXACT_OPTIONS = new Set(["-p", "-cp", "-jar", "-classpath", "--class-path", "--module-path", "--upgrade-module-path", "--patch-module"]);
 
 function forbiddenReason(arg: string): string | null {
   const a = arg.toLowerCase();
@@ -139,6 +209,20 @@ function forbiddenReason(arg: string): string | null {
     }
   }
   return null;
+}
+
+/** Why an option is not allowed, or null when it is on the allowlist. */
+function notAllowedReason(arg: string): string | null {
+  const a = arg.toLowerCase();
+  if (arg.startsWith("-D")) {
+    const name = arg.slice(2).split("=")[0]!;
+    if (name === "") return "is an empty system property";
+    if (SYSTEM_PROPERTY_ALLOWLIST.has(name) || SYSTEM_PROPERTY_PREFIXES.some((p) => name.startsWith(p) && name.length > p.length)) return null;
+    return `sets system property "${name}", which is not on BlockForge's allowlist`;
+  }
+  if (a.startsWith("-xx:")) return /^-XX:[+-]?[A-Za-z0-9_]+(=\S*)?$/.test(arg) ? null : "is not a well-formed -XX option";
+  if (OTHER_OPTIONS_EXACT.has(a) || OTHER_OPTIONS_PREFIX.some((p) => a.startsWith(p) && a.length > p.length)) return null;
+  return "is not on BlockForge's JVM option allowlist";
 }
 
 export interface ValidatedJvmArgs {
@@ -166,6 +250,12 @@ export function validateJvmArgs(extra: readonly string[], memoryLimitBytes: numb
       continue;
     }
     const lower = arg.toLowerCase();
+    const heapFlag = lower.startsWith("-xmx") || lower.startsWith("-xms") || HEAP_SIZING.some((p) => lower.startsWith(p));
+    const notAllowed = heapFlag ? null : notAllowedReason(arg);
+    if (notAllowed) {
+      issues.push({ code: "UNSUPPORTED_JVM_FLAG", severity: "error", message: `${arg.split("=")[0]} ${notAllowed}.`, arg });
+      continue;
+    }
     if (lower.startsWith("-xmx") || lower.startsWith("-xms")) {
       const size = parseJvmSize(arg.slice(4));
       if (size === null) {
@@ -208,6 +298,8 @@ export interface LaunchSpec {
   image: string;
   command: string[];
   stopCommand: "stop" | "end";
+  /** `WorkloadSpec.stop`: console command written to stdin. */
+  stop: { type: "command"; command: "stop" | "end" };
   env: Record<string, string>;
   heapMaxBytes: number;
   javaMajor: number;
@@ -299,6 +391,7 @@ export function buildLaunchSpec(input: LaunchInput): LaunchSpec {
     image: javaImage(javaMajor),
     command,
     stopCommand: stopCommandFor(input.software),
+    stop: { type: "command", command: stopCommandFor(input.software) },
     env,
     heapMaxBytes: heap,
     javaMajor,

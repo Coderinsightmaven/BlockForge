@@ -85,8 +85,7 @@ describe("parseEgg on real eggs (pterodactyl/panel @ 9b97ae11, pelican-eggs/* @ 
   it("PLCN_v3 (Valheim): startup_commands, rules arrays, /bin/bash entrypoint", () => {
     const p = parse("pelican-games-steamcmd-egg-valheim.json");
     const t = p.template!;
-    expect(t.sourceFormat).toBe("PLCN_v1");
-    expect(codes(p.issues, "info")).toContain("SOURCE_FORMAT_RECORDED_AS_PLCN_V1");
+    expect(t.sourceFormat).toBe("PLCN_v3");
     expect(t.startup).toMatch(/^\.\/valheim_server\.x86_64 -nographics/);
     expect(t.variables.find((v) => v.envName === "AUTO_UPDATE")?.rules).toBe("boolean");
     expect(p.imagesNeedingAllowlist).toEqual(["ghcr.io/parkervcp/games:valheim"]);
@@ -97,6 +96,8 @@ describe("parseEgg on real eggs (pterodactyl/panel @ 9b97ae11, pelican-eggs/* @ 
 
   it("PLCN_v1 (FiveM) and PLCN_v2 (Trackmania, Factorio ARM)", () => {
     const five = parse("pelican-games-standalone-egg-five-m.json").template!;
+    expect(five.sourceFormat).toBe("PLCN_v1");
+    expect(parse("pelican-games-standalone-egg-factorio-a-r-m64.json").template!.sourceFormat).toBe("PLCN_v2");
     expect(five.configFiles[0]!.parser).toBe("file");
     expect(five.configFiles[0]!.find["sv_maxclients"]).toBe("sv_maxclients {{server.environment.MAX_PLAYERS}}");
     expect(five.variables.find((v) => v.envName === "MAX_PLAYERS")?.rules).toBe("required|integer|between:1,48");

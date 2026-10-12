@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { SoftwareBuild, SoftwareInfo } from "@blockforge/contracts";
 import { CatalogError } from "../errors.js";
-import { type CatalogContext, assertHttpsUrl, getJson, getText, parseJson } from "../http.js";
+import { type CatalogContext, assertArtifactUrl, getJson, getText, parseJson } from "../http.js";
 import { javaMajorFromTable, requiredJavaMajor } from "../java.js";
 import { isAtLeast, parseMinecraftVersion } from "../versions.js";
 import { type CatalogVersion, type ResolvedArtifact, type SoftwareAdapter, toAgentChecksum } from "./types.js";
@@ -56,7 +56,6 @@ export async function getMojangVersion(ctx: CatalogContext, id: string): Promise
   const manifest = await getMojangManifest(ctx);
   const entry = manifest.versions.find((v) => v.id === id);
   if (!entry) throw new CatalogError("NOT_FOUND", `unknown Minecraft version: ${id}`);
-  assertHttpsUrl(entry.url);
   const text = await getText(ctx, entry.url);
   if (entry.sha1) {
     const actual = await sha1Hex(text);
@@ -136,6 +135,7 @@ export function createVanillaAdapter(): SoftwareAdapter {
       const v = await getMojangVersion(ctx, version);
       const server = v.downloads["server"];
       if (!server) return [];
+      assertArtifactUrl(ctx, server.url);
       const build: SoftwareBuild = {
         build: v.id,
         channel: v.type === "release" ? "stable" : "experimental",
@@ -157,7 +157,7 @@ export function createVanillaAdapter(): SoftwareAdapter {
       if (!server) {
         throw new CatalogError("UNAVAILABLE", `Mojang publishes no server download for ${version}`);
       }
-      assertHttpsUrl(server.url);
+      assertArtifactUrl(ctx, server.url);
       const java = requiredJavaMajor({ software: "vanilla", version, mojangMajor: v.javaVersion?.majorVersion ?? null });
       const checksum = { algorithm: "sha1" as const, value: server.sha1 };
       const artifact: ResolvedArtifact = {

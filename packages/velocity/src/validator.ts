@@ -98,6 +98,15 @@ export function validateNetwork(input: NetworkModelInput | NetworkModel, opts: {
   const names = new Map<string, number>();
   for (const b of model.backends) names.set(b.name, (names.get(b.name) ?? 0) + 1);
   for (const [n, count] of names) if (count > 1) add("error", "DUPLICATE_BACKEND_NAME", n, `Backend name "${n}" is used ${count} times.`);
+  // Plan keys: proxy → serverId ?? "proxy", backend → serverId ?? name. They address files and
+  // rollout steps, so every key must be unique across the whole network.
+  const keys = new Map<string, string[]>();
+  const addKey = (k: string, who: string) => keys.set(k, [...(keys.get(k) ?? []), who]);
+  if (proxy) addKey(proxy.serverId ?? "proxy", "proxy");
+  for (const b of model.backends) addKey(b.serverId ?? b.name, b.name);
+  for (const [k, who] of keys) {
+    if (who.length > 1) add("error", "DUPLICATE_SERVER_ID", who.join(","), `${who.join(", ")} share the server id "${k}"; every proxy and backend needs its own server.`);
+  }
   const addrs = new Map<string, string[]>();
   for (const b of model.backends) {
     const k = `${b.host.toLowerCase()}:${b.port}`;
@@ -112,17 +121,31 @@ export function validateNetwork(input: NetworkModelInput | NetworkModel, opts: {
       add("error", "BACKEND_IS_PROXY", b.name, "A Velocity proxy cannot be registered as a backend server.");
       continue;
     }
+    // Isolation: only "not published + on a bf-* network shared with the proxy" keeps a backend
+    // unreachable for anyone but the proxy. A private/LAN or loopback binding is not isolation
+    // (every LAN host / local process can connect) unless an operator verified an ingress allowlist.
+    const sharesInternalNetwork = !!proxy && b.networks.some((n) => proxy.networks.includes(n));
+    const isolated = (!b.published && sharesInternalNetwork) || b.ingressAllowlistVerified;
     if (b.published) {
       const exposure = bindExposure(b.published.hostIp);
-      if (exposure === "public" && b.onlineMode === false) {
+      const where = `${b.published.hostIp}:${b.published.hostPort}`;
+      const unauthenticated = mode === "none" || mode === "legacy" || mode === null;
+      if (b.onlineMode === false && exposure === "public" && !b.ingressAllowlistVerified) {
         add(
           "error",
           "BACKEND_PUBLIC_OFFLINE",
           b.name,
-          `Backend is published on ${b.published.hostIp}:${b.published.hostPort} with online-mode=false: players can bypass the proxy${mode === "modern" ? " (modern forwarding rejects unforwarded logins, but the port should still be private)" : " and join as anyone"}. Bind it to a private interface or the internal network only.`,
+          `Backend is published on ${where} with online-mode=false: players can bypass the proxy${mode === "modern" ? " (modern forwarding rejects unforwarded logins, but the port should still be private)" : " and join as anyone"}. Use the internal network only, or verify an ingress allowlist.`,
         );
-      } else if (exposure === "public") {
-        add("warning", "BACKEND_PUBLICLY_REACHABLE", b.name, `Backend is published on ${b.published.hostIp}:${b.published.hostPort}; players can connect directly, bypassing the proxy.`);
+      } else if (b.onlineMode === false && unauthenticated && !b.ingressAllowlistVerified) {
+        add(
+          "error",
+          "BACKEND_LAN_OFFLINE",
+          b.name,
+          `Backend is published on ${where} (${exposure}) with online-mode=false and no forwarding secret: anyone on that network can join as any player. A private or loopback binding is not isolation; attach it to the proxy's internal network instead, or verify an ingress allowlist.`,
+        );
+      } else if (exposure === "public" && !b.ingressAllowlistVerified) {
+        add("warning", "BACKEND_PUBLICLY_REACHABLE", b.name, `Backend is published on ${where}; players can connect directly, bypassing the proxy.`);
       }
     }
     if (b.onlineMode === true) {
@@ -142,11 +165,17 @@ export function validateNetwork(input: NetworkModelInput | NetworkModel, opts: {
       if (s.level === "unsupported") add("error", "FORWARDING_UNSUPPORTED", b.name, `${b.software} ${b.minecraftVersion} cannot use ${mode} forwarding: ${s.notes[0] ?? ""}`.trim());
       else if (s.level === "unknown") add("warning", "FORWARDING_SUPPORT_UNKNOWN", b.name, s.notes[0] ?? `${mode} forwarding support for ${b.software} ${b.minecraftVersion} is unconfirmed.`);
       else if (s.level === "mod" || s.level === "plugin") add("info", "FORWARDING_REQUIRES_EXTENSION", b.name, `Requires ${s.requires.join(" + ")} on ${b.name}.`);
-      if (mode === "legacy" || mode === "bungeeguard") {
-        const exposed = b.published ? bindExposure(b.published.hostIp) : "internal";
-        if (mode === "legacy" && exposed === "public") {
-          add("error", "LEGACY_FORWARDING_WITHOUT_ISOLATION", b.name, "Legacy forwarding with a publicly reachable backend lets anyone spoof any player (including operators). Make the backend reachable only from the proxy.");
-        } else if (mode === "legacy") {
+      if (mode === "legacy" && s.level !== "unsupported") {
+        if (!isolated) {
+          add(
+            "error",
+            "LEGACY_FORWARDING_WITHOUT_ISOLATION",
+            b.name,
+            b.published
+              ? `Legacy forwarding with a backend published on ${b.published.hostIp}:${b.published.hostPort} lets anyone who can reach that address spoof any player (including operators). Unpublish it and attach it to the proxy's internal bf-* network, or verify an ingress allowlist.`
+              : "Legacy forwarding needs the backend to be reachable only from the proxy: attach it to an internal bf-* network shared with the proxy (it is not on one), or verify an ingress allowlist.",
+          );
+        } else {
           add("info", "LEGACY_FORWARDING_INSECURE", b.name, "Legacy forwarding relies entirely on network isolation; keep this backend reachable only from the proxy.");
         }
       }

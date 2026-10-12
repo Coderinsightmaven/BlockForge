@@ -29,24 +29,4 @@ export function listSoftwareInfo(catalog: Catalog = createCatalog()): SoftwareIn
   return Object.values(catalog).map((a) => a.info);
 }
 
-/** Hosts the catalogue fetches metadata and artifacts from (for SSRF allowlists). */
-export const CATALOG_HOSTS = {
-  metadata: [
-    "piston-meta.mojang.com",
-    "fill.papermc.io",
-    "api.purpurmc.org",
-    "meta.fabricmc.net",
-    "files.minecraftforge.net",
-    "maven.minecraftforge.net",
-    "maven.neoforged.net",
-  ],
-  artifacts: [
-    "piston-data.mojang.com",
-    "launcher.mojang.com",
-    "fill-data.papermc.io",
-    "api.purpurmc.org",
-    "meta.fabricmc.net",
-    "maven.minecraftforge.net",
-    "maven.neoforged.net",
-  ],
-} as const;
+export { CATALOG_HOSTS } from "./hosts.js";

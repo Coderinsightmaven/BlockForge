@@ -91,9 +91,12 @@ export class TomlDocument {
   private lines: Line[];
   private stmts: Stmt[];
   readonly eol: "\n" | "\r\n";
+  /** A leading UTF-8 byte order mark is kept out of the lines and written back unchanged. */
+  private readonly bom: boolean;
 
-  private constructor(lines: Line[]) {
+  private constructor(lines: Line[], bom: boolean) {
     this.lines = lines;
+    this.bom = bom;
     this.stmts = scanStatements(lines);
     const crlf = lines.filter((l) => l.eol === "\r\n").length;
     const lf = lines.filter((l) => l.eol === "\n").length;
@@ -102,19 +105,24 @@ export class TomlDocument {
 
   /** Parses text; throws TomlSyntaxError / TomlEditError for documents that are not valid TOML. */
   static parse(text: string): TomlDocument {
-    const doc = new TomlDocument(splitLines(text));
+    const bom = text.startsWith("\uFEFF");
+    const doc = new TomlDocument(splitLines(bom ? text.slice(1) : text), bom);
     doc.data();
     return doc;
   }
 
   toString(): string {
+    return (this.bom ? "\uFEFF" : "") + this.body();
+  }
+
+  private body(): string {
     return this.lines.map((l) => l.text + l.eol).join("");
   }
 
   /** Full semantic content (smol-toml). */
   data(): Record<string, unknown> {
     try {
-      return parseToml(this.toString()) as Record<string, unknown>;
+      return parseToml(this.body()) as Record<string, unknown>;
     } catch (cause) {
       throw new TomlEditError(`invalid TOML: ${(cause as Error).message}`, { cause });
     }

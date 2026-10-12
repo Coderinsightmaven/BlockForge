@@ -67,7 +67,7 @@ describe("Paper via Fill API v3 (fixtures captured 2026-10-11)", () => {
   });
 
   it("treats the sunset v2 API as an upstream error", async () => {
-    const ctx = ctxFor({ "https://api.papermc.io/v2/projects/paper": { status: 410, body: fixture("fill/v2-sunset.json") } });
+    const ctx = { ...ctxFor({ "https://api.papermc.io/v2/projects/paper": { status: 410, body: fixture("fill/v2-sunset.json") } }), metadataHosts: ["api.papermc.io"] };
     await expect(getJson(ctx, "https://api.papermc.io/v2/projects/paper", z.unknown())).rejects.toMatchObject({ code: "UPSTREAM_ERROR", status: 410 });
   });
 });

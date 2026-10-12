@@ -80,13 +80,16 @@ export function writeFabricProxyLiteConfig(current: string | null, opts: { secre
   };
 }
 
-/** config/proxy-compatible-forge.toml `[forwarding]`. */
-export function writePcfConfig(current: string | null, opts: { mode: "MODERN" | "BUNGEEGUARD" | "LEGACY"; secret: string | null }) {
+/**
+ * config/proxy-compatible-forge.toml `[forwarding]`. `mode: null` disables forwarding
+ * (`enabled = false`) and leaves the stored mode/secret untouched.
+ */
+export function writePcfConfig(current: string | null, opts: { mode: "MODERN" | "BUNGEEGUARD" | "LEGACY" | null; secret: string | null }) {
   return {
     path: BACKEND_FILES.pcf,
     ...editToml(current, (doc) => {
-      doc.setValue("forwarding", "enabled", true);
-      doc.setValue("forwarding", "mode", opts.mode);
+      doc.setValue("forwarding", "enabled", opts.mode !== null);
+      if (opts.mode !== null) doc.setValue("forwarding", "mode", opts.mode);
       if (opts.secret !== null) doc.setValue("forwarding", "secret", opts.secret);
     }),
   };
@@ -100,6 +103,10 @@ export interface BackendForwardingInput {
   secret: string | null;
   /** velocity.toml `online-mode` (Paper's `proxies.velocity.online-mode` must match it). */
   proxyOnlineMode: boolean;
+  /** velocity.toml `force-key-authentication` (drives the backend's `enforce-secure-profile`). Default true. */
+  proxyForceKeyAuthentication?: boolean;
+  /** Installed plugin/mod ids (Modrinth slugs), when known. */
+  installedExtensions?: readonly string[] | null;
   /** Current contents by path (null/absent = file does not exist yet). */
   files: Readonly<Record<string, string | null>>;
 }
@@ -137,8 +144,15 @@ export function backendForwardingFiles(input: BackendForwardingInput): BackendFo
   };
 
   // Every proxied backend runs in offline mode; the proxy authenticates players.
+  // enforce-secure-profile (1.19+): only modern forwarding carries the player's profile key to the
+  // backend, so it mirrors the proxy's force-key-authentication there and is off for every other
+  // mode (otherwise players are kicked for missing/invalid profile keys).
   const props = cur(BACKEND_FILES.serverProperties) ?? "";
-  const newProps = updatePropertiesText(props, { "online-mode": false });
+  const propEdits: Record<string, string | boolean> = { "online-mode": false };
+  if (isAtLeast(input.minecraftVersion, "1.19") !== false) {
+    propEdits["enforce-secure-profile"] = input.mode === "modern" ? (input.proxyForceKeyAuthentication ?? true) : false;
+  }
+  const newProps = updatePropertiesText(props, propEdits);
   if (newProps !== props) put({ path: BACKEND_FILES.serverProperties, content: newProps, changed: true, created: props === "" });
 
   const paperFamily = ["paper", "purpur", "folia"].includes(input.software);
@@ -160,9 +174,16 @@ export function backendForwardingFiles(input: BackendForwardingInput): BackendFo
   if (input.software === "fabric" && input.mode === "modern") {
     put(writeFabricProxyLiteConfig(cur(BACKEND_FILES.fabricProxyLite), { secret: input.secret! }));
   }
-  if ((input.software === "forge" || input.software === "neoforge") && input.mode !== "none" && support.requires.some((r) => r.startsWith("Proxy Compatible Forge"))) {
-    const mode = input.mode === "modern" ? "MODERN" : input.mode === "bungeeguard" ? "BUNGEEGUARD" : "LEGACY";
-    put(writePcfConfig(cur(BACKEND_FILES.pcf), { mode, secret: input.mode === "legacy" ? null : input.secret }));
+  if (input.software === "forge" || input.software === "neoforge") {
+    if (input.mode !== "none" && support.requiredExtensions.some((e) => e.id === "proxy-compatible-forge")) {
+      const mode = input.mode === "modern" ? "MODERN" : input.mode === "bungeeguard" ? "BUNGEEGUARD" : "LEGACY";
+      put(writePcfConfig(cur(BACKEND_FILES.pcf), { mode, secret: input.mode === "legacy" ? null : input.secret }));
+    } else if (input.mode === "none" && (cur(BACKEND_FILES.pcf) !== null || input.installedExtensions?.includes("proxy-compatible-forge"))) {
+      // PCF stays installed but must stop expecting forwarded logins.
+      put(writePcfConfig(cur(BACKEND_FILES.pcf), { mode: null, secret: null }));
+    } else if (input.mode === "legacy" && cur(BACKEND_FILES.pcf) !== null && !support.requiredExtensions.some((e) => e.id === "proxy-compatible-forge")) {
+      put(writePcfConfig(cur(BACKEND_FILES.pcf), { mode: null, secret: null }));
+    }
   }
   if (out.created.some((p) => p !== BACKEND_FILES.serverProperties)) {
     out.notes.push(`Created ${out.created.join(", ")} with only the forwarding keys; the server adds its remaining defaults on the next start (not verified for every version).`);

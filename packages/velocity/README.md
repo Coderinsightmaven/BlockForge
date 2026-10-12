@@ -19,7 +19,7 @@ No filesystem, process or network access.
 | Backend configs | `backendForwardingFiles(input)` (all file changes for a backend), `writePaperVelocityConfig` (`config/paper-global.yml` ≥ 1.19, `paper.yml` ≤ 1.18.2), `writeSpigotBungeecord`, `writeBungeeGuardConfig`, `writeFabricProxyLiteConfig`, `writePcfConfig`, `editYaml` (in-place scalar splicing; Document API for new keys), `BACKEND_FILES`, `SECRET_BEARING_FILES` |
 | Redaction | `redactFileForDisplay(path, text, { knownSecrets, secretFiles })` (structural per file type + generic `*secret*/*token*/*password*` lines + known-value replacement), `redactGenericLines`, `redactKnownSecrets`, `maskYamlPaths`, `REDACTED` |
 | Validation | `validateNetwork(model, { secret: SecretAssessment })` → `{ ok, issues, model, forcedHosts }`; `bindExposure(hostIp)` |
-| Plan | `planNetworkChanges({ model, current, secret })` → per server/file `beforeSha256` (for `fs.write ifMatchSha256`), `afterContent`, `afterSha256`, redacted unified `diff`, `sensitive`; per server `action` (`restart` for backends, `reload` = `velocity reload` for the proxy) and `blocked` reasons; ordered `rollout` (backends one at a time with readiness waits, proxy last); `diffLines` (Myers), `unifiedDiff`, `sha256Hex` |
+| Plan | `planNetworkChanges({ model, current, secret, extensions })` → per server/file `beforeSha256` (for `fs.write ifMatchSha256`), `afterContent`, `afterSha256`, redacted unified `diff`, `sensitive`; per server `action` (`restart` for backends, `reload` = `velocity reload` for the proxy) and `blocked` reasons; `strategy`: `coordinated` when the proxy’s forwarding mode/secret/online-mode/force-key-authentication changes (maintenance-gated: stop proxy → write all files → restart affected backends → start proxy; Velocity and Paper accept a single secret, so no dual-secret staging) or `rolling` otherwise (backends one at a time, then `velocity reload`); `rollout` steps carry a `group` (same group may run concurrently); any validation error, blocked server, missing required extension or installed conflicting extension (`extensions` = installed Modrinth ids per server) empties the rollout; `diffLines` (Myers), `unifiedDiff`, `sha256Hex` |
 
 ### Validator issue codes
 
@@ -29,7 +29,7 @@ No filesystem, process or network access.
 `BACKEND_PUBLIC_OFFLINE`, `BACKEND_PUBLICLY_REACHABLE`, `BACKEND_ONLINE_MODE`, `FORWARDING_UNSUPPORTED`,
 `FORWARDING_SUPPORT_UNKNOWN`, `FORWARDING_REQUIRES_EXTENSION`, `LEGACY_FORWARDING_WITHOUT_ISOLATION`,
 `LEGACY_FORWARDING_INSECURE`, `MIXED_MINECRAFT_VERSIONS`, `NO_DEFAULT_SERVER`, `TRY_TARGET_UNKNOWN`,
-`TRY_DUPLICATE`, `TRY_TARGET_NOT_IN_NETWORK`, `TRY_TARGET_DOWN`, `DUPLICATE_HOST_PORT`, and from
+`TRY_DUPLICATE`, `TRY_TARGET_NOT_IN_NETWORK`, `TRY_TARGET_DOWN`, `DUPLICATE_HOST_PORT`, `DUPLICATE_SERVER_ID`, `BACKEND_LAN_OFFLINE`, and from
 forced hosts `FORCED_HOST_INVALID`, `FORCED_HOST_WILDCARD`, `FORCED_HOST_DUPLICATE`,
 `FORCED_HOST_CONFLICT`, `FORCED_HOST_NO_TARGETS`, `FORCED_HOST_UNKNOWN_TARGET`,
 `FORCED_HOST_DUPLICATE_TARGET`, `FORCED_HOST_TARGET_NOT_IN_NETWORK`, `FORCED_HOST_TARGET_DOWN`,
@@ -50,6 +50,8 @@ forced hosts `FORCED_HOST_INVALID`, `FORCED_HOST_WILDCARD`, `FORCED_HOST_DUPLICA
 * FabricProxy-Lite README + Modrinth (1.16.5 – 26.3); Proxy Compatible Forge (Modrinth, Forge
   1.7.2 – 26.2 / NeoForge 1.20.1 – 26.2, `config/proxy-compatible-forge.toml`); NeoVelocity
   (NeoForge 1.21 – 1.21.11).
+
+Isolation: a backend counts as reachable only by the proxy when it is not published and shares a `bf-*` network with the proxy, or when an operator verified an ingress allowlist (`ingressAllowlistVerified`). LAN, private and loopback bindings are not isolation. YAML is edited through `@blockforge/eggs`’ source-level editor and never re-serialised (fail closed); TOML and YAML keep a UTF-8 BOM and CRLF.
 
 ## Known limitations
 

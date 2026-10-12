@@ -1,4 +1,4 @@
-import { RESERVED_ENV_VARS, TEMPLATE_PLACEHOLDERS } from "@blockforge/contracts";
+import { RESERVED_ENV_VARS, TEMPLATE_PLACEHOLDERS, TEMPLATE_PLACEHOLDER_PREFIXES } from "@blockforge/contracts";
 
 /**
  * `{{…}}` placeholders in config-file rules (Pterodactyl `EggConfigurationService` +
@@ -26,7 +26,8 @@ export interface PlaceholderContext {
 
 export const PLACEHOLDER_PATTERN = /\{\{\s*([\w.-]+)\s*\}\}/g;
 
-const ENV_PREFIXES = ["server.build.env.", "server.environment.", "server.build.environment.", "env."] as const;
+/** Contract prefixes plus Pelican's legacy `server.build.environment.` spelling (upgraded by its importer). */
+const ENV_PREFIXES: readonly string[] = [...TEMPLATE_PLACEHOLDER_PREFIXES, "server.build.environment."].sort((a, b) => b.length - a.length);
 
 /** Names every template may reference even though they are not declared variables. */
 export const PLATFORM_ENV_NAMES: readonly string[] = RESERVED_ENV_VARS;
@@ -36,13 +37,7 @@ export function envNameOfPlaceholder(key: string): string | null {
   return null;
 }
 
-const KNOWN_STATIC = new Set<string>([
-  ...TEMPLATE_PLACEHOLDERS,
-  "server.allocations.default.ip",
-  "server.allocations.default.port",
-  "server.build.memory_limit",
-  "config.docker.network.interface",
-]);
+const KNOWN_STATIC = new Set<string>([...TEMPLATE_PLACEHOLDERS, "config.docker.network.interface"]);
 
 /** Whether a config-file placeholder key is resolvable for a template declaring `variableNames`. */
 export function isKnownConfigPlaceholder(key: string, variableNames: ReadonlySet<string>): boolean {

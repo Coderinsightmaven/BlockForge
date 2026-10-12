@@ -64,7 +64,7 @@ describe("buildLaunchSpec", () => {
       env: s.env,
       memoryLimitBytes: 4 * GiB,
       cpuLimitMillicores: null,
-      stopCommand: s.stopCommand,
+      stop: s.stop,
       restartPolicy: { mode: "on-failure" },
     });
     expect(spec.command[0]).toBe("java");
@@ -154,6 +154,69 @@ describe("buildLaunchSpec", () => {
 
   it("validates arg counts", () => {
     expect(validateJvmArgs(Array.from({ length: 65 }, (_, i) => `-Dx${i}=1`), 4 * GiB).issues[0]?.code).toBe("INVALID_JVM_ARG");
+  });
+});
+
+describe("JVM option policy (review 2026-10-12 #2)", () => {
+  const java8 = { launch: { kind: "jar" as const, jar: "server.jar", programArgs: ["nogui"] }, java: { major: 8, source: "mojang" as const, notes: [] } };
+  const b8 = (extra: string[]) => () => buildLaunchSpec({ software: "vanilla", artifact: java8, memoryLimitBytes: 4 * GiB, jvmPreset: "default", extraJvmArgs: extra });
+
+  it("rejects Java 8 extension/endorsed directories in any letter case", () => {
+    for (const bad of ["-Djava.ext.dirs=/data/ext", "-Djava.endorsed.dirs=/data/endorsed", "-DJAVA.EXT.DIRS=/data", "-Djava.Endorsed.Dirs=x", "-Djava.ext.dirs"]) {
+      expect(errorCodes(b8([bad])), bad).toEqual(["FORBIDDEN_JVM_FLAG"]);
+    }
+    expect(b8(["-XX:+UseG1GC"])().image).toBe("eclipse-temurin:8-jre");
+    expect(errorCodes(b8(["-Xbootclasspath/a:/data/x.jar"]))).toEqual(["FORBIDDEN_JVM_FLAG"]);
+    expect(errorCodes(b8(["-Xbootclasspath/p:/data/x.jar"]))).toEqual(["FORBIDDEN_JVM_FLAG"]);
+  });
+
+  it("rejects other code-, native- and config-loading properties and options", () => {
+    for (const bad of [
+      "-Djava.library.path=/data/natives",
+      "-Djava.class.path=/data/x.jar",
+      "-Djava.security.manager=allow",
+      "-Dlog4j.configurationFile=/data/log4j2.xml",
+      "-Dlog4j2.configurationFile=/data/x.xml",
+      "-Djava.util.logging.config.class=Evil",
+      "-Dio.netty.native.workdir=/data",
+      "-XX:CRaCRestoreFrom=/data/cr",
+      "-XX:SharedArchiveFile=/data/app.jsa",
+      "-XX:AOTLibrary=/data/x.so",
+      "-XX:AOTCache=/data/app.aot",
+      "-m",
+      "--module=evil/Main",
+      "--source=11",
+    ]) {
+      expect(errorCodes(b8([bad])), bad).toEqual(["FORBIDDEN_JVM_FLAG"]);
+    }
+  });
+
+  it("only allows -D properties on the allowlist", () => {
+    for (const bad of ["-Dfoo=bar", "-Dsun.misc.URLClassPath.disableJarChecking=true", "-Dfabric.addMods=/data/x", "-Dpolyglot.engine.WarnInterpreterOnly=false", "-D=x", "-Dpaper.=1"]) {
+      expect(errorCodes(b8([bad])), bad).toEqual(["UNSUPPORTED_JVM_FLAG"]);
+    }
+    const ok = [
+      "-Dfile.encoding=UTF-8",
+      "-Duser.timezone=Europe/Berlin",
+      "-Dterminal.jline=false",
+      "-Dterminal.ansi=true",
+      "-Dlog4j2.formatMsgNoLookups=true",
+      "-Dpaper.playerconnection.keepalive=60",
+      "-DPaper.IgnoreJavaVersion=true",
+      "-Dfml.queryResult=confirm",
+      "-Dvelocity.packet-decode-logging=true",
+      "-Dcom.mojang.eula.agree=true",
+      "-Djava.net.preferIPv4Stack=true",
+    ];
+    expect(build({ extraJvmArgs: ok }).command).toEqual(expect.arrayContaining(ok));
+  });
+
+  it("allows common -X/-XX/-- options and rejects unknown ones", () => {
+    const ok = ["-Xss4M", "-Xlog:gc*:file=logs/gc.log:time,uptime:filecount=5,filesize=1M", "-XX:+UseStringDeduplication", "-XX:MaxGCPauseMillis=130", "--add-opens=java.base/java.lang=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED", "-ea", "-server"];
+    expect(build({ extraJvmArgs: ok }).command).toEqual(expect.arrayContaining(ok));
+    for (const bad of ["-Xverify:none", "--add-opens", "-XX:", "-XX:+Foo Bar", "-Xfoo", "--some-new-flag"]) {
+      expect(errorCodes(() => build({ extraJvmArgs: [bad] })), bad).toEqual(["UNSUPPORTED_JVM_FLAG"]);
+    }
   });
 });
 

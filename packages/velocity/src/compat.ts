@@ -27,11 +27,32 @@ import type { ForwardingMode } from "./model.js";
 
 export type SupportLevel = "native" | "plugin" | "mod" | "unsupported" | "unknown";
 
+/** A plugin/mod a forwarding mode depends on; `id` is the Modrinth project slug. */
+export interface ExtensionRef {
+  id: string;
+  name: string;
+  kind: "plugin" | "mod";
+}
+
+export const FORWARDING_EXTENSIONS = {
+  "fabricproxy-lite": { id: "fabricproxy-lite", name: "FabricProxy-Lite", kind: "mod" },
+  "fabric-api": { id: "fabric-api", name: "Fabric API", kind: "mod" },
+  "proxy-compatible-forge": { id: "proxy-compatible-forge", name: "Proxy Compatible Forge (PCF)", kind: "mod" },
+  modernmixins: { id: "modernmixins", name: "ModernMixins", kind: "mod" },
+  mixinbootstrap: { id: "mixinbootstrap", name: "MixinBootstrap", kind: "mod" },
+  bungeeguard: { id: "bungeeguard", name: "BungeeGuard plugin", kind: "plugin" },
+  bungeeforge: { id: "bungeeforge", name: "BungeeForge", kind: "mod" },
+} as const satisfies Record<string, ExtensionRef>;
+
+const EXTENSION_BY_NAME = new Map<string, ExtensionRef>(Object.values(FORWARDING_EXTENSIONS).map((e) => [e.name, e]));
+
 export interface ForwardingSupport {
   mode: ForwardingMode;
   level: SupportLevel;
-  /** Extensions that must be installed (plugins/mods). */
+  /** Extensions that must be installed (plugins/mods), display names. */
   requires: string[];
+  /** The same extensions with stable ids, for preflight checks against installed extensions. */
+  requiredExtensions: ExtensionRef[];
   /** Files BlockForge writes for this mode (relative to the server root). */
   configFiles: string[];
   steps: string[];
@@ -55,6 +76,7 @@ const NONE_SUPPORT = (software: ServerSoftware): ForwardingSupport => ({
   mode: "none",
   level: "native",
   requires: [],
+  requiredExtensions: [],
   configFiles: ["server.properties"],
   steps: ["Set online-mode=false in server.properties."],
   notes: [
@@ -63,7 +85,7 @@ const NONE_SUPPORT = (software: ServerSoftware): ForwardingSupport => ({
   ],
 });
 
-const unsupported = (mode: ForwardingMode, why: string): ForwardingSupport => ({ mode, level: "unsupported", requires: [], configFiles: [], steps: [], notes: [why] });
+const unsupported = (mode: ForwardingMode, why: string): ForwardingSupport => ({ mode, level: "unsupported", requires: [], requiredExtensions: [], configFiles: [], steps: [], notes: [why] });
 
 const ENFORCE_PROFILE_NOTE =
   "Minecraft 1.19.1+ chat signing: modern forwarding (Velocity forwarding versions 2–4) carries the player's signing key, so keep the backend's enforce-secure-profile consistent with velocity.toml force-key-authentication. Legacy and BungeeGuard forwarding do not carry the key; if players are kicked for chat validation, set enforce-secure-profile=false on that backend (guidance, not verified on every version).";
@@ -78,6 +100,7 @@ function paperFamily(software: ServerSoftware, v: string): CompatibilityReport["
           mode: "modern",
           level: "native",
           requires: [],
+          requiredExtensions: [],
           configFiles: [globalFile ? "config/paper-global.yml" : "paper.yml", "spigot.yml", "server.properties"],
           steps: globalFile
             ? [
@@ -107,6 +130,7 @@ function paperFamily(software: ServerSoftware, v: string): CompatibilityReport["
       mode: "legacy",
       level: "native",
       requires: [],
+      requiredExtensions: [],
       configFiles: ["spigot.yml", "server.properties"],
       steps: ["spigot.yml: settings.bungeecord = true", "server.properties: online-mode = false"],
       notes: ["Legacy (BungeeCord) forwarding is fundamentally insecure: anyone who can reach the backend port can claim any identity. The backend must only be reachable from the proxy [VEL]."],
@@ -115,6 +139,7 @@ function paperFamily(software: ServerSoftware, v: string): CompatibilityReport["
       mode: "bungeeguard",
       level: "plugin",
       requires: ["BungeeGuard plugin"],
+      requiredExtensions: [],
       configFiles: ["spigot.yml", "plugins/BungeeGuard/config.yml", "server.properties"],
       steps: ["spigot.yml: settings.bungeecord = true", "plugins/BungeeGuard/config.yml: allowed-tokens = [<forwarding secret>]", "server.properties: online-mode = false"],
       notes: ["BungeeGuard adds a shared token to legacy forwarding; still prefer modern forwarding on 1.13+ [VEL]."],
@@ -155,6 +180,7 @@ export function forwardingCompatibility(software: ServerSoftware, minecraftVersi
               mode: "modern",
               level: "mod",
               requires: ["FabricProxy-Lite", "Fabric API"],
+              requiredExtensions: [],
               configFiles: ["config/FabricProxy-Lite.toml", "server.properties"],
               steps: ["Install FabricProxy-Lite (and Fabric API) in mods/", "config/FabricProxy-Lite.toml: secret = <forwarding secret>", "server.properties: online-mode = false"],
               notes: [
@@ -183,6 +209,7 @@ export function forwardingCompatibility(software: ServerSoftware, minecraftVersi
             mode,
             level,
             requires,
+            requiredExtensions: [],
             configFiles: ["config/proxy-compatible-forge.toml", "server.properties"],
             steps: [
               "Install Proxy Compatible Forge in mods/",
@@ -205,6 +232,7 @@ export function forwardingCompatibility(software: ServerSoftware, minecraftVersi
               mode: "legacy",
               level: "mod",
               requires: ["BungeeForge"],
+              requiredExtensions: [],
               configFiles: ["server.properties"],
               steps: ["Install the BungeeForge build matching this Forge version in mods/", "server.properties: online-mode = false"],
               notes: ["Legacy forwarding is insecure without strict network isolation [VEL].", "Not tested by BlockForge."],
@@ -230,10 +258,26 @@ export function forwardingCompatibility(software: ServerSoftware, minecraftVersi
         ? "bungeeguard"
         : null;
   if (isAtLeast(v, "1.19.1") !== false) notes.push(ENFORCE_PROFILE_NOTE);
+  for (const m of Object.values(modes)) {
+    m.requiredExtensions = m.requires.map((n) => EXTENSION_BY_NAME.get(n)).filter((e): e is ExtensionRef => e !== undefined);
+  }
   return { software, minecraftVersion, modes, recommended, requiresOfflineMode: software !== "velocity", notes };
 }
 
 /** Whether `mode` can be used for this backend (native, plugin or mod support). */
 export function supportsForwarding(software: ServerSoftware, minecraftVersion: string, mode: ForwardingMode): SupportLevel {
   return forwardingCompatibility(software, minecraftVersion).modes[mode].level;
+}
+
+/**
+ * Installed extensions that break `mode` and must be removed first: FabricProxy-Lite always
+ * demands modern forwarding (it kicks every other login), the BungeeGuard plugin rejects logins
+ * without its token, BungeeForge expects legacy forwarding.
+ */
+export function conflictingExtensions(software: ServerSoftware, mode: ForwardingMode): ExtensionRef[] {
+  const out: ExtensionRef[] = [];
+  if (software === "fabric" && mode !== "modern") out.push(FORWARDING_EXTENSIONS["fabricproxy-lite"]);
+  if ((PAPER_FAMILY.includes(software) || software === "spigot") && mode !== "bungeeguard") out.push(FORWARDING_EXTENSIONS.bungeeguard);
+  if ((software === "forge" || software === "neoforge") && mode !== "legacy") out.push(FORWARDING_EXTENSIONS.bungeeforge);
+  return out;
 }

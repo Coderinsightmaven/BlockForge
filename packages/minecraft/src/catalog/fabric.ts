@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { SoftwareBuild, SoftwareInfo } from "@blockforge/contracts";
 import { CatalogError } from "../errors.js";
-import { type CatalogContext, assertHttpsUrl, getJson } from "../http.js";
+import { type CatalogContext, assertArtifactUrl, getJson } from "../http.js";
 import { javaMajorFromTable, requiredJavaMajor } from "../java.js";
 import { getMojangVersion } from "./mojang.js";
 import { type CatalogVersion, type ResolvedArtifact, type SoftwareAdapter, safeSegment, toAgentChecksum } from "./types.js";
@@ -121,7 +121,7 @@ export function createFabricAdapter(): SoftwareAdapter {
       const mojang = await getMojangVersion(ctx, version);
       const server = mojang.downloads["server"];
       if (!server) throw new CatalogError("UNAVAILABLE", `Mojang publishes no server download for ${version}`);
-      assertHttpsUrl(server.url);
+      assertArtifactUrl(ctx, server.url);
       const java = requiredJavaMajor({ software: "fabric", version, mojangMajor: mojang.javaVersion?.majorVersion ?? null });
       const vanillaSum = { algorithm: "sha1" as const, value: server.sha1 };
       const build_ = `${chosen.loader.version}/${installer}`;

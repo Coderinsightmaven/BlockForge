@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import type { TtlCache } from "./cache.js";
+import { CATALOG_HOSTS } from "./catalog/hosts.js";
 import { CatalogError } from "./errors.js";
 
 /** Injected fetch: the control plane owns timeouts, proxying and SSRF policy. */
@@ -16,9 +17,14 @@ export interface CatalogContext {
   /** Upper bound on a single metadata response body. Default 16 MiB. */
   maxResponseBytes?: number;
   signal?: AbortSignal;
+  /** Hosts metadata may be fetched from (every request and redirect hop). Default CATALOG_HOSTS.metadata. */
+  metadataHosts?: readonly string[];
+  /** Hosts download URLs found in upstream metadata may point to. Default CATALOG_HOSTS.artifacts. */
+  artifactHosts?: readonly string[];
 }
 
 export const DEFAULT_USER_AGENT = "BlockForge-catalogue/0.1 (+self-hosted Minecraft server manager)";
+const MAX_REDIRECTS = 5;
 
 export function assertHttpsUrl(url: string): URL {
   let u: URL;
@@ -32,22 +38,69 @@ export function assertHttpsUrl(url: string): URL {
   return u;
 }
 
+/**
+ * HTTPS URL on one of `hosts` (exact host match, default port only). IP literals (private,
+ * loopback, link-local or public) never match because the allowlists only contain DNS names.
+ */
+export function assertAllowedUrl(url: string, hosts: readonly string[], kind: "metadata" | "artifact" = "metadata"): URL {
+  const u = assertHttpsUrl(url);
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  if (u.port !== "" && u.port !== "443") throw new CatalogError("INVALID_ARGUMENT", `refusing ${kind} URL with a non-default port: ${url}`, { url });
+  if (!hosts.includes(host)) throw new CatalogError("INVALID_ARGUMENT", `refusing ${kind} URL on a host outside the catalogue allowlist: ${u.host}`, { url });
+  return u;
+}
+
+/** Validates a download URL taken from upstream metadata against the artifact host allowlist. */
+export function assertArtifactUrl(ctx: Pick<CatalogContext, "artifactHosts">, url: string): string {
+  try {
+    assertAllowedUrl(url, ctx.artifactHosts ?? CATALOG_HOSTS.artifacts, "artifact");
+  } catch (cause) {
+    throw new CatalogError("INVALID_UPSTREAM_RESPONSE", `upstream metadata points to a download outside the allowlist: ${url}`, { url, cause });
+  }
+  return url;
+}
+
 /** Fetches a URL as text (with caching). 404 → NOT_FOUND, other non-2xx → UPSTREAM_ERROR. */
 export async function getText(ctx: CatalogContext, url: string, accept = "application/json"): Promise<string> {
-  assertHttpsUrl(url);
+  const hosts = ctx.metadataHosts ?? CATALOG_HOSTS.metadata;
+  assertAllowedUrl(url, hosts);
   const cached = ctx.cache?.get(url);
   if (cached !== undefined) return cached;
   const load = async (): Promise<string> => {
     let res: Response;
-    try {
-      const init: RequestInit = {
-        method: "GET",
-        headers: { accept, "user-agent": ctx.userAgent ?? DEFAULT_USER_AGENT },
-      };
-      if (ctx.signal) init.signal = ctx.signal;
-      res = await ctx.fetch(url, init);
-    } catch (cause) {
-      throw new CatalogError("UPSTREAM_ERROR", `request failed: ${url}`, { url, cause });
+    let current = url;
+    for (let hop = 0; ; hop++) {
+      try {
+        const init: RequestInit = {
+          method: "GET",
+          redirect: "manual",
+          headers: { accept, "user-agent": ctx.userAgent ?? DEFAULT_USER_AGENT },
+        };
+        if (ctx.signal) init.signal = ctx.signal;
+        res = await ctx.fetch(current, init);
+      } catch (cause) {
+        throw new CatalogError("UPSTREAM_ERROR", `request failed: ${current}`, { url: current, cause });
+      }
+      if (res.type === "opaqueredirect") {
+        throw new CatalogError("UPSTREAM_ERROR", `upstream redirected and the target cannot be inspected: ${current}`, { url: current });
+      }
+      if (res.status < 300 || res.status >= 400 || res.status === 304) break;
+      const location = res.headers.get("location");
+      if (!location) throw new CatalogError("UPSTREAM_ERROR", `redirect without Location from ${current}`, { url: current, status: res.status });
+      if (hop + 1 > MAX_REDIRECTS) throw new CatalogError("UPSTREAM_ERROR", `too many redirects from ${url}`, { url });
+      let next: string;
+      try {
+        next = new URL(location, current).href;
+      } catch (cause) {
+        throw new CatalogError("UPSTREAM_ERROR", `invalid redirect target from ${current}`, { url: current, cause });
+      }
+      try {
+        assertAllowedUrl(next, hosts);
+      } catch (cause) {
+        throw new CatalogError("UPSTREAM_ERROR", `refusing redirect from ${current} to ${next}`, { url: current, status: res.status, cause });
+      }
+      await res.body?.cancel().catch(() => undefined);
+      current = next;
     }
     if (res.status === 404) throw new CatalogError("NOT_FOUND", `not found upstream: ${url}`, { url, status: 404 });
     if (!res.ok) {

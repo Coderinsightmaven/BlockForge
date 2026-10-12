@@ -18,6 +18,8 @@ web-standard globals (`fetch`, `TextEncoder`, Web Crypto) are used.
 | Launch | `buildLaunchSpec` → `{ image, command, stopCommand, env, heapMaxBytes, javaMajor, warnings }`, `buildInstallerSpec`, `validateJvmArgs`, `defaultHeapBytes`, `AIKAR_FLAGS` |
 | Logs | `parseLogLine`, `detectLogLevel`, `detectLogEvents` (ready, player join/leave/login/uuid/disconnect, Velocity proxy connect/switch/disconnect, crash indicators, Java version mismatch, port bind failure, EULA required, Paper TPS), `detectReadiness`, `detectCrashIndicator`, `parsePaperTps`, `tokenizeFormatting` / `stripFormatting` (`§` codes + ANSI → plain segments with style, never HTML) |
 | EULA / world | `generateEula`, `isEulaAccepted`, `validateSeed`, `javaStringHashCode`, `validateLevelType`, `validateLevelName`, `WORLD_PRESETS` |
+| Provisioning | `buildMinecraftProvisioning(input)` → `{ downloads (artifact.fetch payloads, cache: true), install (Forge/NeoForge `workload.install` payload) | null, workload: WorkloadSpec, files (server.properties, eula.txt, velocity.toml bind), deferredFiles, gamerules, warnings }`; `setVelocityBind` |
+| Fetch boundary | Every metadata request and redirect hop must be HTTPS on `CATALOG_HOSTS.metadata` (`redirect: "manual"`, max 5 hops); download URLs taken from upstream JSON must be on `CATALOG_HOSTS.artifacts` (`assertAllowedUrl`, `assertArtifactUrl`; override via `CatalogContext.metadataHosts/artifactHosts`). |
 
 ### Install / launch plans
 
@@ -58,6 +60,10 @@ Docker Desktop bind mount and ~2 minutes on a named volume: give installer jobs 
 * Log formats: real console output of Velocity 4.2.0, Paper 26.3, Forge, NeoForge, Fabric and
   vanilla; join/leave/ready strings from the 26.3 jar (`en_us.json`, `PlayerList`,
   `DedicatedServer`), Velocity 4.2.0 sources, Paper `TicksPerSecondCommand`.
+
+## JVM option policy
+
+Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option files, boot/class/module path changes, `-m`/`--module`/`--source`, Java 8 `-Djava.ext.dirs`/`-Djava.endorsed.dirs`, `java.library.path`, security/logging config files, CRaC/CDS/AOT/JVMCI files. `-D` properties must be on `SYSTEM_PROPERTY_ALLOWLIST` or start with a software prefix (`paper.`, `Paper.`, `purpur.`, `velocity.`, `fml.`, `forge.`, `neoforge.`, `fabric.log.`); other `-X`/`--` options are allowlisted; `-XX:` tuning is allowed apart from the denylist.
 
 ## Known limitations
 

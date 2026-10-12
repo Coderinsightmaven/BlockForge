@@ -65,8 +65,12 @@ export type ProxySettings = z.infer<typeof ProxySettings>;
 
 export const ServerRuntimeState = z.enum(["running", "starting", "stopped", "crashed", "provisioning", "unknown"]);
 
+/** Agent bridge networks (`bf-*`) a container is attached to. */
+const InternalNetworks = z.array(z.string().regex(/^bf-[a-z0-9-]{1,60}$/)).max(8).default([]);
+
 export const ProxyNode = z.object({
   name: z.string().min(1).max(80),
+  networks: InternalNetworks,
   serverId: z.string().nullable().default(null),
   nodeId: z.string().nullable().default(null),
   velocityVersion: z.string().nullable().default(null),
@@ -92,6 +96,12 @@ export const BackendServer = z.object({
   state: ServerRuntimeState.default("unknown"),
   /** false = registered in velocity.toml but no longer a member of this network. */
   inNetwork: z.boolean().default(true),
+  networks: InternalNetworks,
+  /**
+   * An operator-verified ingress allowlist (host firewall) restricts the published port to the
+   * proxy. Only then may an unauthenticated (legacy / no forwarding) backend be published at all.
+   */
+  ingressAllowlistVerified: z.boolean().default(false),
 });
 export type BackendServer = z.infer<typeof BackendServer>;
 

@@ -98,15 +98,39 @@ describe("validateNetwork", () => {
     expect(r.issues.filter((i) => i.code === "FORWARDING_SUPPORT_UNKNOWN").map((i) => i.subject)).toEqual(["modded"]);
   });
 
-  it("requires network isolation for legacy forwarding", () => {
+  it("requires real isolation for legacy forwarding: LAN/private bindings do not count (review #5)", () => {
     const m = base();
     m.proxy!.settings = { forwardingMode: "legacy" };
+    m.proxy!.networks = ["bf-net-1"];
     m.backends = [{ name: "lobby", host: "bf-lobby", port: 25565, software: "spigot", minecraftVersion: "1.21.11", onlineMode: false, published: { nodeId: "node-a", hostIp: "198.51.100.4", hostPort: 25570 } }];
     m.forcedHosts = [];
-    const r = validateNetwork(m, { secret: null });
-    expect(codes(r, "error")).toEqual(expect.arrayContaining(["LEGACY_FORWARDING_WITHOUT_ISOLATION", "BACKEND_PUBLIC_OFFLINE"]));
+    expect(codes(validateNetwork(m, { secret: null }), "error")).toEqual(expect.arrayContaining(["LEGACY_FORWARDING_WITHOUT_ISOLATION", "BACKEND_PUBLIC_OFFLINE"]));
+    for (const lan of ["192.168.1.20", "10.0.0.5", "127.0.0.1", "fd00::5"]) {
+      m.backends[0]!.published = { nodeId: "node-a", hostIp: lan, hostPort: 25570 };
+      const r = validateNetwork(m, { secret: null });
+      expect(codes(r, "error"), lan).toEqual(expect.arrayContaining(["LEGACY_FORWARDING_WITHOUT_ISOLATION", "BACKEND_LAN_OFFLINE"]));
+    }
+    // not published but not on the proxy's internal network either
     m.backends[0]!.published = null;
+    expect(codes(validateNetwork(m, { secret: null }), "error")).toEqual(["LEGACY_FORWARDING_WITHOUT_ISOLATION"]);
+    // internal-only: unpublished and on a bf-* network shared with the proxy
+    m.backends[0]!.networks = ["bf-net-1"];
     expect(codes(validateNetwork(m, { secret: null }))).toEqual(["LEGACY_FORWARDING_INSECURE"]);
+    // an operator-verified ingress allowlist is the only way to publish it
+    m.backends[0]!.networks = [];
+    m.backends[0]!.published = { nodeId: "node-a", hostIp: "192.168.1.20", hostPort: 25570 };
+    m.backends[0]!.ingressAllowlistVerified = true;
+    expect(codes(validateNetwork(m, { secret: null }), "error")).toEqual([]);
+  });
+
+  it("flags LAN-published offline backends without forwarding, but not with modern forwarding", () => {
+    const m = base();
+    m.proxy!.settings = { forwardingMode: "none" };
+    m.backends![0]!.published = { nodeId: "node-a", hostIp: "192.168.1.20", hostPort: 25570 };
+    expect(codes(validateNetwork(m, { secret: null }), "error")).toContain("BACKEND_LAN_OFFLINE");
+    const modern = base();
+    modern.backends![0]!.published = { nodeId: "node-a", hostIp: "192.168.1.20", hostPort: 25570 };
+    expect(codes(validateNetwork(modern, { secret: assessSecret(generateForwardingSecret()) }), "error")).toEqual([]);
   });
 
   it("checks the secret and proxy settings", () => {
@@ -151,30 +175,67 @@ describe("planNetworkChanges", () => {
       "srv-lobby": { "server.properties": props(), "config/paper-global.yml": fixture("paper-global.representative.yml"), "spigot.yml": fixture("spigot.representative.yml") },
       "srv-survival": { "server.properties": props().replace("online-mode=true", "online-mode=false") },
     },
+    extensions: { "srv-lobby": [], "srv-survival": ["fabricproxy-lite", "fabric-api"] },
   });
+  const applyAll = (i: PlanInput, plan: { servers: Array<{ key: string; files: Array<{ path: string; afterContent: string }> }> }): PlanInput => {
+    const current: Record<string, Record<string, string | null>> = {};
+    for (const [k, v] of Object.entries(i.current)) current[k] = { ...v };
+    for (const s of plan.servers) for (const f of s.files) (current[s.key] ??= {})[f.path] = f.afterContent;
+    return { ...i, current };
+  };
 
-  it("orders the rollout backends-first, one at a time, proxy last", async () => {
+  it("switches forwarding mode/secret as one maintenance-gated transition (review #1)", async () => {
     const plan = await planNetworkChanges(input());
     expect(plan.ok).toBe(true);
+    expect(plan.strategy).toBe("coordinated");
+    expect(plan.requiresMaintenance).toBe(true);
     expect(plan.servers.map((s) => [s.key, s.role, s.action])).toEqual([
       ["srv-lobby", "backend", "restart"],
       ["srv-survival", "backend", "restart"],
-      ["proxy-1", "proxy", "reload"],
+      ["proxy-1", "proxy", "restart"],
     ]);
     expect(plan.rollout).toEqual([
-      { order: 1, serverKey: "srv-lobby", action: "write-files", waitForReady: false },
-      { order: 2, serverKey: "srv-lobby", action: "restart", waitForReady: true },
-      { order: 3, serverKey: "srv-survival", action: "write-files", waitForReady: false },
-      { order: 4, serverKey: "srv-survival", action: "restart", waitForReady: true },
-      { order: 5, serverKey: "proxy-1", action: "write-files", waitForReady: false },
-      { order: 6, serverKey: "proxy-1", action: "reload", waitForReady: false },
+      { order: 1, group: 1, serverKey: "proxy-1", action: "stop", waitForReady: false },
+      { order: 2, group: 2, serverKey: "srv-lobby", action: "write-files", waitForReady: false },
+      { order: 3, group: 2, serverKey: "srv-survival", action: "write-files", waitForReady: false },
+      { order: 4, group: 2, serverKey: "proxy-1", action: "write-files", waitForReady: false },
+      { order: 5, group: 3, serverKey: "srv-lobby", action: "restart", waitForReady: true },
+      { order: 6, group: 3, serverKey: "srv-survival", action: "restart", waitForReady: true },
+      { order: 7, group: 4, serverKey: "proxy-1", action: "start", waitForReady: true },
     ]);
-    expect(plan.servers[2]!.reloadCommand).toBe("velocity reload");
+    expect(plan.notes.join(" ")).toMatch(/maintenance window/);
+  });
+
+  it("treats a secret rotation alone as a coordinated transition", async () => {
+    const first = await planNetworkChanges(input());
+    const applied = applyAll(input(), first);
+    const rotated = await planNetworkChanges({ ...applied, secret: generateForwardingSecret() });
+    expect(rotated.strategy).toBe("coordinated");
+    expect(rotated.rollout[0]).toMatchObject({ serverKey: "proxy-1", action: "stop" });
+    expect(rotated.rollout.at(-1)).toMatchObject({ serverKey: "proxy-1", action: "start" });
+    expect(rotated.servers.filter((s) => s.action === "restart").map((s) => s.key)).toEqual(["srv-lobby", "srv-survival", "proxy-1"]);
+  });
+
+  it("rolls out non-forwarding changes backend by backend, then reloads the proxy", async () => {
+    const applied = applyAll(input(), await planNetworkChanges(input()));
+    const m = base();
+    m.forcedHosts!.push({ hostname: "play.example.com", targets: ["lobby"] });
+    m.backends!.push({ name: "creative", serverId: "srv-creative", host: "bf-creative", port: 25565, software: "paper", minecraftVersion: "26.3", onlineMode: false, state: "running" });
+    const plan = await planNetworkChanges({ ...applied, model: m, extensions: { ...applied.extensions, "srv-creative": [] } });
+    expect(plan.ok).toBe(true);
+    expect(plan.strategy).toBe("rolling");
+    expect(plan.requiresMaintenance).toBe(false);
+    expect(plan.rollout.map((r) => [r.group, r.serverKey, r.action])).toEqual([
+      [1, "srv-creative", "write-files"],
+      [2, "srv-creative", "restart"],
+      [3, "proxy-1", "write-files"],
+      [4, "proxy-1", "reload"],
+    ]);
+    expect(plan.servers.find((s) => s.key === "proxy-1")!.reloadCommand).toBe("velocity reload");
   });
 
   it("produces files with before hashes, content and redacted diffs", async () => {
-    const i = input();
-    const plan = await planNetworkChanges(i);
+    const plan = await planNetworkChanges(input());
     const lobby = plan.servers[0]!;
     expect(lobby.files.map((f) => f.path)).toEqual(["config/paper-global.yml", "server.properties"]);
     const pg = lobby.files[0]!;
@@ -184,10 +245,11 @@ describe("planNetworkChanges", () => {
     expect(parseYaml(pg.afterContent).proxies.velocity).toEqual({ enabled: true, "online-mode": true, secret });
     expect(pg.diff).toContain("-    enabled: false\n+    enabled: true");
     const sp = lobby.files[1]!;
-    expect(sp.diff).toContain("-online-mode=true\n+online-mode=true".replace("+online-mode=true", "+online-mode=false"));
+    expect(sp.diff).toContain("-online-mode=true\n+online-mode=false");
 
     const fabric = plan.servers[1]!;
-    expect(fabric.files.map((f) => [f.path, f.beforeSha256])).toEqual([["config/FabricProxy-Lite.toml", null]]);
+    // 26.3 already has enforce-secure-profile=true, matching force-key-authentication=true
+    expect(fabric.files.map((f) => [f.path, f.beforeSha256 === null])).toEqual([["config/FabricProxy-Lite.toml", true]]);
     expect(fabric.notes.join(" ")).toMatch(/FabricProxy-Lite/);
 
     const proxy = plan.servers[2]!;
@@ -208,18 +270,13 @@ describe("planNetworkChanges", () => {
     const a = await planNetworkChanges(input());
     const b = await planNetworkChanges(input());
     expect(a).toEqual(b);
-    const applied = input();
-    for (const s of a.servers) {
-      const cur = { ...(applied.current[s.key] ?? {}) };
-      for (const f of s.files) cur[f.path] = f.afterContent;
-      (applied.current as Record<string, Record<string, string | null>>)[s.key] = cur;
-    }
-    const again = await planNetworkChanges(applied);
+    const again = await planNetworkChanges(applyAll(input(), a));
     expect(again.servers.every((s) => s.files.length === 0 && s.action === "none")).toBe(true);
+    expect(again.strategy).toBe("none");
     expect(again.rollout).toEqual([]);
   });
 
-  it("blocks the proxy until Velocity generated its config, and unsupported backends", async () => {
+  it("blocks everything while the proxy config is missing or a backend is unsupported (review #6)", async () => {
     const i = input();
     (i.current as Record<string, Record<string, string | null>>)["proxy-1"] = {};
     const m = base();
@@ -229,7 +286,46 @@ describe("planNetworkChanges", () => {
     expect(plan.ok).toBe(false);
     expect(plan.servers.find((s) => s.key === "proxy-1")!.blocked[0]).toMatch(/start the proxy once/);
     expect(plan.servers.find((s) => s.key === "srv-classic")!.blocked[0]).toMatch(/Vanilla servers cannot accept Velocity forwarding/);
-    expect(plan.rollout.some((r) => r.serverKey === "proxy-1" || r.serverKey === "srv-classic")).toBe(false);
+    expect(plan.rollout).toEqual([]);
     expect(plan.issues.some((x) => x.code === "FORWARDING_UNSUPPORTED")).toBe(true);
+  });
+
+  it("returns an empty rollout for any validation error even when every file renders (review #6)", async () => {
+    const i = input();
+    const m = base();
+    m.try = ["ghost"];
+    i.model = m;
+    const plan = await planNetworkChanges(i);
+    expect(plan.issues.some((x) => x.code === "TRY_TARGET_UNKNOWN")).toBe(true);
+    expect(plan.servers.every((s) => s.blocked.length === 0)).toBe(true);
+    expect(plan.ok).toBe(false);
+    expect(plan.rollout).toEqual([]);
+  });
+
+  it("checks required and conflicting extensions before anything is applied (review #7)", async () => {
+    const missing = await planNetworkChanges({ ...input(), extensions: { "srv-lobby": [], "srv-survival": ["fabric-api"] } });
+    expect(missing.ok).toBe(false);
+    expect(missing.rollout).toEqual([]);
+    expect(missing.servers[1]!.blocked[0]).toMatch(/Install FabricProxy-Lite \(fabricproxy-lite\)/);
+    const unknown = await planNetworkChanges({ ...input(), extensions: { "srv-lobby": [] } });
+    expect(unknown.servers[1]!.blocked[0]).toMatch(/installed plugins\/mods of this server are unknown/);
+    const conflict = await planNetworkChanges({ ...input(), extensions: { "srv-lobby": ["bungeeguard"], "srv-survival": ["fabricproxy-lite", "fabric-api"] } });
+    expect(conflict.servers[0]!.blocked[0]).toMatch(/Remove BungeeGuard plugin \(bungeeguard\)/);
+    expect(conflict.rollout).toEqual([]);
+  });
+
+  it("rejects duplicate server ids across proxy and backends (review #12)", async () => {
+    const m = base();
+    m.backends![0]!.serverId = "proxy-1";
+    const v = validateNetwork(m, { secret: assessSecret(secret) });
+    expect(codes(v, "error")).toContain("DUPLICATE_SERVER_ID");
+    const n = base();
+    n.proxy!.serverId = null;
+    n.backends![0]!.serverId = null;
+    n.backends![0]!.name = "proxy";
+    n.try = ["proxy"];
+    expect(codes(validateNetwork(n, { secret: assessSecret(secret) }), "error")).toContain("DUPLICATE_SERVER_ID");
+    const plan = await planNetworkChanges({ ...input(), model: m });
+    expect(plan.rollout).toEqual([]);
   });
 });

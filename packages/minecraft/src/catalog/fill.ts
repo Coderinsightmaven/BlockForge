@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { SoftwareBuild, SoftwareInfo } from "@blockforge/contracts";
 import { CatalogError } from "../errors.js";
-import { type CatalogContext, assertHttpsUrl, getJson } from "../http.js";
+import { type CatalogContext, assertArtifactUrl, getJson } from "../http.js";
 import { requiredJavaMajor } from "../java.js";
 import { compareMinecraftVersions, compareSemverLike, parseMinecraftVersion } from "../versions.js";
 import { mojangJavaMajor } from "./mojang.js";
@@ -92,9 +92,10 @@ function commitNotes(b: FillBuild): string[] {
   return b.commits.slice(0, 5).map((c) => (c.message.split("\n")[0] ?? "").slice(0, 200));
 }
 
-export function fillBuildToSoftwareBuild(project: FillProject, b: FillBuild): SoftwareBuild | null {
+export function fillBuildToSoftwareBuild(project: FillProject, b: FillBuild, ctx: Pick<CatalogContext, "artifactHosts"> = {}): SoftwareBuild | null {
   const d = b.downloads[SERVER_DOWNLOAD];
   if (!d) return null;
+  assertArtifactUrl(ctx, d.url);
   return {
     build: String(b.id),
     channel: mapFillChannel(b.channel),
@@ -193,7 +194,7 @@ export function createFillAdapter(project: FillProject): SoftwareAdapter {
 
     async listBuilds(ctx, version) {
       const builds = await getFillBuilds(ctx, project, version);
-      return builds.map((b) => fillBuildToSoftwareBuild(project, b)).filter((b): b is SoftwareBuild => b !== null);
+      return builds.map((b) => fillBuildToSoftwareBuild(project, b, ctx)).filter((b): b is SoftwareBuild => b !== null);
     },
 
     async resolve(ctx, version, build) {
@@ -210,7 +211,7 @@ export function createFillAdapter(project: FillProject): SoftwareAdapter {
       }
       const d = chosen.downloads[SERVER_DOWNLOAD];
       if (!d) throw new CatalogError("UNAVAILABLE", `${project} ${version} build ${chosen.id} has no server download`);
-      assertHttpsUrl(d.url);
+      assertArtifactUrl(ctx, d.url);
       if (v.version.support.status !== "SUPPORTED") {
         notes.push(`PaperMC marks ${project} ${version} as ${v.version.support.status.toLowerCase()}${v.version.support.end ? ` (since ${v.version.support.end})` : ""}.`);
       }

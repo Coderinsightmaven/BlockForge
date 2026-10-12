@@ -23,8 +23,7 @@ import { unsupportedRules } from "./rules.js";
  *  - PLCN_v3: `startup_commands` map name → command instead of `startup`; optional `tags`, `icon`.
  * `config.files|startup|logs` may be JSON-encoded strings (Pterodactyl exports) or objects
  * (Pelican YAML exports). `config.stop` `^C` / `^SIGNAL` is a signal, anything else a console
- * command. The contract records PTDL_v1/PTDL_v2/PLCN_v1 as `sourceFormat`; PLCN_v2/PLCN_v3 are
- * recorded as PLCN_v1 with an info issue until the contract gains those values.
+ * command. The egg version is recorded as `sourceFormat`.
  */
 
 type Issue = TemplateImportPreview["issues"][number];
@@ -127,10 +126,7 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
     issue("error", "EGG_FORMAT_UNKNOWN", version ? `Unsupported egg format "${version}" (supported: ${SUPPORTED_EGG_FORMATS.join(", ")}).` : "The egg has no meta.version; it is not a Pterodactyl/Pelican egg export.", "meta.version");
     return fail();
   }
-  const sourceFormat: ParsedTemplate["sourceFormat"] = version === "PTDL_v1" || version === "PTDL_v2" ? version : "PLCN_v1";
-  if (version === "PLCN_v2" || version === "PLCN_v3") {
-    issue("info", "SOURCE_FORMAT_RECORDED_AS_PLCN_V1", `${version} egg imported; its source format is recorded as PLCN_v1 (the template contract has no ${version} value yet).`, "meta.version");
-  }
+  const sourceFormat = version as NonNullable<ParsedTemplate["sourceFormat"]>;
 
   // --- name / description / author -------------------------------------------------------
   let name = (str(egg["name"]) ?? "").trim();
