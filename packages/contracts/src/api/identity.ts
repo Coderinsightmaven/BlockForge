@@ -100,6 +100,41 @@ export const CreateSshKeyRequest = z.object({
   publicKey: z.string().min(16).max(16 * 1024),
 });
 
+/**
+ * Personal API keys (`/account/api-keys`). `Authorization: Bearer bfk_<id>_<secret>`; no cookies, no CSRF.
+ * Effective permissions = the owner's current effective permissions ∩ `permissions` (null = all of them),
+ * re-evaluated on every request. Keys can never manage users, roles, API keys, SSH keys, passwords or MFA,
+ * and requests from outside `allowedIps` are refused. Rate-limited per key. Audited as actor `api_token`.
+ */
+export const API_KEY_PATTERN = /^bfk_([0-9a-f]{16})_([A-Za-z0-9_-]{43})$/;
+export const ApiKey = z.object({
+  id: Id,
+  name: z.string(),
+  /** `bfk_<id>` — shown so users can recognise keys; the secret is never retrievable. */
+  prefix: z.string(),
+  permissions: z.array(PermissionSchema).nullable(),
+  /** CIDR list; empty = any address. */
+  allowedIps: z.array(z.string()),
+  expiresAt: EpochMs.nullable(),
+  lastUsedAt: EpochMs.nullable(),
+  lastUsedIp: z.string().nullable(),
+  createdAt: EpochMs,
+});
+export type ApiKey = z.infer<typeof ApiKey>;
+export const CreateApiKeyRequest = z.object({
+  name: z.string().trim().min(1).max(80),
+  permissions: z.array(PermissionSchema).min(1).nullable().default(null),
+  allowedIps: z
+    .array(z.string().regex(/^[0-9a-fA-F.:]+(\/\d{1,3})?$/, "IP or CIDR"))
+    .max(32)
+    .default([]),
+  expiresInDays: z.number().int().min(1).max(3650).nullable().default(90),
+});
+/** Returned once at creation. */
+export const CreatedApiKey = z.object({ key: ApiKey, secret: z.string() });
+/** Permissions an API key can never exercise, regardless of grants. */
+export const API_KEY_FORBIDDEN_PERMISSIONS = ["users.manage", "roles.manage", "settings.manage"] as const;
+
 export const Role = z.object({
   id: Id,
   key: z.string(),

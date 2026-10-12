@@ -142,6 +142,64 @@ export const AGENT_COMMANDS = {
   "fs.mkdir": { payload: DenyRef.extend({ path: MutableRelativePath }), result: Empty },
   "fs.rename": { payload: DenyRef.extend({ from: MutableRelativePath, to: MutableRelativePath }), result: Empty },
   "fs.delete": { payload: DenyRef.extend({ path: MutableRelativePath, recursive: z.boolean() }), result: Empty },
+  /**
+   * Archive the workload data dir to `<dataRoot>/backups/<workloadId>/<backupId>.tar.gz` (outside the
+   * sandbox). Symlinks, FIFOs and devices are skipped and counted. `ignore` uses the denylist matcher;
+   * `.blockforgeignore` / `.pteroignore` in the data root are honoured too; `.blockforge/` is always skipped.
+   * Fails with QUOTA_EXCEEDED when free disk would drop below the agent's reserve.
+   */
+  "backup.create": {
+    payload: WorkloadRef.extend({
+      backupId: z.uuid(),
+      ignore: z.array(z.string().max(512)).max(100).default([]),
+      maxBytes: Bytes.max(512 * 1024 ** 3),
+    }),
+    result: z.object({
+      sizeBytes: Bytes,
+      sha256: z.string(),
+      files: z.number().int().nonnegative(),
+      skippedSymlinks: z.number().int().nonnegative(),
+      durationMs: z.number().int().nonnegative(),
+    }),
+  },
+  /**
+   * Upload a local backup to object storage with presigned multipart part URLs (the control plane holds
+   * the credentials and completes the upload with the returned ETags). Parts are `partSize` bytes except
+   * the last. Optionally deletes the local archive after a verified upload.
+   */
+  "backup.upload": {
+    payload: WorkloadRef.extend({
+      backupId: z.uuid(),
+      partSize: z.number().int().min(5 * 1024 ** 2).max(5 * 1024 ** 3),
+      parts: z.array(z.object({ partNumber: z.number().int().min(1).max(10_000), url: z.url({ protocol: /^https$/ }) })).min(1).max(10_000),
+      deleteLocal: z.boolean().default(true),
+    }),
+    result: z.object({ parts: z.array(z.object({ partNumber: z.number().int(), etag: z.string().max(256) })) }),
+  },
+  /**
+   * Restore into the (stopped) workload: from the local archive, or by downloading a presigned HTTPS URL
+   * (S3) to a temp file and verifying `sha256` first. Extraction uses the fs.extract rules (no links,
+   * no escapes, size/entry limits). `truncate` deletes existing data except `.blockforge/` first.
+   */
+  "backup.restore": {
+    payload: WorkloadRef.extend({
+      backupId: z.uuid(),
+      source: z.discriminatedUnion("type", [
+        z.object({ type: z.literal("local") }),
+        z.object({ type: z.literal("url"), url: z.url({ protocol: /^https$/ }) }),
+      ]),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      truncate: z.boolean(),
+      maxTotalBytes: Bytes.max(512 * 1024 ** 3),
+    }),
+    result: z.object({ files: z.number().int().nonnegative(), bytes: Bytes, durationMs: z.number().int().nonnegative() }),
+  },
+  "backup.delete": { payload: WorkloadRef.extend({ backupId: z.uuid() }), result: Empty },
+  /** Stream a local backup to the control plane (`POST /agent/v1/transfers/:id`) for browser download. */
+  "backup.transfer.push": {
+    payload: WorkloadRef.extend({ backupId: z.uuid(), transferId: z.uuid() }),
+    result: z.object({ bytes: Bytes, sha256: z.string() }),
+  },
   /** Copies a file or directory next to itself ("name copy.ext", "name copy 2.ext", …). */
   "fs.copy": {
     payload: DenyRef.extend({ path: MutableRelativePath }),
@@ -243,6 +301,8 @@ export const COMMAND_REDACTIONS: Partial<Record<AgentCommandType, readonly strin
   "fs.write": ["content"],
   "workload.ensure": ["env", "command"],
   "workload.install": ["env", "script"],
+  "backup.upload": ["parts"],
+  "backup.restore": ["source"],
   "artifact.fetch": ["url"],
 };
 export const SENSITIVE_COMMANDS = Object.keys(COMMAND_REDACTIONS) as AgentCommandType[];

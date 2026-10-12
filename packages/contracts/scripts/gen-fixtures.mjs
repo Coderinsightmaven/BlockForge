@@ -247,6 +247,41 @@ write(
   }),
 );
 
+const BACKUP_ID = "2b3c4d5e-6f70-4a81-9b2c-3d4e5f607182";
+write(
+  "cmd-backup-create.json",
+  cmd("00000000-0000-4000-8000-00000000000e", "backup.create", {
+    workloadId: WORKLOAD_ID,
+    backupId: BACKUP_ID,
+    ignore: ["logs/", "*.tmp", "!logs/keep.log"],
+    maxBytes: 53687091200,
+  }),
+);
+write(
+  "cmd-backup-restore-url.json",
+  cmd("00000000-0000-4000-8000-00000000000f", "backup.restore", {
+    workloadId: WORKLOAD_ID,
+    backupId: BACKUP_ID,
+    source: { type: "url", url: "https://s3.example.com/bucket/blockforge/backup.tar.gz?X-Amz-Signature=abc" },
+    sha256: "d".repeat(64),
+    truncate: true,
+    maxTotalBytes: 107374182400,
+  }),
+);
+write(
+  "cmd-backup-upload.json",
+  cmd("00000000-0000-4000-8000-000000000010", "backup.upload", {
+    workloadId: WORKLOAD_ID,
+    backupId: BACKUP_ID,
+    partSize: 67108864,
+    parts: [
+      { partNumber: 1, url: "https://s3.example.com/bucket/k?partNumber=1&uploadId=u&X-Amz-Signature=1" },
+      { partNumber: 2, url: "https://s3.example.com/bucket/k?partNumber=2&uploadId=u&X-Amz-Signature=2" },
+    ],
+    deleteLocal: true,
+  }),
+);
+
 write("hello.json", { t: "hello", agentVersion: "0.1.0", protocolVersion: 1, ts: T0, facts, capabilities: ["docker", "jvm-probe", "slp"], workloads: [status] });
 write("heartbeat.json", { t: "heartbeat", ts: T0, uptimeMs: 86400000 });
 write("progress.json", { t: "progress", id: "00000000-0000-4000-8000-000000000004", ts: T0, stage: "download", message: "42 MiB of 48 MiB", percent: 87.5 });

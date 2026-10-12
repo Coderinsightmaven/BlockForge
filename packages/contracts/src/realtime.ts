@@ -4,6 +4,8 @@ import { NodeMetricSample, WorkloadMetricSample } from "./agent/metrics.js";
 import { Node } from "./api/nodes.js";
 import { AlertIncident, Job, JobLogLine, OverviewSummary } from "./api/operations.js";
 import { Server } from "./api/servers.js";
+import { Backup } from "./api/backups.js";
+import { Schedule } from "./api/schedules.js";
 
 /**
  * UI realtime channel: WSS /api/v1/realtime (session cookie auth; Origin checked).
@@ -45,6 +47,8 @@ export const RealtimeEventType = z.enum([
   "job.log",
   "alert.updated",
   "network.updated",
+  "backup.updated",
+  "schedule.updated",
 ]);
 export type RealtimeEventType = z.infer<typeof RealtimeEventType>;
 
@@ -82,4 +86,8 @@ export const REALTIME_EVENT_PAYLOADS = {
   "job.log": JobLogLine.extend({ jobId: z.uuid() }),
   "alert.updated": AlertIncident,
   "network.updated": z.object({ networkId: z.uuid() }),
+  /** Published on `server:<id>`. */
+  "backup.updated": Backup,
+  /** Published on `server:<id>`. */
+  "schedule.updated": Schedule,
 } as const satisfies Record<RealtimeEventType, z.ZodType>;

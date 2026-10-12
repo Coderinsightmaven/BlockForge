@@ -183,6 +183,47 @@ expire after 2 hours. World upload at creation is not implemented yet (`world.mo
 | POST | `/account/ssh-keys` | `CreateSshKeyRequest` → `SshKey` | session |
 | DELETE | `/account/ssh-keys/:id` | → 204 | session |
 
+## Backups (Phase 4) — see `api/backups.ts`
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/servers/:id/backups` | → `Backup[]` | servers.backups.view |
+| POST | `/servers/:id/backups` | `CreateBackupRequest` → `{backup, jobId}` (202, idempotent); at the limit without `rotate` → 409 | servers.backups.create |
+| PATCH | `/servers/:id/backups/:backupId` | `{name?, locked?}` → `Backup` | servers.backups.delete (lock/unlock, as Pterodactyl) |
+| DELETE | `/servers/:id/backups/:backupId` | → `{jobId}`; locked → 409 | servers.backups.delete |
+| GET | `/servers/:id/backups/:backupId/download` | → `TransferUrlResponse` (local: streamed via agent; S3: presigned GET, 5 min) | servers.backups.download |
+| POST | `/servers/:id/backups/:backupId/restore` | `RestoreBackupRequest` → `{jobId}` (server must be stopped/crashed or is stopped by the job) | servers.backups.restore |
+| GET · PUT | `/settings/backups.storage` | `BackupStorageSettings` (secret write-only, never returned) | settings.manage |
+| POST | `/settings/backups.storage/test` | → `{ok, error}` (HEAD bucket + put/delete a probe object) | settings.manage |
+
+Backup jobs hold the server's operation lock (`backup`/`restore` in `lifecycle.ts`), so they never overlap
+power actions; rotation deletes the oldest unlocked successful backup; deleting a server deletes its backups.
+
+## Schedules (Phase 4) — see `api/schedules.ts`
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/servers/:id/schedules` | → `Schedule[]` | schedules.view |
+| POST | `/servers/:id/schedules` | `UpsertScheduleRequest` → `Schedule` | schedules.manage |
+| GET · PUT · DELETE | `/servers/:id/schedules/:scheduleId` | → `Schedule` / `UpsertScheduleRequest` / 204 | schedules.view / manage |
+| POST | `/servers/:id/schedules/:scheduleId/run` | → `ScheduleRun` (202) | schedules.manage |
+| GET | `/servers/:id/schedules/:scheduleId/runs` | `?limit=&cursor=` → `Page<ScheduleRun>` | schedules.view |
+| POST | `/schedules/preview` | `CronPreviewRequest` → `CronPreviewResponse` | session or API key |
+
+Task permissions are checked against the schedule's last editor **at run time** (a power task requires
+servers.control, command → servers.console.send, backup → servers.backups.create); if the editor lost the
+permission, the task fails with FORBIDDEN and the run is recorded as failed.
+
+## API keys (Phase 4)
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/account/api-keys` | → `ApiKey[]` | session only |
+| POST | `/account/api-keys` | `CreateApiKeyRequest` → `CreatedApiKey` (secret shown once) | session only (MFA-verified) |
+| DELETE | `/account/api-keys/:id` | → 204 | session only |
+
+Every other route accepts `Authorization: Bearer bfk_…` (no CSRF). Key requests are limited to
+`permissions ∩ owner's current effective permissions`, minus `API_KEY_FORBIDDEN_PERMISSIONS`; account routes
+(password, MFA, SSH keys, API keys) and `/auth/*` refuse API keys. `allowedIps` is matched against the
+client IP as seen through `TRUST_PROXY`. Rate limit: 120 requests/min per key (configurable).
+
 ## Agent endpoints (agent auth, not cookie auth)
 `POST /agent/v1/enroll`, `GET /agent/v1/connect` (WS), `POST|GET /agent/v1/transfers/:id`,
 `POST /agent/v1/sftp/auth` (`SftpAuthRequest` → `SftpAuthResponse` | 401) — see `agent-protocol.md`.

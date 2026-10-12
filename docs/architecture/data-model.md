@@ -60,6 +60,15 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | `server_subusers` | `id, server_id → servers CASCADE, user_id → users CASCADE, permissions text[], created_by, created_at` unique(server_id, user_id) | |
 | `servers` (changes) | `+ owner_id → users RESTRICT, template_id → templates RESTRICT, description, docker_image, suspended bool, allocation_limit, backup_limit; software/minecraft_version/heap_max_bytes become nullable; port/host_ip replaced by the primary allocation` | Owner deletion requires transferring their servers first. |
 
+### Phase 4 additions
+| Table | Key columns | Notes |
+|-------|-------------|-------|
+| `backups` | `id, server_id → servers CASCADE, name, status, locked, storage (local/s3), object_key null, consistency, size_bytes, sha256, ignored text[], skipped_symlinks, error, created_by → users SET NULL, schedule_id → schedules SET NULL, job_id, created_at, completed_at` index(server_id, created_at) | Server deletion runs a job that deletes local archives / S3 objects before the rows cascade. |
+| `schedules` | `id, server_id → servers CASCADE, name, cron jsonb, timezone, enabled, only_when_online, tasks jsonb, next_run_at, last_run_at, running_run_id null, updated_by → users SET NULL, created_at, updated_at` index(next_run_at) where enabled | Claimed with `FOR UPDATE SKIP LOCKED`. |
+| `schedule_runs` | `id, schedule_id → schedules CASCADE, trigger, status, reason, tasks jsonb, started_at, finished_at` | Retention 30 d / last 100 per schedule. |
+| `api_tokens` (changes) | `+ permissions text[] null (null = all), allowed_ips text[], last_used_ip, prefix`; `token_hash` = sha256(secret) | Revocation = row delete (audited). |
+| `settings['backups.storage']` | JSON without the secret; S3 secret key in `secrets` (scope global, name `backups.s3.secretAccessKey`) | |
+
 ## Networks (Velocity)
 
 | Table | Key columns | Notes |

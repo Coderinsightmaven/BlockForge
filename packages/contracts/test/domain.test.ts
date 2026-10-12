@@ -193,3 +193,23 @@ describe("query booleans", () => {
     expect(AllocationListQuery.parse({}).free).toBeUndefined();
   });
 });
+
+describe("Phase 4 contracts", () => {
+  it("API key pattern, schedule tasks and backup redaction", async () => {
+    const c = await import("../src/index.js");
+    expect(c.API_KEY_PATTERN.test("bfk_0123456789abcdef_" + "A".repeat(43))).toBe(true);
+    expect(c.API_KEY_PATTERN.test("bfe_0123456789abcdef_" + "A".repeat(43))).toBe(false);
+    const sched = c.UpsertScheduleRequest.parse({
+      name: "Nightly",
+      cron: { minute: "0", hour: "4", dayOfMonth: "*", month: "*", dayOfWeek: "*" },
+      tasks: [{ action: "command", command: "say restarting" }, { action: "power", power: "restart", offsetSeconds: 60 }, { action: "backup" }],
+    });
+    expect(sched.tasks[2]).toMatchObject({ action: "backup", rotate: true, offsetSeconds: 0 });
+    expect(c.UpsertScheduleRequest.safeParse({ ...sched, cron: { ...sched.cron, minute: "0; rm -rf /" } }).success).toBe(false);
+    expect(
+      c.redactCommandPayload("backup.restore", { source: { type: "url", url: "https://s3/x?sig=1" }, sha256: "a" }),
+    ).toEqual({ source: "[REDACTED]", sha256: "a" });
+    expect(c.CreateApiKeyRequest.safeParse({ name: "ci", allowedIps: ["10.0.0.0/8", "::1"] }).success).toBe(true);
+    expect(c.CreateApiKeyRequest.safeParse({ name: "ci", allowedIps: ["10.0.0.0/8; drop"] }).success).toBe(false);
+  });
+});

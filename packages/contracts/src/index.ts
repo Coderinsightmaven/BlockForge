@@ -18,3 +18,5 @@ export * from "./api/operations.js";
 export * from "./api/templates.js";
 export * from "./api/allocations.js";
 export * from "./api/files.js";
+export * from "./api/backups.js";
+export * from "./api/schedules.js";

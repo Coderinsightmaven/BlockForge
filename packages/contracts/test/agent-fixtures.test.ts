@@ -69,6 +69,9 @@ describe("agent protocol fixtures", () => {
     ["cmd-credentials-rotate.json", "ok"],
     ["cmd-workload-ensure-egg.json", "ok"],
     ["cmd-workload-install.json", "ok"],
+    ["cmd-backup-create.json", "ok"],
+    ["cmd-backup-restore-url.json", "ok"],
+    ["cmd-backup-upload.json", "ok"],
   ])("%s → %s", (file, expected) => {
     expect(verifyCommand(load(file), keys.now)).toBe(expected);
   });

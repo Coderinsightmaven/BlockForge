@@ -255,6 +255,18 @@ sandbox. Hard links are deliberately not used: egg install scripts commonly over
 (`curl -o server.jar`), which would corrupt the shared cache entry for every server. LRU eviction above a
 configurable size (default 10 GiB); concurrent fetches of the same artifact share one download.
 
+**Backups.** `backup.create` writes `<dataRoot>/backups/<workloadId>/<backupId>.tar.gz` via a temp file +
+rename, walking the data dir through the same `os.Root` sandbox (symlinks/FIFOs/devices skipped and counted;
+`.blockforge/` always excluded; `ignore` patterns + `.blockforgeignore`/`.pteroignore` with the denylist
+matcher). The agent keeps a free-disk reserve (default 2 GiB) and refuses with QUOTA_EXCEEDED. `backup.upload`
+PUTs each part to its presigned HTTPS URL (streaming from the archive, 3 parts in flight, retries with
+backoff) and returns the ETags; presigned URLs are not subject to the download host allowlist because they
+come from a signed command, but must be HTTPS and are never logged. `backup.restore` requires the workload
+to be stopped (`BUSY` otherwise), downloads URL sources to a temp file and verifies the sha256 before touching
+the data dir, then extracts with the `fs.extract` safety rules; `truncate` removes existing data first (except
+`.blockforge/`). `backup.delete` removes the local archive (idempotent). `backup.transfer.push` streams a
+local archive to the control plane for browser download.
+
 **SFTP service.** The agent serves SFTP on a configurable port (default 2022) with an Ed25519 host key
 generated on first start (fingerprint reported in `NodeFacts.sftp`). Login: username
 `<username>.<serverShortId>` + password or public key, verified by `POST /agent/v1/sftp/auth` (no
