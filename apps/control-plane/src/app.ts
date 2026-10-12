@@ -85,6 +85,7 @@ import { ServerReconciler } from "./servers/reconciler.js";
 import { registerServerRoutes } from "./servers/routes.js";
 import { ServersService } from "./servers/service.js";
 import { ServerStateService } from "./servers/state.js";
+import { ConsoleSecretMasks } from "./servers/secret-masks.js";
 import { SftpService } from "./sftp/service.js";
 import { registerTemplateRoutes } from "./templates/routes.js";
 import { TemplatesService } from "./templates/service.js";
@@ -191,6 +192,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const consoles = new ConsoleBuffers();
   const ownership = new WorkloadOwnership(db, clock);
   const transfers = new TransferBroker();
+  const masks = new ConsoleSecretMasks(db, clock);
   const rotations = new RotationCoordinator();
   const authenticator = new AgentAuthenticator(db, clock, rotations, logger.child({ module: "agent-auth" }));
 
@@ -208,6 +210,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     heartbeatIntervalMs: config.agent.heartbeatIntervalMs,
     metricsIntervalMs: config.agent.metricsIntervalMs,
     maxQueuedBytes: config.agent.maxQueuedBytes,
+    masks,
   });
   const tracker = new NodeStateTracker(
     db,
@@ -266,14 +269,15 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const reconciler = new ServerReconciler(db, clock, serverState, bus, logger.child({ module: "reconciler" }));
   const servers = new ServersService({
     db, clock, logger: logger.child({ module: "servers" }), audit, bus, hub, tracker, gateway, latest, consoles, ownership, jobs, catalog, templates,
-    access: serverAccess, state: serverState,
+    access: serverAccess, state: serverState, masks,
   });
+  templates.onChange(() => masks.invalidate());
   const browserTransfers = new BrowserTransfers(clock);
   const files = new FilesService({ gateway, audit, templates, transfers, browser: browserTransfers, jobs, logger: logger.child({ module: "files" }) });
   const sshKeys = new SshKeysService(db, audit);
   const sftp = new SftpService(db, clock, rbac, audit, logger.child({ module: "sftp" }));
   for (const def of serverJobDefinitions({
-    db, clock, logger: logger.child({ module: "server-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit,
+    db, clock, logger: logger.child({ module: "server-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit, masks,
     ...(opts.serverJobs ?? {}),
   })) {
     jobs.define(def as JobDefinition<unknown>);

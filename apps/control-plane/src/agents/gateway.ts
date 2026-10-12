@@ -43,6 +43,7 @@ import type { ConsoleBuffers, ConsoleLine } from "./console-buffer.js";
 import type { NodeStateTracker } from "./node-state.js";
 import type { ControlPlaneSigner } from "./signing-key.js";
 import type { WorkloadOwnership } from "./workload-ownership.js";
+import { maskSecrets } from "../servers/secret-masks.js";
 
 export type ProgressUpdate = z.infer<typeof ProgressFrame>;
 
@@ -203,6 +204,8 @@ export interface GatewayDeps {
   metricsIntervalMs: number;
   /** Soft budget of queued frame bytes per approved session; reading pauses above it, frames are shed above 2×. */
   maxQueuedBytes?: number;
+  /** Secret values to mask in a workload's console/install output before any sink sees it. */
+  masks?: { forServer(serverId: string): Promise<readonly string[]> };
 }
 
 /**
@@ -624,9 +627,16 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       this.stats.droppedWorkloadFrames++;
       return;
     }
-    const lines = frame.lines.map((l) =>
-      l.line.length > AGENT_LIMITS.logLineMaxBytes ? { ...l, line: l.line.slice(0, AGENT_LIMITS.logLineMaxBytes) } : l,
-    );
+    const secrets = (await this.deps.masks?.forServer(serverId).catch((err: unknown) => {
+      this.deps.logger.warn({ err, serverId }, "secret masks unavailable; console lines withheld");
+      return null;
+    })) ?? (this.deps.masks ? null : []);
+    // Fail closed: without the masks, lines are not stored or forwarded.
+    if (secrets === null) return;
+    const lines = frame.lines.map((l) => {
+      const line = maskSecrets(l.line.length > AGENT_LIMITS.logLineMaxBytes ? l.line.slice(0, AGENT_LIMITS.logLineMaxBytes) : l.line, secrets);
+      return line === l.line ? l : { ...l, line };
+    });
     if (frame.source === "install") {
       // Install-container output: mirrored into the console as `system` lines, and to listeners
       // (the running provision/reinstall job writes it to its job log).

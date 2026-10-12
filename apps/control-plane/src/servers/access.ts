@@ -7,7 +7,7 @@ import { networkMembers, servers, serverSubusers } from "../db/schema/index.js";
 import { actorOf, requirePrincipal } from "../http/auth-hooks.js";
 import { AppError, forbidden, notFound } from "../lib/errors.js";
 import type { Principal } from "../rbac/authorize.js";
-import { effectiveServerPermissions, type ServerResource } from "./permissions.js";
+import { effectiveServerPermissions, neverInstalled, type ServerResource } from "./permissions.js";
 
 export type ServerRow = typeof servers.$inferSelect;
 
@@ -40,6 +40,7 @@ export class ServerAccessService {
       ownerId: row.server.ownerId,
       suspended: row.server.suspended,
       subuserPermissions: row.subPerms ?? null,
+      neverInstalled: neverInstalled(row.server),
     });
     return { server: row.server, resource, principal, permissions };
   }

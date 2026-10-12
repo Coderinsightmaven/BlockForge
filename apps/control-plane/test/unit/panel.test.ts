@@ -8,6 +8,9 @@ import { isDenied, isSecretBearing, normalizePath, redactForDisplay } from "../.
 import type { Grant, Principal } from "../../src/rbac/authorize.js";
 import { effectiveServerPermissions, escalation, mergeSubuserPermissions, permissionList, type ServerResource } from "../../src/servers/permissions.js";
 import { transitionalStateFor } from "../../src/servers/state.js";
+import { maskSecrets } from "../../src/servers/secret-masks.js";
+import type { PinnedGetResult } from "../../src/notifications/http.js";
+import { USERNAME_RE, usernameBase, usernameCandidate } from "../../src/users/username.js";
 import { buildWorkloadSpec, diagnoseStartupExit, eggEulaFile, minecraftGame, slpExpected, type ServerRuntimeContext } from "../../src/servers/runtime.js";
 import { OffsetClock } from "../support/clock.js";
 import { authorizedKey, ed25519Key } from "../support/ssh.js";
@@ -248,5 +251,58 @@ describe("egg runtime (Minecraft-aware)", () => {
   it("formats eula.txt for eggs", () => {
     expect(eggEulaFile(new Date("2026-10-12T10:00:00.000Z"), "alice")).toBe("#accepted via BlockForge 2026-10-12T10:00:00.000Z by alice\neula=true\n");
     expect(eggEulaFile(new Date(0), "a\nb")).toBe("#accepted via BlockForge 1970-01-01T00:00:00.000Z by a b\neula=true\n");
+  });
+});
+
+describe("catalogue fetch pins connections to validated addresses", () => {
+  it("passes the validated address of every hop to the transport (no second resolution)", async () => {
+    const seen: { host: string; address: string }[] = [];
+    let lookups = 0;
+    const answers: Record<string, string> = { "a.example": "151.101.1.1", "b.example": "151.101.2.2" };
+    const f = createSafeFetch({
+      allowedHosts: ["a.example", "b.example"],
+      // A rebinding resolver: public on the first query per host, private afterwards.
+      lookup: async (host) => {
+        lookups++;
+        return [{ address: lookups <= 2 ? answers[host]! : "127.0.0.1", family: 4 }];
+      },
+      pinnedGet: async (target): Promise<PinnedGetResult> => {
+        seen.push({ host: target.url.hostname, address: target.address });
+        if (target.url.hostname === "a.example") return { status: 302, headers: { location: "https://b.example/next" }, body: Buffer.alloc(0) };
+        return { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from('{"ok":true}') };
+      },
+    });
+    expect(await (await f("https://a.example/start")).json()).toEqual({ ok: true });
+    expect(seen).toEqual([
+      { host: "a.example", address: "151.101.1.1" },
+      { host: "b.example", address: "151.101.2.2" },
+    ]);
+    expect(lookups).toBe(2);
+    // A hop whose DNS now answers privately is refused before any connection.
+    seen.length = 0;
+    await expect(f("https://a.example/start")).rejects.toThrow(SafeFetchError);
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("usernames", () => {
+  it("keep suffixed candidates within 32 characters", () => {
+    const base = usernameBase(`${"x".repeat(60)}@example.com`);
+    expect(base).toHaveLength(28);
+    for (const n of [1, 2, 999, 1000, 123_456, 10 ** 9]) {
+      const c = usernameCandidate(base, n);
+      expect(c.length).toBeLessThanOrEqual(32);
+      expect(c).toMatch(USERNAME_RE);
+    }
+    expect(usernameCandidate(base, 1000)).toBe(`${"x".repeat(27)}-1000`);
+    expect(usernameCandidate("alice", 2)).toBe("alice-2");
+  });
+});
+
+describe("console secret masking", () => {
+  it("masks every occurrence, longest values first", () => {
+    expect(maskSecrets("pw=hunter22 again hunter22", ["hunter22"])).toBe("pw=•••••• again ••••••");
+    expect(maskSecrets("token abcdef123456", ["abcdef123456", "abcdef"])).toBe("token ••••••");
+    expect(maskSecrets("nothing here", [])).toBe("nothing here");
   });
 });

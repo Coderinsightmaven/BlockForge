@@ -56,6 +56,74 @@ export const pinnedHttpsPost: RawPost = (target, body, headers, timeoutMs, maxRe
     req.end(body);
   });
 
+export interface PinnedGetResult {
+  status: number;
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
+/**
+ * GET over HTTPS to an already validated, pinned address (same pinning as {@link pinnedHttpsPost}).
+ * Redirects are not followed (the caller re-validates every hop). The body is bounded: exceeding
+ * `maxResponseBytes` fails the request instead of truncating it.
+ */
+export function pinnedHttpsGet(
+  target: ValidatedTarget,
+  opts: { headers?: Record<string, string>; timeoutMs: number; maxResponseBytes: number; signal?: AbortSignal },
+): Promise<PinnedGetResult> {
+  return new Promise<PinnedGetResult>((resolve, reject) => {
+    const pinnedLookup: LookupFunction = (_host, options, cb) => {
+      if (typeof options === "object" && options?.all) {
+        (cb as unknown as (err: null, addrs: { address: string; family: number }[]) => void)(null, [{ address: target.address, family: target.family }]);
+      } else {
+        cb(null, target.address, target.family);
+      }
+    };
+    const hostname = target.url.hostname.replace(/^\[|\]$/g, "");
+    const req = httpsRequest(
+      {
+        method: "GET",
+        host: hostname,
+        ...(isIP(hostname) ? {} : { servername: hostname }),
+        port: target.url.port ? Number(target.url.port) : 443,
+        path: `${target.url.pathname}${target.url.search}`,
+        headers: { "user-agent": "BlockForge/1", ...(opts.headers ?? {}) },
+        lookup: pinnedLookup,
+        timeout: opts.timeoutMs,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      },
+      (res: IncomingMessage) => {
+        const declared = Number(res.headers["content-length"] ?? "NaN");
+        if (Number.isFinite(declared) && declared > opts.maxResponseBytes) {
+          res.destroy();
+          reject(new Error(`response too large (${declared} bytes)`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (c: Buffer) => {
+          size += c.length;
+          if (size > opts.maxResponseBytes) {
+            res.destroy();
+            reject(new Error(`response exceeds ${opts.maxResponseBytes} bytes`));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on("end", () => {
+          const headers: Record<string, string> = {};
+          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(", ") : v;
+          resolve({ status: res.statusCode ?? 0, headers, body: Buffer.concat(chunks) });
+        });
+        res.on("error", reject);
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`request timed out after ${opts.timeoutMs} ms`)));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
 export interface SafePostOptions {
   allowlist?: readonly string[];
   lookup?: LookupFn;

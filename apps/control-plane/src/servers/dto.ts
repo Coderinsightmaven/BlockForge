@@ -5,7 +5,7 @@ import type { servers} from "../db/schema/index.js";
 import { allocations, networkMembers, nodes, serverSubusers, templates, users } from "../db/schema/index.js";
 import type { LatestCache } from "../metrics/latest.js";
 import type { Principal } from "../rbac/authorize.js";
-import { effectiveServerPermissions, permissionList, type ServerResource } from "./permissions.js";
+import { effectiveServerPermissions, neverInstalled, permissionList, type ServerResource } from "./permissions.js";
 
 type ServerRow = typeof servers.$inferSelect;
 const WILDCARD_IPS = new Set(["0.0.0.0", "::"]);
@@ -55,7 +55,7 @@ export async function buildServerDtos(db: Db, latest: LatestCache, rows: ServerR
     const allocs = (allocMap.get(r.id) ?? []).sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.port - b.port);
     const primary = allocs.find((a) => a.isPrimary) ?? null;
     const resource: ServerResource = { type: "server", id: r.id, nodeId: r.nodeId, networkId: netMap.get(r.id) ?? null };
-    const perms = effectiveServerPermissions(principal, { resource, ownerId: r.ownerId, suspended: r.suspended, subuserPermissions: subMap.get(r.id) ?? null });
+    const perms = effectiveServerPermissions(principal, { resource, ownerId: r.ownerId, suspended: r.suspended, subuserPermissions: subMap.get(r.id) ?? null, neverInstalled: neverInstalled(r) });
     const publicHost = primary ? (primary.alias ?? node?.publicAddress ?? (WILDCARD_IPS.has(primary.ip) ? null : primary.ip)) : null;
     const sftpFact = node?.facts?.sftp ?? null;
     const sftpHost = node?.publicAddress ?? (primary && !WILDCARD_IPS.has(primary.ip) ? primary.ip : null);

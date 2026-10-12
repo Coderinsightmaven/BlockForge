@@ -314,6 +314,8 @@ export const UpdateServerBuildRequest = z.object({
   ownerId: Id.optional(),
   restartPolicy: RestartPolicy.optional(),
   startup: z.enum(["manual", "auto"]).optional(),
+  /** Exceed node capacity when growing limits; requires `nodes.manage` on the node and is audited. */
+  overrideCapacity: z.boolean().default(false),
 });
 
 /**

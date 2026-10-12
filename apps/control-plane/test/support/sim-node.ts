@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import type { CommandBody, FileEntry, NodeMetricSample, WorkloadMetricSample, WorkloadSpec, WorkloadStatus } from "@blockforge/contracts";
-import type { AgentCommandType } from "@blockforge/contracts";
+import { compileDenylist, type AgentCommandType } from "@blockforge/contracts";
 import { loadFixture, type FakeAgent } from "./fake-agent.js";
 
-type Entry = { type: "file" | "dir"; data: Buffer; mode: number; mtime: number };
+type Entry = { type: "file" | "dir" | "symlink"; data: Buffer; mode: number; mtime: number; target?: string };
 
 interface SimWorkload {
   spec: WorkloadSpec;
@@ -42,10 +42,13 @@ class SimError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
 }
+
+const denied = (path: string) => new SimError("PATH_FORBIDDEN", `${path || "/"} is denied`, { reason: "denylist" });
 
 export const DEFAULT_READY_LINE = '[12:00:00 INFO]: Done (3.141s)! For help, type "help"';
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
@@ -53,6 +56,20 @@ const norm = (p: string) => p.split(/[\\/]+/).filter((s) => s && s !== ".").join
 const parentOf = (p: string) => (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "");
 const nameOf = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Joins a relative symlink target to its directory, refusing absolute targets and escapes. */
+function joinInside(dir: string, target: string): string {
+  if (target.startsWith("/")) throw new SimError("PATH_FORBIDDEN", "symlink escapes the data root");
+  const out = dir ? dir.split("/") : [];
+  for (const seg of target.split("/")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (!out.length) throw new SimError("PATH_FORBIDDEN", "symlink escapes the data root");
+      out.pop();
+    } else out.push(seg);
+  }
+  return out.join("/");
+}
 
 /** Mirrors the Go agent's `copyName`/`splitExt` ("name copy.ext", "name copy 2.ext"). */
 function copyName(base: string, n: number, isDir: boolean): string {
@@ -87,6 +104,10 @@ export class SimNode {
   readonly consoleLines: { workloadId: string; line: string }[] = [];
   readonly fetched: { workloadId: string; url: string; destPath: string }[] = [];
   readonly ensured: WorkloadSpec[] = [];
+  /** `denylist` of every fs command as received (undefined = none sent). */
+  readonly denylists: { type: string; denylist: string[] | undefined }[] = [];
+  /** Archive contents (`<workloadId>:<path>` → entry → content) created by fs.compress or planted by tests. */
+  readonly archives = new Map<string, Record<string, string>>();
 
   constructor(
     readonly agent: FakeAgent,
@@ -98,10 +119,12 @@ export class SimNode {
         if (delay) await sleep(delay);
         const f = this.options.fail?.[type];
         if (f) return { ok: false, error: { retryable: false, ...f } };
+        const payload = body.payload as Record<string, unknown>;
+        if (type.startsWith("fs.")) this.denylists.push({ type, denylist: payload.denylist as string[] | undefined });
         try {
-          return { ok: true, data: await fn(body.payload as Record<string, unknown>, body) };
+          return { ok: true, data: await fn(payload, body) };
         } catch (err) {
-          if (err instanceof SimError) return { ok: false, error: { code: err.code, message: err.message } };
+          if (err instanceof SimError) return { ok: false, error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) } };
           throw err;
         }
       });
@@ -190,22 +213,27 @@ export class SimNode {
       return {};
     });
 
-    // --- fs.* ------------------------------------------------------------------------------
+    // --- fs.* (symlinks resolved inside the sandbox; `denylist` enforced on requested AND resolved paths) ---
     on("fs.list", (p) => {
-      const dir = norm(String(p.path));
-      const files = this.files(String(p.workloadId));
+      const id = String(p.workloadId);
+      const dir = this.resolve(id, String(p.path));
+      const files = this.files(id);
       if (dir && files.get(dir)?.type !== "dir") throw new SimError("NOT_FOUND", "no such directory");
       const entries = [...files].filter(([path]) => parentOf(path) === dir).map(([path, e]) => this.entry(path, e));
       return { entries, truncated: false };
     });
     on("fs.stat", (p) => {
-      const path = norm(String(p.path));
-      const e = this.files(String(p.workloadId)).get(path);
+      const id = String(p.workloadId);
+      const path = this.resolve(id, String(p.path), false);
+      const e = this.files(id).get(path);
       if (!e) throw new SimError("NOT_FOUND", "no such file");
-      return this.entry(path, e);
+      return this.entry(norm(String(p.path)), e);
     });
     on("fs.read", (p) => {
-      const e = this.files(String(p.workloadId)).get(norm(String(p.path)));
+      const id = String(p.workloadId);
+      const resolved = this.resolve(id, String(p.path));
+      this.deny(p, [norm(String(p.path)), resolved]);
+      const e = this.files(id).get(resolved);
       if (!e || e.type !== "file") throw new SimError("NOT_FOUND", "no such file");
       const max = Number(p.maxBytes);
       const slice = e.data.subarray(0, max);
@@ -215,7 +243,8 @@ export class SimNode {
     });
     on("fs.write", (p) => {
       const id = String(p.workloadId);
-      const path = norm(String(p.path));
+      const path = this.resolve(id, String(p.path));
+      this.deny(p, [norm(String(p.path)), path]);
       const cur = this.files(id).get(path);
       if (p.ifMatchSha256 === null && cur) throw new SimError("CONFLICT", "file already exists");
       if (typeof p.ifMatchSha256 === "string" && (!cur || sha(cur.data) !== p.ifMatchSha256)) throw new SimError("CONFLICT", "file changed since it was read");
@@ -226,15 +255,17 @@ export class SimNode {
     });
     on("fs.mkdir", (p) => {
       const id = String(p.workloadId);
-      const path = norm(String(p.path));
+      const path = this.resolve(id, String(p.path), false);
+      this.deny(p, [norm(String(p.path)), path]);
       if (this.files(id).has(path)) throw new SimError("CONFLICT", "already exists");
       this.mkdirs(id, path);
       return {};
     });
     on("fs.rename", (p) => {
       const id = String(p.workloadId);
-      const from = norm(String(p.from));
-      const to = norm(String(p.to));
+      const from = this.resolve(id, String(p.from), false);
+      const to = this.resolve(id, String(p.to), false);
+      this.deny(p, [norm(String(p.from)), from, this.resolve(id, String(p.from)), norm(String(p.to)), to]);
       const files = this.files(id);
       if (!files.has(from)) throw new SimError("NOT_FOUND", "no such file");
       if (files.has(to)) throw new SimError("CONFLICT", "destination exists");
@@ -248,7 +279,8 @@ export class SimNode {
     });
     on("fs.delete", (p) => {
       const id = String(p.workloadId);
-      const path = norm(String(p.path));
+      const path = this.resolve(id, String(p.path), false);
+      this.deny(p, [norm(String(p.path)), path, this.resolve(id, String(p.path))]);
       const files = this.files(id);
       if (!files.has(path)) throw new SimError("NOT_FOUND", "no such file");
       const children = [...files.keys()].filter((k) => k.startsWith(`${path}/`));
@@ -258,22 +290,30 @@ export class SimNode {
     });
     on("fs.copy", (p) => {
       const id = String(p.workloadId);
-      const src = norm(String(p.path));
+      const src = this.resolve(id, String(p.path));
       const files = this.files(id);
       const e = files.get(src);
       if (!e) throw new SimError("NOT_FOUND", "no such file");
-      const candidate = (n: number) => [parentOf(src), copyName(nameOf(src), n, e.type === "dir")].filter(Boolean).join("/");
+      this.deny(p, [norm(String(p.path)), ...this.tree(id, src)]);
+      const requested = norm(String(p.path));
+      const candidate = (n: number) => [parentOf(requested), copyName(nameOf(requested), n, e.type === "dir")].filter(Boolean).join("/");
       let n = 1;
       while (files.has(candidate(n))) n++;
       const dest = candidate(n);
+      this.deny(p, [dest]);
       for (const [path, entry] of [...files]) {
-        if (path === src || path.startsWith(`${src}/`)) files.set(dest + path.slice(src.length), { ...entry, data: Buffer.from(entry.data) });
+        // Symlinks inside a copied directory are skipped (never followed).
+        if (path === src || (path.startsWith(`${src}/`) && entry.type !== "symlink")) files.set(dest + path.slice(src.length), { ...entry, data: Buffer.from(entry.data) });
       }
       return { path: dest };
     });
     on("fs.chmod", (p) => {
-      const e = this.files(String(p.workloadId)).get(norm(String(p.path)));
+      const id = String(p.workloadId);
+      const path = this.resolve(id, String(p.path), false);
+      this.deny(p, [norm(String(p.path)), path]);
+      const e = this.files(id).get(path);
       if (!e) throw new SimError("NOT_FOUND", "no such file");
+      if (e.type === "symlink") throw new SimError("PATH_FORBIDDEN", "symlinks cannot be chmodded");
       e.mode = Number(p.mode);
       return {};
     });
@@ -288,42 +328,108 @@ export class SimNode {
       const id = String(p.workloadId);
       const root = norm(String(p.root));
       const files = this.files(id);
-      const sources = (p.paths as string[]).map((x) => [root, norm(x)].filter(Boolean).join("/"));
-      let entries = 0;
-      for (const s of sources) {
-        if (!files.has(s)) throw new SimError("NOT_FOUND", `${s} does not exist`);
-        entries += [...files.keys()].filter((k) => k === s || k.startsWith(`${s}/`)).length;
-      }
       const ext = p.format === "zip" ? ".zip" : ".tar.gz";
-      const dest = p.destPath ? norm(String(p.destPath)) : [root, `archive-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}Z${ext}`].filter(Boolean).join("/");
+      const iso = new Date().toISOString();
+      const dest = p.destPath ? norm(String(p.destPath)) : [root, `archive-${iso.slice(0, 10)}T${iso.slice(11, 19).replace(/:/g, "")}Z${ext}`].filter(Boolean).join("/");
+      const contents: Record<string, string> = {};
+      let entries = 0;
+      for (const x of p.paths as string[]) {
+        const requested = [root, norm(x)].filter(Boolean).join("/");
+        const resolved = this.resolve(id, requested);
+        if (!files.has(resolved)) throw new SimError("NOT_FOUND", `${requested} does not exist`);
+        const tree = this.tree(id, resolved);
+        this.deny(p, [requested, ...tree]);
+        entries += tree.length;
+        for (const t of tree) {
+          const e = files.get(t)!;
+          if (e.type === "file") contents[requested + t.slice(resolved.length)] = e.data.toString("utf8");
+        }
+      }
+      this.deny(p, [dest]);
       if (files.has(dest)) throw new SimError("CONFLICT", "archive exists");
-      const data = Buffer.from(`archive of ${sources.join(",")}`);
+      const data = Buffer.from(`archive of ${Object.keys(contents).join(",")}`);
       this.put(id, dest, data);
+      this.archives.set(`${id}:${dest}`, contents);
       return { path: dest, size: data.length, entries };
     });
     on("fs.extract", (p) => {
       const id = String(p.workloadId);
-      const archive = norm(String(p.archivePath));
+      const archive = this.resolve(id, String(p.archivePath));
+      this.deny(p, [norm(String(p.archivePath)), archive]);
       if (this.files(id).get(archive)?.type !== "file") throw new SimError("NOT_FOUND", "no such archive");
-      const data = Buffer.from("extracted");
-      this.put(id, [norm(String(p.destPath)), "extracted.txt"].filter(Boolean).join("/"), data);
-      return { entries: 1, bytes: data.length };
+      const dest = this.resolve(id, String(p.destPath));
+      const contents = this.archives.get(`${id}:${archive}`) ?? { "extracted.txt": "extracted" };
+      const targets = Object.keys(contents).map((name) => [dest, norm(name)].filter(Boolean).join("/"));
+      this.deny(p, [norm(String(p.destPath)), dest, ...targets]);
+      let bytes = 0;
+      for (const [name, content] of Object.entries(contents)) {
+        this.put(id, [dest, norm(name)].filter(Boolean).join("/"), content);
+        bytes += Buffer.byteLength(content);
+      }
+      return { entries: targets.length, bytes };
     });
     on("fs.transfer.pull", async (p) => {
+      const id = String(p.workloadId);
+      const path = this.resolve(id, String(p.path));
+      this.deny(p, [norm(String(p.path)), path]);
       const res = await this.agent.download(String(p.transferId));
       if (res.status !== 200) throw new SimError("TRANSFER_FAILED", `rendezvous answered ${res.status}`);
       const data = Buffer.from(await res.arrayBuffer());
       if (data.length > Number(p.maxBytes)) throw new SimError("QUOTA_EXCEEDED", "transfer larger than announced");
-      this.put(String(p.workloadId), String(p.path), data);
+      this.put(id, path, data);
       return { bytes: data.length, sha256: sha(data) };
     });
     on("fs.transfer.push", async (p) => {
-      const e = this.files(String(p.workloadId)).get(norm(String(p.path)));
+      const id = String(p.workloadId);
+      const path = this.resolve(id, String(p.path));
+      this.deny(p, [norm(String(p.path)), path]);
+      const e = this.files(id).get(path);
       if (!e || e.type !== "file") throw new SimError("NOT_FOUND", "no such file");
       const up = await this.agent.upload(String(p.transferId), e.data);
       if (up.status !== 200) throw new SimError("TRANSFER_FAILED", `rendezvous answered ${up.status}`);
       return { bytes: e.data.length, sha256: sha(e.data) };
     });
+  }
+
+  /** Enforces a received `denylist` (contracts semantics) on every given path. */
+  private deny(p: Record<string, unknown>, paths: readonly string[]): void {
+    const list = p.denylist as string[] | undefined;
+    if (!list?.length) return;
+    const d = compileDenylist(list);
+    for (const x of paths) if (x && d.denied(x)) throw denied(x);
+  }
+
+  /** A path and everything below it (symlinks inside are listed but never followed). */
+  private tree(workloadId: string, path: string): string[] {
+    return [...this.files(workloadId).keys()].filter((k) => k === path || k.startsWith(`${path}/`));
+  }
+
+  /**
+   * Resolves symlinks inside the sandbox like `os.Root` (relative targets only; escaping the root is
+   * refused). `followFinal = false` leaves a symlink in the last component unresolved (lstat).
+   */
+  resolve(workloadId: string, path: string, followFinal = true, depth = 0): string {
+    if (depth > 40) throw new SimError("PATH_FORBIDDEN", "too many levels of symbolic links");
+    const parts = norm(path).split("/").filter(Boolean);
+    let cur = "";
+    for (let i = 0; i < parts.length; i++) {
+      const next = cur ? `${cur}/${parts[i]}` : parts[i]!;
+      const e = this.files(workloadId).get(next);
+      if (e?.type === "symlink" && (i < parts.length - 1 || followFinal)) {
+        const target = joinInside(parentOf(next), e.target ?? "");
+        const rest = parts.slice(i + 1).join("/");
+        return this.resolve(workloadId, rest ? `${target}/${rest}` : target, followFinal, depth + 1);
+      }
+      cur = next;
+    }
+    return cur;
+  }
+
+  /** Creates a symlink `path` → `target` (relative to the link's directory, as on disk). */
+  link(workloadId: string, path: string, target: string): void {
+    const p = norm(path);
+    if (parentOf(p)) this.mkdirs(workloadId, parentOf(p));
+    this.files(workloadId).set(p, { type: "symlink", data: Buffer.alloc(0), mode: 0o777, mtime: Date.now(), target });
   }
 
   files(workloadId: string): Map<string, Entry> {
@@ -348,7 +454,8 @@ export class SimNode {
   }
 
   read(workloadId: string, path: string): string | null {
-    return this.files(workloadId).get(norm(path))?.data.toString("utf8") ?? null;
+    const e = this.files(workloadId).get(norm(path));
+    return e && e.type !== "symlink" ? e.data.toString("utf8") : null;
   }
 
   private entry(path: string, e: Entry): FileEntry {

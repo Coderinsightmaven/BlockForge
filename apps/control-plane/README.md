@@ -90,10 +90,16 @@ restart until an owner exists.
   `/auth/login` and `/auth/setup` instead require `Content-Type: application/json`; any mutation
   carrying a foreign `Origin` is rejected.
 * **Transfer URLs** (`/api/v1/transfers/:token`): 256-bit, single use, bound to the issuing session,
-  5 minutes, in memory (a restart invalidates outstanding URLs); the token is the authorisation, so
-  the CSRF header is optional there (a foreign `Origin` is still rejected).
-* **Catalogue fetch**: the DNS check and the connection resolve separately (no address pinning);
-  acceptable because only the fixed upstream hosts in `CATALOG_HOSTS` are reachable.
+  5 minutes, in memory (a restart invalidates outstanding URLs); the token replaces the CSRF header
+  there (a foreign `Origin` is still rejected). Access (file permission, suspension, denylist) is
+  re-checked when the URL is used.
+* **File manager**: the template denylist (non-admins) and the proxy-secret files (users without
+  `secrets.read`) are sent with every `fs.*` command; the agent enforces them on requested *and*
+  symlink-resolved paths (and archive/copy entries), so links cannot alias protected files.
+* **Console**: values of non-user-viewable egg variables (and their base64) are masked in install
+  and console output before the ring buffer, realtime and job logs see it.
+* **Catalogue fetch**: HTTPS to allowlisted hosts only; every hop's DNS answer must be public and the
+  connection is pinned to that validated address (no rebinding window); bounded size and redirects.
 * **Webhooks**: HTTPS only, every resolved address must be public (IPv4/IPv6 incl. mapped/NAT64/
   6to4 forms, metadata ranges) unless the host is in `notifications.webhookAllowlist`; the socket is
   pinned to the validated address; redirects are **not followed**; 10 s timeout; 64 KiB response cap.

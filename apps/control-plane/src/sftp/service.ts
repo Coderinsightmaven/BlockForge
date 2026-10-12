@@ -12,6 +12,7 @@ import type { Clock } from "../lib/clock.js";
 import { safeEqual } from "../lib/crypto.js";
 import { AppError, rateLimited } from "../lib/errors.js";
 import type { RbacService } from "../rbac/service.js";
+import { SECRET_DENY_PATTERNS } from "../files/policy.js";
 import { effectiveServerPermissions } from "../servers/permissions.js";
 
 /** SFTP sessions re-authenticate after this long. */
@@ -101,7 +102,11 @@ export class SftpService {
       workloadId: target.server.id,
       userId: user.id,
       permissions: granted,
-      denylist: perms.has("servers.admin") ? [] : target.denylist,
+      denylist: [
+        ...(perms.has("servers.admin") ? [] : target.denylist),
+        // Network members hold BlockForge-managed forwarding secrets (raw over SFTP otherwise).
+        ...(target.networkId && !perms.has("secrets.read") ? SECRET_DENY_PATTERNS : []),
+      ],
       expiresAt: now + SFTP_SESSION_TTL_MS,
     };
   }

@@ -13,7 +13,7 @@ import { AppError, badRequest, conflict, forbidden, notFound, validationDetails 
 import type { ServerAccess } from "../servers/access.js";
 import type { TemplatesService } from "../templates/service.js";
 import type { BrowserTransfers } from "./browser-transfers.js";
-import { isDenied, isSecretBearing, normalizePath, redactForDisplay } from "./policy.js";
+import { isDenied, isSecretBearing, MAX_AGENT_DENYLIST, normalizePath, redactForDisplay, SECRET_BEARING_FILES, SECRET_DENY_PATTERNS } from "./policy.js";
 
 const EDITOR_MAX_BYTES = 5 * 1024 * 1024;
 const DOWNLOAD_MAX_BYTES = 16 * 1024 ** 3;
@@ -24,9 +24,17 @@ const ARCHIVE_SYNC_WAIT_MS = 15_000;
 
 export const FILE_JOBS = { compress: "server.files.compress", decompress: "server.files.decompress" } as const;
 
+/** The agent refused a path (or the target of a symlink in it) because of the denylist it was sent. */
+export function isDenylistRefusal(err: unknown): boolean {
+  return err instanceof AgentCommandError && err.code === "PATH_FORBIDDEN" && (err.details as { reason?: unknown } | undefined)?.reason === "denylist";
+}
+
+const pathDenied = () => new AppError(403, "PATH_DENIED", "That path, or the file a link in it points to, is protected on this server");
+
 /** Agent errors → API errors for file operations. */
 function fsError(err: unknown): unknown {
   if (!(err instanceof AgentCommandError)) return err;
+  if (isDenylistRefusal(err)) return pathDenied();
   switch (err.code) {
     case "NOT_FOUND":
       return notFound("File");
@@ -65,6 +73,30 @@ export class FilesService {
     return (await this.d.templates.row(access.server.templateId)).fileDenylist;
   }
 
+  /**
+   * The denylist the agent enforces on requested AND symlink-resolved paths (descendants for
+   * copy/compress/extract). The requested-path checks here are only a fast first layer.
+   *  - template `fileDenylist` unless the requester holds `servers.admin`;
+   *  - secret-bearing files (appended last, so template `!` rules cannot re-allow them) for
+   *    requesters without `secrets.read`: always for single-file content (an alias must not bypass
+   *    redaction), for bulk copies/archives only on network members (where BlockForge manages the
+   *    forwarding secret — every Paper server has config/paper-global.yml, so applying it everywhere
+   *    would forbid archiving a server's root). `readSelf` keeps a secret file readable (redacted)
+   *    through its own name while aliases to other secret files stay refused.
+   */
+  private async agentDeny(access: ServerAccess, scope: "plain" | "content" | "bulk", readSelf?: string): Promise<{ denylist?: string[] }> {
+    const out = [...(await this.denylist(access))];
+    if (!access.permissions.has("secrets.read") && (scope === "content" || (scope === "bulk" && access.resource.networkId))) {
+      out.push(...SECRET_DENY_PATTERNS);
+      if (readSelf && isSecretBearing(readSelf)) out.push(`!/${normalizePath(readSelf)}`);
+    }
+    if (!out.length) return {};
+    if (out.length > MAX_AGENT_DENYLIST) {
+      throw new AppError(422, "PRECONDITION_FAILED", `The template's file denylist is too long to enforce (at most ${MAX_AGENT_DENYLIST - SECRET_DENY_PATTERNS.length - 1} patterns)`);
+    }
+    return { denylist: out };
+  }
+
   private async guard(access: ServerAccess, paths: readonly string[], opts: { secretWrite?: boolean } = {}): Promise<void> {
     const deny = await this.denylist(access);
     for (const p of paths) {
@@ -96,7 +128,8 @@ export class FilesService {
 
   async read(access: ServerAccess, path: string, actor: AuditActor) {
     await this.guard(access, [path]);
-    const r = (await this.send(access, "fs.read", { workloadId: access.server.id, path, maxBytes: EDITOR_MAX_BYTES }, actor)) as {
+    const deny = await this.agentDeny(access, "content", path);
+    const r = (await this.send(access, "fs.read", { workloadId: access.server.id, path, maxBytes: EDITOR_MAX_BYTES, ...deny }, actor)) as {
       content: string;
       encoding: "utf8" | "base64";
       sha256: string;
@@ -115,11 +148,13 @@ export class FilesService {
 
   async write(access: ServerAccess, req: { path: string; content: string; encoding: "utf8" | "base64"; baseSha256?: string | null | undefined }, actor: AuditActor) {
     await this.guard(access, [req.path], { secretWrite: true });
+    const deny = await this.agentDeny(access, "content");
     const r = await this.send(
       access,
       "fs.write",
       {
         workloadId: access.server.id,
+        ...deny,
         path: req.path,
         content: req.content,
         encoding: req.encoding,
@@ -134,32 +169,45 @@ export class FilesService {
 
   async rename(access: ServerAccess, renames: { from: string; to: string }[], actor: AuditActor): Promise<void> {
     await this.guard(access, renames.flatMap((r) => [r.from, r.to]), { secretWrite: true });
-    for (const r of renames) await this.send(access, "fs.rename", { workloadId: access.server.id, from: r.from, to: r.to }, actor);
+    if (!access.permissions.has("secrets.read") && access.resource.networkId) {
+      // Moving a directory that holds a managed secret file would strip its name-based protection.
+      for (const r of renames) {
+        const from = normalizePath(r.from);
+        if (SECRET_BEARING_FILES.some((f) => f.startsWith(`${from}/`))) {
+          throw new AppError(403, "REDACTED_CONTENT", `${from} contains proxy secret files; moving it requires secrets.read`, { path: from });
+        }
+      }
+    }
+    const deny = await this.agentDeny(access, "plain");
+    for (const r of renames) await this.send(access, "fs.rename", { workloadId: access.server.id, from: r.from, to: r.to, ...deny }, actor);
     await this.audit(actor, access, "rename", { renames: renames.map((r) => ({ from: normalizePath(r.from), to: normalizePath(r.to) })) });
   }
 
   async remove(access: ServerAccess, paths: string[], actor: AuditActor): Promise<void> {
     await this.guard(access, paths, { secretWrite: true });
-    for (const p of paths) await this.send(access, "fs.delete", { workloadId: access.server.id, path: p, recursive: true }, actor, 120_000);
+    const deny = await this.agentDeny(access, "plain");
+    for (const p of paths) await this.send(access, "fs.delete", { workloadId: access.server.id, path: p, recursive: true, ...deny }, actor, 120_000);
     await this.audit(actor, access, "delete", { paths: paths.map(normalizePath) });
   }
 
   async copy(access: ServerAccess, path: string, actor: AuditActor): Promise<{ path: string }> {
     await this.guard(access, [path], { secretWrite: true });
-    const r = (await this.send(access, "fs.copy", { workloadId: access.server.id, path }, actor, 120_000)) as { path: string };
+    const deny = await this.agentDeny(access, "bulk");
+    const r = (await this.send(access, "fs.copy", { workloadId: access.server.id, path, ...deny }, actor, 120_000)) as { path: string };
     await this.audit(actor, access, "copy", { path: normalizePath(path), to: r.path });
     return r;
   }
 
   async mkdir(access: ServerAccess, path: string, actor: AuditActor): Promise<void> {
     await this.guard(access, [path]);
-    await this.send(access, "fs.mkdir", { workloadId: access.server.id, path }, actor);
+    await this.send(access, "fs.mkdir", { workloadId: access.server.id, path, ...(await this.agentDeny(access, "plain")) }, actor);
     await this.audit(actor, access, "mkdir", { path: normalizePath(path) });
   }
 
   async chmod(access: ServerAccess, files: { path: string; mode: string }[], actor: AuditActor): Promise<void> {
     await this.guard(access, files.map((f) => f.path), { secretWrite: true });
-    for (const f of files) await this.send(access, "fs.chmod", { workloadId: access.server.id, path: f.path, mode: parseInt(f.mode, 8) }, actor);
+    const deny = await this.agentDeny(access, "plain");
+    for (const f of files) await this.send(access, "fs.chmod", { workloadId: access.server.id, path: f.path, mode: parseInt(f.mode, 8), ...deny }, actor);
     await this.audit(actor, access, "chmod", { files: files.map((f) => ({ path: normalizePath(f.path), mode: f.mode })) });
   }
 
@@ -182,11 +230,14 @@ export class FilesService {
     actor: AuditActor,
   ): Promise<{ status: number; body: unknown }> {
     await this.guard(access, paths);
-    const jobId = await this.d.jobs.enqueue(FILE_JOBS[kind], { serverId: access.server.id, ...input }, { targetType: "server", targetId: access.server.id, requestedBy: actor.actorId });
+    // Extraction writes files (secret files must not be planted); archives read them (bulk).
+    const deny = await this.agentDeny(access, kind === "decompress" ? "content" : "bulk");
+    const jobId = await this.d.jobs.enqueue(FILE_JOBS[kind], { serverId: access.server.id, ...input, ...deny }, { targetType: "server", targetId: access.server.id, requestedBy: actor.actorId });
     await this.audit(actor, access, kind, { ...input, jobId });
     try {
       const row = await this.d.jobs.waitForCompletion(jobId, ARCHIVE_SYNC_WAIT_MS);
       if (row.status === "succeeded") return { status: 200, body: row.result };
+      if (row.error?.code === "PATH_DENIED") throw pathDenied();
       throw new AppError(502, "UPSTREAM_ERROR", row.error?.message ?? `${kind} failed`, { jobId });
     } catch (err) {
       if (err instanceof AppError) throw err;
@@ -195,9 +246,20 @@ export class FilesService {
   }
 
   jobDefinitions(): JobDefinition<never>[] {
-    const Compress = z.object({ serverId: z.uuid(), nodeId: z.uuid(), root: z.string(), paths: z.array(z.string()).min(1), format: z.enum(["tar.gz", "zip"]) });
-    const Decompress = z.object({ serverId: z.uuid(), nodeId: z.uuid(), path: z.string(), destination: z.string() });
+    const Denylist = z.array(z.string().max(512)).max(MAX_AGENT_DENYLIST).optional();
+    const Compress = z.object({
+      serverId: z.uuid(),
+      nodeId: z.uuid(),
+      root: z.string(),
+      paths: z.array(z.string()).min(1),
+      format: z.enum(["tar.gz", "zip"]),
+      destPath: z.string().optional(),
+      denylist: Denylist,
+    });
+    const Decompress = z.object({ serverId: z.uuid(), nodeId: z.uuid(), path: z.string(), destination: z.string(), denylist: Denylist });
+    const deny = (d: string[] | undefined) => (d ? { denylist: d } : {});
     const wrap = (err: unknown): never => {
+      if (isDenylistRefusal(err)) throw new JobError("PATH_DENIED", "a path in the selection, or a file a link in it points to, is protected on this server");
       if (err instanceof AgentCommandError) throw new JobError(err.code, err.message, err.retryable);
       throw err;
     };
@@ -212,7 +274,20 @@ export class FilesService {
           label: "Create the archive",
           run: async (ctx) => {
             const r = await this.d.gateway
-              .send(ctx.input.nodeId, "fs.compress", { workloadId: ctx.input.serverId, root: ctx.input.root, paths: ctx.input.paths, format: ctx.input.format, maxTotalBytes: ARCHIVE_MAX_BYTES }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 15 * 60_000 })
+              .send(
+                ctx.input.nodeId,
+                "fs.compress",
+                {
+                  workloadId: ctx.input.serverId,
+                  root: ctx.input.root,
+                  paths: ctx.input.paths,
+                  format: ctx.input.format,
+                  ...(ctx.input.destPath ? { destPath: ctx.input.destPath } : {}),
+                  maxTotalBytes: ARCHIVE_MAX_BYTES,
+                  ...deny(ctx.input.denylist),
+                },
+                { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 15 * 60_000 },
+              )
               .catch(wrap);
             ctx.state.result = { path: r.path, size: r.size, entries: r.entries };
             await ctx.log("info", `Created ${r.path} (${r.entries} entries, ${r.size} bytes)`);
@@ -232,7 +307,12 @@ export class FilesService {
           label: "Extract the archive",
           run: async (ctx) => {
             const r = await this.d.gateway
-              .send(ctx.input.nodeId, "fs.extract", { workloadId: ctx.input.serverId, archivePath: ctx.input.path, destPath: ctx.input.destination, maxTotalBytes: ARCHIVE_MAX_BYTES, maxEntries: ARCHIVE_MAX_ENTRIES }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 15 * 60_000 })
+              .send(
+                ctx.input.nodeId,
+                "fs.extract",
+                { workloadId: ctx.input.serverId, archivePath: ctx.input.path, destPath: ctx.input.destination, maxTotalBytes: ARCHIVE_MAX_BYTES, maxEntries: ARCHIVE_MAX_ENTRIES, ...deny(ctx.input.denylist) },
+                { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 15 * 60_000 },
+              )
               .catch(wrap);
             ctx.state.result = { path: ctx.input.destination, size: r.bytes, entries: r.entries };
             await ctx.log("info", `Extracted ${r.entries} entries (${r.bytes} bytes)`);
@@ -267,13 +347,21 @@ export class FilesService {
    * Streams a browser upload to the agent: the body is offered on the transfer rendezvous and the
    * agent pulls it (`fs.transfer.pull`) into a temp file, renamed on success. Nothing is buffered.
    */
-  async receiveUpload(t: { serverId: string; nodeId: string; path: string; maxBytes: number; userId: string }, body: Readable, actor: AuditActor): Promise<{ bytes: number; sha256: string }> {
+  async receiveUpload(access: ServerAccess, t: { serverId: string; nodeId: string; path: string; maxBytes: number; userId: string }, body: Readable, actor: AuditActor): Promise<{ bytes: number; sha256: string }> {
+    // Checked again at use: access, denylist or the template may have changed since the URL was issued.
+    await this.guard(access, [t.path], { secretWrite: true });
+    const deny = await this.agentDeny(access, "content");
     const transferId = randomUUID();
     const offered = this.d.transfers.offerDownload({ id: transferId, nodeId: t.nodeId, maxBytes: t.maxBytes }, body);
     offered.catch(() => undefined);
     let result: { bytes: number; sha256: string };
     try {
-      result = await this.d.gateway.send(t.nodeId, "fs.transfer.pull", { workloadId: t.serverId, path: t.path, transferId, maxBytes: t.maxBytes }, { userId: t.userId, timeoutMs: 15 * 60_000 });
+      result = await this.d.gateway.send(
+        t.nodeId,
+        "fs.transfer.pull",
+        { workloadId: t.serverId, path: t.path, transferId, maxBytes: t.maxBytes, ...deny },
+        { userId: t.userId, timeoutMs: 15 * 60_000 },
+      );
     } catch (err) {
       this.d.transfers.cancel(transferId);
       throw fsError(err);
@@ -286,10 +374,20 @@ export class FilesService {
   }
 
   /** Streams a file from the agent (`fs.transfer.push`) straight into the HTTP response. */
-  async sendDownload(t: { serverId: string; nodeId: string; path: string; maxBytes: number; userId: string }, actor: AuditActor): Promise<Readable> {
+  async sendDownload(access: ServerAccess, t: { serverId: string; nodeId: string; path: string; maxBytes: number; userId: string }, actor: AuditActor): Promise<Readable> {
+    await this.guard(access, [t.path]);
+    if (isSecretBearing(t.path) && !access.permissions.has("secrets.read")) {
+      throw new AppError(403, "REDACTED_CONTENT", `${normalizePath(t.path)} holds proxy secrets; downloading it requires secrets.read`, { path: normalizePath(t.path) });
+    }
+    const deny = await this.agentDeny(access, "content");
     const transferId = randomUUID();
     const incoming = this.d.transfers.expectUpload({ id: transferId, nodeId: t.nodeId, maxBytes: t.maxBytes });
-    const pushed = this.d.gateway.send(t.nodeId, "fs.transfer.push", { workloadId: t.serverId, path: t.path, transferId }, { userId: t.userId, timeoutMs: 15 * 60_000 });
+    const pushed = this.d.gateway.send(
+      t.nodeId,
+      "fs.transfer.push",
+      { workloadId: t.serverId, path: t.path, transferId, ...deny },
+      { userId: t.userId, timeoutMs: 15 * 60_000 },
+    );
     const first = await Promise.race([incoming.then((s) => ({ stream: s })), pushed.then(() => ({ stream: null }), (err: unknown) => ({ error: err }))]);
     if ("error" in first) {
       this.d.transfers.cancel(transferId);

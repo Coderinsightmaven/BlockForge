@@ -1,5 +1,5 @@
 import type { NodeConnection } from "@blockforge/contracts";
-import { and, count, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, count, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { NodeStateTracker } from "../agents/node-state.js";
 import type { DbOrTx } from "../db/client.js";
 import { allocations, nodes, resourceReservations } from "../db/schema/index.js";
@@ -86,16 +86,7 @@ export async function placementCandidates(
     if (!n.schedulingEnabled) hard.push("scheduling is disabled on this node");
     if (!CONNECTED.includes(connection)) hard.push(`node agent is ${connection}`);
     if (connection === "degraded") soft.push("warning: node is degraded");
-    const capacityIssues: string[] = [];
-    const memFree = cap.memoryAllocatableBytes * cap.overcommitMemoryRatio - cap.memoryReservedBytes;
-    if (memFree < req.memoryLimitBytes) capacityIssues.push(`not enough memory (${fmtGiB(Math.max(0, memFree))} free, ${fmtGiB(req.memoryLimitBytes)} requested)`);
-    const cpuReq = req.cpuLimitMillicores ?? 0;
-    const cpuFree = cap.cpuAllocatableMillicores - cap.cpuReservedMillicores;
-    if (cpuReq > 0 && cpuFree < cpuReq) capacityIssues.push(`not enough CPU (${Math.max(0, cpuFree)}m free, ${cpuReq}m requested)`);
-    const storageFree = cap.storageAllocatableBytes - cap.storageReservedBytes;
-    if (req.storageQuotaBytes !== null && storageFree < req.storageQuotaBytes) {
-      capacityIssues.push(`not enough storage (${fmtGiB(Math.max(0, storageFree))} free, ${fmtGiB(req.storageQuotaBytes)} requested)`);
-    }
+    const { issues: capacityIssues, memFree, cpuFree, cpuReq } = capacityCheck(cap, req);
     if (req.overrideCapacity) soft.push(...capacityIssues.map((c) => `warning (override): ${c}`));
     else hard.push(...capacityIssues);
     const freeAllocations = freeMap.get(n.id) ?? 0;
@@ -119,6 +110,49 @@ export async function placementCandidates(
     return { nodeId: n.id, nodeName: n.name, fits: hard.length === 0, reasons: [...hard, ...soft], score: Math.round(score * 10) / 10, freeAllocations };
   });
   return out.sort((a, b) => Number(b.fits) - Number(a.fits) || b.score - a.score || a.nodeName.localeCompare(b.nodeName));
+}
+
+type Capacity = ReturnType<typeof computeCapacity>;
+type ResourceNeed = Pick<PlacementRequest, "memoryLimitBytes" | "cpuLimitMillicores" | "storageQuotaBytes">;
+
+function capacityCheck(cap: Capacity, req: ResourceNeed): { issues: string[]; memFree: number; cpuFree: number; cpuReq: number } {
+  const issues: string[] = [];
+  const memFree = cap.memoryAllocatableBytes * cap.overcommitMemoryRatio - cap.memoryReservedBytes;
+  if (memFree < req.memoryLimitBytes) issues.push(`not enough memory (${fmtGiB(Math.max(0, memFree))} free, ${fmtGiB(req.memoryLimitBytes)} requested)`);
+  const cpuReq = req.cpuLimitMillicores ?? 0;
+  const cpuFree = cap.cpuAllocatableMillicores - cap.cpuReservedMillicores;
+  if (cpuReq > 0 && cpuFree < cpuReq) issues.push(`not enough CPU (${Math.max(0, cpuFree)}m free, ${cpuReq}m requested)`);
+  const storageFree = cap.storageAllocatableBytes - cap.storageReservedBytes;
+  if (req.storageQuotaBytes !== null && storageFree < req.storageQuotaBytes) {
+    issues.push(`not enough storage (${fmtGiB(Math.max(0, storageFree))} free, ${fmtGiB(req.storageQuotaBytes)} requested)`);
+  }
+  return { issues, memFree, cpuFree, cpuReq };
+}
+
+/**
+ * Capacity problems if a server on `nodeId` needed `need` (its own current reservation excluded).
+ * Call under {@link lockNodeForPlacement}.
+ */
+export async function serverCapacityIssues(tx: DbOrTx, clock: Clock, nodeId: string, serverId: string, need: ResourceNeed): Promise<string[]> {
+  const [node] = await tx.select().from(nodes).where(eq(nodes.id, nodeId)).limit(1);
+  if (!node) return ["node no longer exists"];
+  const now = new Date(clock.now());
+  const [rr] = await tx
+    .select({
+      cpu: sql<string>`coalesce(sum(${resourceReservations.cpuMillicores}), 0)`,
+      memory: sql<string>`coalesce(sum(${resourceReservations.memoryBytes}), 0)`,
+      storage: sql<string>`coalesce(sum(${resourceReservations.storageBytes}), 0)`,
+    })
+    .from(resourceReservations)
+    .where(
+      and(
+        eq(resourceReservations.nodeId, nodeId),
+        or(isNull(resourceReservations.serverId), ne(resourceReservations.serverId, serverId)),
+        or(isNull(resourceReservations.expiresAt), gt(resourceReservations.expiresAt, now)),
+      ),
+    );
+  const cap = computeCapacity(node, node.facts ?? null, { cpuMillicores: Number(rr?.cpu ?? 0), memoryBytes: Number(rr?.memory ?? 0), storageBytes: Number(rr?.storage ?? 0) });
+  return capacityCheck(cap, need).issues;
 }
 
 /** Serialises placement decisions per node inside a transaction (two creates cannot overbook one node). */

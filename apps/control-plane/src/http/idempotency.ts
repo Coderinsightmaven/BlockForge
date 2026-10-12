@@ -21,7 +21,7 @@ export interface HandlerResult {
 /**
  * `Idempotency-Key` support (api.md): keys are scoped to (user, route). The first request inserts a
  * placeholder row, runs, then stores status + body; a repeat with the same request hash replays the
- * stored response, a different body yields 409, and a concurrent duplicate while the first is still
+ * stored response, a different body, path or query yields 409, and a concurrent duplicate while the first is still
  * running yields 409 as well. Failed requests (exceptions) release the key so clients can retry.
  */
 export class IdempotencyService {
@@ -37,7 +37,12 @@ export class IdempotencyService {
     if (!KEY_RE.test(key)) throw badRequest("Idempotency-Key must be 1–128 printable ASCII characters");
     const userId = req.session?.user.id;
     if (!userId) throw unauthenticated();
-    const requestHash = sha256Hex(canonicalJson(toJsonSafe({ params: req.params ?? null, body: req.body ?? null })));
+    // The query is part of the request (e.g. DELETE …?deleteData=true): a different query under the
+    // same key must not replay the other response. Canonical JSON sorts keys; omitted when empty.
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const requestHash = sha256Hex(
+      canonicalJson(toJsonSafe({ params: req.params ?? null, body: req.body ?? null, ...(Object.keys(query).length ? { query } : {}) })),
+    );
     const pk = and(eq(idempotencyKeys.userId, userId), eq(idempotencyKeys.route, route), eq(idempotencyKeys.key, key));
 
     for (let attempt = 0; attempt < 2; attempt++) {

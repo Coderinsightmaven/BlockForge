@@ -17,6 +17,13 @@ export function usernameBase(email: string): string {
   return base;
 }
 
+/** The n-th candidate: `base`, then `base-2`, `base-3`, …; the base is shortened so it stays ≤ 32 characters. */
+export function usernameCandidate(base: string, n: number): string {
+  if (n <= 1) return base.slice(0, 32);
+  const suffix = `-${n}`;
+  return `${base.slice(0, 32 - suffix.length)}${suffix}`;
+}
+
 /** First free username `base`, `base-2`, `base-3`, … (checked against the database). */
 export async function uniqueUsername(tx: DbOrTx, email: string): Promise<string> {
   const base = usernameBase(email);
@@ -30,7 +37,11 @@ export async function uniqueUsername(tx: DbOrTx, email: string): Promise<string>
   );
   if (!taken.has(base)) return base;
   for (let i = 2; ; i++) {
-    const candidate = `${base}-${i}`;
-    if (!taken.has(candidate)) return candidate;
+    const candidate = usernameCandidate(base, i);
+    if (taken.has(candidate)) continue;
+    // A shortened base is outside the prefetched `base-%` set: check that name itself.
+    if (candidate.startsWith(`${base}-`)) return candidate;
+    const [hit] = await tx.select({ u: users.username }).from(users).where(inArray(users.username, [candidate])).limit(1);
+    if (!hit) return candidate;
   }
 }

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { FileArchiveResponse, FileContentResponse, FileListResponse, TransferUrlResponse } from "@blockforge/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { createUserClient, responseLog, startWithOwner, type ApiClient, type TestApp } from "../support/app.js";
@@ -28,7 +28,7 @@ async function setup(): Promise<{ t: TestApp; owner: ApiClient; alice: ApiClient
   const imported = await owner.post("/templates/import", { egg: eggFixture("ptero-egg-vanilla-minecraft.json"), category: "Minecraft" });
   expect(imported.statusCode, imported.body).toBe(201);
   const templateId = imported.json().template.id as string;
-  const patched = await owner.patch(`/templates/${templateId}`, { fileDenylist: ["secrets/", "*.key", "!public.key"] });
+  const patched = await owner.patch(`/templates/${templateId}`, { fileDenylist: ["secrets/", "*.key", "!public.key", "/vault/", "!/vault/readme.txt"] });
   expect(patched.statusCode, patched.body).toBe(200);
   const alice = await createUserClient(r.t, owner, "alice@example.com", []);
   const aliceId = (await alice.get("/auth/me")).json().user.id as string;
@@ -51,6 +51,7 @@ async function setup(): Promise<{ t: TestApp; owner: ApiClient; alice: ApiClient
   node.sim.put(id, "forwarding.secret", SECRET);
   node.sim.put(id, "config/paper-global.yml", `proxies:\n  velocity:\n    enabled: true\n    online-mode: true\n    secret: '${SECRET}'\n`);
   node.sim.put(id, "plugins/Essentials/config.yml", "motd: hello\n");
+  node.sim.put(id, "vault/readme.txt", "readable");
   return { t: r.t, owner, alice, node, id };
 }
 
@@ -135,12 +136,12 @@ describe("file manager", () => {
     const compress = await alice.post(`/servers/${id}/files/compress`, { root: "", paths: ["plugins", "backups"], format: "tar.gz" });
     expect(compress.statusCode, compress.body).toBe(200);
     const archive = FileArchiveResponse.parse(compress.json());
-    expect(archive.path).toMatch(/^archive-\d{8}T\d{6}Z\.tar\.gz$/);
+    expect(archive.path).toMatch(/^archive-\d{4}-\d{2}-\d{2}T\d{6}Z\.tar\.gz$/);
     expect(archive.entries).toBe(5);
     const decompress = await alice.post(`/servers/${id}/files/decompress`, { path: archive.path, destination: "restored" });
     expect(decompress.statusCode, decompress.body).toBe(200);
-    expect(FileArchiveResponse.parse(decompress.json())).toMatchObject({ path: "restored", entries: 1 });
-    expect(node.sim.read(id, "restored/extracted.txt")).toBe("extracted");
+    expect(FileArchiveResponse.parse(decompress.json())).toMatchObject({ path: "restored", entries: 2 });
+    expect(node.sim.read(id, "restored/plugins/Essentials/config.yml")).toBe("motd: hello\n");
     // Archiving a denied path is refused before any job is queued.
     expect((await alice.post(`/servers/${id}/files/compress`, { root: "", paths: ["secrets"], format: "zip" })).json().error.code).toBe("PATH_DENIED");
 
@@ -187,6 +188,114 @@ describe("file manager", () => {
     const { rows } = await testPool().query("SELECT action, details FROM audit_events WHERE target_id = $1 AND action IN ('server.file.upload','server.file.download') ORDER BY id", [id]);
     expect(rows.map((r) => r.action)).toEqual(["server.file.upload", "server.file.download"]);
     expect(rows[0].details).toMatchObject({ path: "plugins/big.jar", bytes: payload.length });
+  });
+
+  it("sends the denylist to the agent, which refuses symlink aliases, planted archive entries and denied outputs", async () => {
+    const { t, owner, alice, node, id } = await setup();
+    node.sim.link(id, "innocent.txt", "server.key");
+    node.sim.link(id, "s", "secrets");
+    node.sim.link(id, "notes.yml", "config/paper-global.yml");
+    node.sim.link(id, "cfg", "config");
+    node.sim.link(id, "plugins/velocity.toml", "../config/paper-global.yml");
+    const code = async (res: Promise<{ statusCode: number; json(): { error?: { code: string } } }>) => {
+      const r = await res;
+      return `${r.statusCode} ${r.json().error?.code ?? ""}`.trim();
+    };
+
+    // Template denylist through file and directory aliases (read, write, download, upload, copy).
+    const viaLink = await alice.get(`/servers/${id}/files/contents?path=innocent.txt`);
+    expect(`${viaLink.statusCode} ${viaLink.json().error.code}`).toBe("403 PATH_DENIED");
+    expect(viaLink.body).not.toContain("private");
+    expect(await code(alice.get(`/servers/${id}/files/contents?path=s/token.txt`))).toBe("403 PATH_DENIED");
+    expect(await code(alice.put(`/servers/${id}/files/contents`, { path: "innocent.txt", content: "overwritten" }))).toBe("403 PATH_DENIED");
+    expect(node.sim.read(id, "server.key")).toBe("private");
+    expect(await code(alice.post(`/servers/${id}/files/copy`, { path: "s" }))).toBe("403 PATH_DENIED");
+    const down = TransferUrlResponse.parse((await alice.get(`/servers/${id}/files/download-url?path=innocent.txt`)).json());
+    const got = await t.app.inject({ method: "GET", url: down.url, headers: { cookie: alice.cookieHeader() } });
+    expect(got.statusCode).toBe(403);
+    expect(got.json().error.code).toBe("PATH_DENIED");
+    expect(got.body).not.toContain("private");
+    const up = TransferUrlResponse.parse((await alice.post(`/servers/${id}/files/upload-url`, { directory: "s", fileName: "x.txt", size: 3 })).json());
+    const put = await t.app.inject({ method: "PUT", url: up.url, headers: { cookie: alice.cookieHeader(), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
+    expect(put.statusCode).toBe(403);
+    expect(node.sim.read(id, "secrets/x.txt")).toBeNull();
+
+    // Secret files are never served through an alias (not even redacted under another name).
+    expect(await code(alice.get(`/servers/${id}/files/contents?path=notes.yml`))).toBe("403 PATH_DENIED");
+    expect(await code(alice.get(`/servers/${id}/files/contents?path=cfg/paper-global.yml`))).toBe("403 PATH_DENIED");
+    // A secret-named alias of a *different* secret file is refused too (velocity.toml redaction would not cover YAML).
+    expect(await code(alice.get(`/servers/${id}/files/contents?path=plugins/velocity.toml`))).toBe("403 PATH_DENIED");
+    const direct = FileContentResponse.parse((await alice.get(`/servers/${id}/files/contents?path=config/paper-global.yml`)).json());
+    expect(direct.redacted).toBe(true);
+    expect(direct.content).not.toContain(SECRET);
+
+    // What the agent received: template patterns, then the secret files (last, so `!` rules cannot re-allow
+    // them) and, for a secret-named read, a negation of exactly that file.
+    const reads = node.sim.denylists.filter((d) => d.type === "fs.read");
+    expect(reads.at(-1)!.denylist).toEqual([
+      "secrets/",
+      "*.key",
+      "!public.key",
+      "/vault/",
+      "!/vault/readme.txt",
+      "forwarding.secret",
+      "/velocity.toml",
+      "/config/paper-global.yml",
+      "/paper.yml",
+      "/plugins/BungeeGuard/config.yml",
+      "/config/FabricProxy-Lite.toml",
+      "/config/proxy-compatible-forge.toml",
+      "!/config/paper-global.yml",
+    ]);
+
+    // The installation owner (servers.admin + secrets.read) gets no denylist and reads through the aliases.
+    const before = node.sim.denylists.length;
+    expect((await owner.get(`/servers/${id}/files/contents?path=innocent.txt`)).json().content).toBe("private");
+    expect((await owner.get(`/servers/${id}/files/contents?path=notes.yml`)).json().content).toContain(SECRET);
+    expect(node.sim.denylists.slice(before).map((d) => d.denylist)).toEqual([undefined, undefined]);
+    // Other agent path refusals stay FORBIDDEN (chmod on a symlink).
+    expect(await code(owner.post(`/servers/${id}/files/chmod`, { files: [{ path: "s", mode: "755" }] }))).toBe("403 FORBIDDEN");
+
+    // Planted archive entries: a secret file and a denied file are refused by the agent's entry check.
+    node.sim.put(id, "evil.zip", "zip");
+    node.sim.archives.set(`${id}:evil.zip`, { "forwarding.secret": "planted" });
+    expect(await code(alice.post(`/servers/${id}/files/decompress`, { path: "evil.zip", destination: "" }))).toBe("403 PATH_DENIED");
+    expect(node.sim.read(id, "forwarding.secret")).toBe(SECRET);
+    node.sim.archives.set(`${id}:evil.zip`, { "keys/x.key": "k" });
+    expect(await code(alice.post(`/servers/${id}/files/decompress`, { path: "evil.zip", destination: "" }))).toBe("403 PATH_DENIED");
+    expect(node.sim.read(id, "keys/x.key")).toBeNull();
+    // A denied destination or archive output is refused before any job runs.
+    expect(await code(alice.post(`/servers/${id}/files/decompress`, { path: "evil.zip", destination: "secrets" }))).toBe("403 PATH_DENIED");
+    expect(await code(alice.post(`/servers/${id}/files/compress`, { root: "vault", paths: ["readme.txt"], format: "zip" }))).toBe("403 PATH_DENIED");
+    // Archiving a directory that holds a denied file is refused (entry check), an alias into it too.
+    expect(await code(alice.post(`/servers/${id}/files/compress`, { root: "", paths: ["s"], format: "zip" }))).toBe("403 PATH_DENIED");
+  });
+
+  it("keeps BlockForge-managed secrets of network members out of copies, archives, renames and SFTP", async () => {
+    const { t, owner, alice, node, id } = await setup();
+    const networkId = randomUUID();
+    await testPool().query("INSERT INTO networks (id, name, slug, forwarding_mode) VALUES ($1, 'Net', 'net', 'modern')", [networkId]);
+    await testPool().query("INSERT INTO network_members (network_id, server_id, role, backend_name) VALUES ($1, $2, 'lobby', 'lobby')", [networkId, id]);
+    const code = async (res: Promise<{ statusCode: number; json(): { error?: { code: string } } }>) => {
+      const r = await res;
+      return `${r.statusCode} ${r.json().error?.code ?? ""}`.trim();
+    };
+    expect(await code(alice.post(`/servers/${id}/files/copy`, { path: "config" }))).toBe("403 PATH_DENIED");
+    expect(await code(alice.post(`/servers/${id}/files/compress`, { root: "", paths: ["config"], format: "tar.gz" }))).toBe("403 PATH_DENIED");
+    expect(await code(alice.post(`/servers/${id}/files/rename`, { renames: [{ from: "config", to: "cfg2" }] }))).toBe("403 REDACTED_CONTENT");
+    expect(node.sim.read(id, "config/paper-global.yml")).toContain(SECRET);
+    // Other directories are unaffected; the owner (secrets.read) may copy the config directory.
+    expect((await alice.post(`/servers/${id}/files/copy`, { path: "plugins" })).statusCode).toBe(200);
+    expect((await owner.post(`/servers/${id}/files/copy`, { path: "config" })).statusCode).toBe(200);
+    // SFTP sessions of users without secrets.read get the secret files on their denylist.
+    const short = id.replace(/-/g, "").slice(0, 8);
+    const res = await fetch(`${t.baseUrl}/agent/v1/sftp/auth`, {
+      method: "POST",
+      headers: { authorization: node.agent.authHeader(), "content-type": "application/json" },
+      body: JSON.stringify({ method: "password", username: `alice.${short}`, password: "user password is long enough", clientIp: "203.0.113.9", sessionId: "s1" }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { denylist: string[] }).denylist).toEqual(expect.arrayContaining(["*.key", "forwarding.secret", "/config/paper-global.yml"]));
   });
 
   it("requires file permissions on the server", async () => {

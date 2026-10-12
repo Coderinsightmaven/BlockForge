@@ -15,6 +15,13 @@ export interface ServerAccessFacts {
   suspended: boolean;
   /** The requesting user's subuser permission set on this server, if any. */
   subuserPermissions: readonly string[] | null;
+  /** `provision_failed` and never installed: the owner may delete it (nothing to protect yet). */
+  neverInstalled?: boolean;
+}
+
+/** Facts helper: a server whose initial provisioning failed and that never reached a successful install. */
+export function neverInstalled(row: { state: string; installedAt: Date | null }): boolean {
+  return row.state === "provision_failed" && row.installedAt === null;
 }
 
 /** Permissions that matter on a single server (what `Server.myPermissions` reports). */
@@ -39,7 +46,10 @@ export function roleServerPermissions(principal: Principal, resource: ServerReso
 export function effectiveServerPermissions(principal: Principal, facts: ServerAccessFacts): Set<Permission> {
   const role = roleServerPermissions(principal, facts.resource);
   const out = new Set<Permission>(role);
-  if (facts.ownerId === principal.userId) for (const p of OWNER_SET) out.add(p);
+  if (facts.ownerId === principal.userId) {
+    for (const p of OWNER_SET) out.add(p);
+    if (facts.neverInstalled) out.add("servers.delete");
+  }
   for (const p of facts.subuserPermissions ?? []) {
     if (KNOWN.has(p) && ASSIGNABLE.has(p as Permission)) out.add(p as Permission);
   }

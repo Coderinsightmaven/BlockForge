@@ -54,6 +54,17 @@ export class TemplatesService {
     private readonly imageAllowlist: readonly string[] = DEFAULT_AGENT_IMAGE_ALLOWLIST,
   ) {}
 
+  private readonly listeners: (() => void)[] = [];
+
+  /** Called after a template's definition changed (e.g. which variables are user-viewable). */
+  onChange(fn: () => void): void {
+    this.listeners.push(fn);
+  }
+
+  private changed(): void {
+    for (const fn of this.listeners) fn();
+  }
+
   private async variablesFor(ids: string[], tx: DbOrTx = this.db): Promise<Map<string, TemplateVariable[]>> {
     const out = new Map<string, TemplateVariable[]>();
     if (!ids.length) return out;
@@ -209,6 +220,7 @@ export class TemplatesService {
       );
       return templateId;
     });
+    this.changed();
     return { template: await this.get(id), issues: preview.issues };
   }
 
@@ -268,6 +280,7 @@ export class TemplatesService {
       if (variables) await this.writeVariables(tx, id, variables);
       await this.audit.record({ ...actor, action: "template.update", targetType: "template", targetId: id, outcome: "success", details: { fields } }, tx);
     });
+    this.changed();
     return this.get(id);
   }
 

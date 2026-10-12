@@ -1,4 +1,5 @@
-import { SsrfError, validateOutboundUrl, type LookupFn } from "../notifications/ssrf.js";
+import { pinnedHttpsGet, type PinnedGetResult } from "../notifications/http.js";
+import { SsrfError, validateOutboundUrl, type LookupFn, type ValidatedTarget } from "../notifications/ssrf.js";
 
 export interface SafeFetchOptions {
   /** Exact hostnames that may be contacted (redirect targets included). */
@@ -7,7 +8,10 @@ export interface SafeFetchOptions {
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;
+  /** Test seam replacing the pinned transport with a plain fetch (DNS validation still applies). */
   fetchImpl?: typeof fetch;
+  /** Test seam for the pinned transport itself. */
+  pinnedGet?: (target: ValidatedTarget, opts: { timeoutMs: number; maxResponseBytes: number; signal?: AbortSignal; headers?: Record<string, string> }) => Promise<PinnedGetResult>;
 }
 
 export class SafeFetchError extends Error {
@@ -53,20 +57,33 @@ export function createSafeFetch(opts: SafeFetchOptions): typeof fetch {
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const maxBytes = opts.maxBytes ?? 16 * 1024 * 1024;
   const maxRedirects = opts.maxRedirects ?? 3;
-  const impl = opts.fetchImpl ?? fetch;
   const safeFetch = async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     let url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const signal = init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
     for (let hop = 0; ; hop++) {
       if (url.protocol !== "https:") throw new SafeFetchError(`refusing non-HTTPS URL ${url.origin}`);
       if (!allowed.has(url.hostname.toLowerCase())) throw new SafeFetchError(`host ${url.hostname} is not on the catalogue allowlist`);
+      let target: ValidatedTarget;
       try {
-        await validateOutboundUrl(url, opts.lookup ? { lookup: opts.lookup } : {});
+        target = await validateOutboundUrl(url, opts.lookup ? { lookup: opts.lookup } : {});
       } catch (err) {
         if (err instanceof SsrfError) throw new SafeFetchError(err.message);
         throw err;
       }
-      const res = await impl(url.href, { ...init, method: init.method ?? "GET", redirect: "manual", signal });
+      let res: Response;
+      if (opts.fetchImpl) {
+        // Test seam: an injected transport (the DNS check above still ran).
+        res = await opts.fetchImpl(url.href, { ...init, method: init.method ?? "GET", redirect: "manual", signal });
+      } else {
+        // The connection is pinned to the address that passed the check (no DNS-rebinding window).
+        const r = await (opts.pinnedGet ?? pinnedHttpsGet)(target, { timeoutMs, maxResponseBytes: maxBytes, signal, headers: { accept: "application/json, */*" } }).catch((err: unknown) => {
+          throw new SafeFetchError(`request to ${url.hostname} failed: ${(err as Error).message}`);
+        });
+        res = new Response(r.body.byteLength && !(r.status >= 300 && r.status < 400) ? (new Uint8Array(r.body) as unknown as ConstructorParameters<typeof Response>[0]) : null, {
+          status: r.status,
+          headers: r.headers,
+        });
+      }
       if (res.status >= 300 && res.status < 400) {
         await res.body?.cancel().catch(() => undefined);
         const location = res.headers.get("location");

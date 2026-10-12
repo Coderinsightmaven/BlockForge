@@ -181,11 +181,13 @@ describe("SFTP authentication (POST /agent/v1/sftp/auth)", () => {
           { action: "upload", path: "plugins/x.jar", ts: Date.now() },
           { action: "rename", path: "a.txt", to: "b.txt", ts: Date.now() },
           { action: "delete", path: "old.log", ts: Date.now() },
+          { action: "utime", path: "plugins/x.jar", ts: Date.now() },
         ],
       },
     });
     await poll(async () => (await audits("server.sftp.delete")).length === 1);
     const activity = (await alice.get(`/servers/${id}/activity?limit=50`)).json().items as { action: string; details: Record<string, unknown> }[];
+    await poll(async () => (await audits("server.sftp.utime")).length === 1);
     expect(activity.map((a) => a.action)).toEqual(expect.arrayContaining(["server.sftp.upload", "server.sftp.rename", "server.sftp.delete"]));
     expect(activity.find((a) => a.action === "server.sftp.rename")?.details).toMatchObject({ path: "a.txt", to: "b.txt", sessionId: "sess-1" });
     // Events for workloads the node does not own are dropped.

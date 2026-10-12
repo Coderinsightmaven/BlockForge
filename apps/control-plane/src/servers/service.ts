@@ -41,7 +41,7 @@ import { decodeCursor, encodeCursor, TimeIdCursor } from "../lib/pagination.js";
 import type { LatestCache } from "../metrics/latest.js";
 import { authorize, permittedScopes, type Principal } from "../rbac/authorize.js";
 import type { RealtimeHub } from "../realtime/hub.js";
-import { lockNodeForPlacement, placementCandidates, type PlacementCandidate } from "../scheduler/placement.js";
+import { lockNodeForPlacement, placementCandidates, serverCapacityIssues, type PlacementCandidate } from "../scheduler/placement.js";
 import type { TemplatesService } from "../templates/service.js";
 import type { ServerAccess, ServerAccessService } from "./access.js";
 import { buildServerDtos } from "./dto.js";
@@ -70,6 +70,8 @@ export interface ServersDeps {
   templates: TemplatesService;
   access: ServerAccessService;
   state: ServerStateService;
+  /** Console secret masks (invalidated when variable values change). */
+  masks?: { invalidate(serverId?: string): void };
 }
 
 export type ListQuery = {
@@ -131,7 +133,8 @@ export class ServersService {
 
   async list(principal: Principal, q: ListQuery): Promise<{ items: Server[]; nextCursor: string | null }> {
     const scopes = permittedScopes(principal, "servers.view");
-    const subuserOf = sql`${servers.id} IN (SELECT ${serverSubusers.serverId} FROM ${serverSubusers} WHERE ${serverSubusers.userId} = ${principal.userId})`;
+    // A subuser grant only makes a server visible when it includes servers.view (as on /servers/:id).
+    const subuserOf = sql`${servers.id} IN (SELECT ${serverSubusers.serverId} FROM ${serverSubusers} WHERE ${serverSubusers.userId} = ${principal.userId} AND ${"servers.view"} = ANY(${serverSubusers.permissions}))`;
     const mine = or(eq(servers.ownerId, principal.userId), subuserOf) as SQL;
     const conds: (SQL | undefined)[] = [];
     if (q.filter === "mine") conds.push(mine);
@@ -166,7 +169,9 @@ export class ServersService {
       .limit(q.limit + 1);
     const page = rows.slice(0, q.limit);
     const last = page[page.length - 1];
-    return { items: await this.dtos(page, principal), nextCursor: rows.length > q.limit && last ? encodeCursor({ t: last.createdAt.getTime(), id: last.id }) : null };
+    // Backstop: only servers the requester can view by effective permissions are returned.
+    const items = (await this.dtos(page, principal)).filter((d) => d.myPermissions.includes("servers.view"));
+    return { items, nextCursor: rows.length > q.limit && last ? encodeCursor({ t: last.createdAt.getTime(), id: last.id }) : null };
   }
 
   // --- Placement & creation -------------------------------------------------------------
@@ -175,6 +180,11 @@ export class ServersService {
   async placementPreview(principal: Principal, req: Parameters<typeof placementCandidates>[3]): Promise<PlacementCandidate[]> {
     const all = await placementCandidates(this.d.db, this.d.tracker, this.d.clock, req);
     return all.filter((c) => authorize(principal, "servers.create", { type: "node", id: c.nodeId }));
+  }
+
+  /** servers.admin on a placement target (the node, or the network the server joins). */
+  private adminOn(principal: Principal, nodeId: string, networkId: string | null): boolean {
+    return authorize(principal, "servers.admin", { type: "node", id: nodeId }) || (networkId !== null && authorize(principal, "servers.admin", { type: "network", id: networkId }));
   }
 
   private canCreateOn(principal: Principal, nodeId: string, networkId: string | null): boolean {
@@ -200,7 +210,17 @@ export class ServersService {
       if (candidates.length) throw forbidden("You may not create servers on this node");
       throw badRequest("Unknown node", validationDetails("unknown node", "placement.nodeId"));
     }
-    const fitting = permitted.filter((c) => c.fits);
+    let fitting = permitted.filter((c) => c.fits);
+    // Non-editable egg variables may only be set by holders of servers.admin on the target itself.
+    const adminVars = prepared.adminOnlyVariables;
+    if (adminVars.length && fitting.length) {
+      fitting = fitting.filter((c) => this.adminOn(principal, c.nodeId, req.networkId));
+      if (!fitting.length) {
+        throw new AppError(403, "FORBIDDEN", `Setting ${adminVars.join(", ")} needs servers.admin on the target node or network`, {
+          issues: adminVars.map((v) => ({ path: `egg.variables.${v}`, message: "not editable" })),
+        });
+      }
+    }
     if (!fitting.length) {
       throw new AppError(422, "CAPACITY_EXCEEDED", "No node can host this server", {
         candidates: permitted.map((c) => ({ nodeId: c.nodeId, nodeName: c.nodeName, reasons: c.reasons })),
@@ -213,7 +233,7 @@ export class ServersService {
       if (req.overrideCapacity && !authorize(principal, "nodes.manage", { type: "node", id: candidate.nodeId })) {
         throw forbidden("Overriding capacity needs nodes.manage on the target node");
       }
-      if (ownerId !== principal.userId && !authorize(principal, "servers.admin", { type: "node", id: candidate.nodeId })) {
+      if (ownerId !== principal.userId && !this.adminOn(principal, candidate.nodeId, req.networkId)) {
         throw forbidden("Creating a server for another user needs servers.admin");
       }
       const result = await withTransaction(this.d.db, async (tx, after) => {
@@ -283,6 +303,7 @@ export class ServersService {
         artifactPlan: plan,
         variables: {} as Record<string, string>,
         eulaAccepted: softwareKind(mc.software) === "game" && mc.acceptEula,
+        adminOnlyVariables: [] as string[],
       };
     }
     const egg = req.egg;
@@ -297,13 +318,19 @@ export class ServersService {
     if (needsEula && !egg.acceptEula) {
       throw badRequest("This template requires accepting the Minecraft EULA", validationDetails("the Minecraft EULA must be accepted", "egg.acceptEula"));
     }
-    const admin = roleServerAdminAnywhere(principal);
+    // Non-editable variables need servers.admin on the target (checked after placement); without it
+    // anywhere they are refused right away.
+    const adminSomewhere = principal.grants.some((g) => g.permissions.has("servers.admin"));
     const known = new Map(template.variables.map((v) => [v.envName, v]));
     const issues: { path: string; message: string }[] = [];
+    const adminOnlyVariables: string[] = [];
     for (const name of Object.keys(egg.variables)) {
       const v = known.get(name);
       if (!v) issues.push({ path: `egg.variables.${name}`, message: "unknown variable" });
-      else if (!admin && !(v.userViewable && v.userEditable)) issues.push({ path: `egg.variables.${name}`, message: "not editable" });
+      else if (!(v.userViewable && v.userEditable)) {
+        if (adminSomewhere) adminOnlyVariables.push(name);
+        else issues.push({ path: `egg.variables.${name}`, message: "not editable" });
+      }
     }
     for (const v of template.variables) {
       const value = egg.variables[v.envName] ?? v.defaultValue;
@@ -325,6 +352,7 @@ export class ServersService {
       artifactPlan: null,
       variables: egg.variables,
       eulaAccepted: needsEula && egg.acceptEula,
+      adminOnlyVariables,
     };
   }
 
@@ -451,7 +479,8 @@ export class ServersService {
     const serverId = access.server.id;
     const type = { reinstall: SERVER_JOBS.reinstall, start: SERVER_JOBS.start, stop: SERVER_JOBS.stop, restart: SERVER_JOBS.restart, kill: SERVER_JOBS.kill, delete: SERVER_JOBS.delete }[op];
     const jobId = await withTransaction(this.d.db, async (tx, after) => {
-      const { from } = await this.d.state.begin(tx, serverId, op);
+      const { from, row } = await this.d.state.begin(tx, serverId, op);
+      if (op === "reinstall") await this.reacquireResources(tx, row);
       const id = await this.d.jobs.enqueue(type, { serverId, ...input }, { targetType: "server", targetId: serverId, requestedBy: actor.actorId }, tx, after);
       await this.d.state.attachJob(tx, serverId, id);
       const desired = op === "start" || op === "restart" ? "running" : op === "stop" || op === "kill" ? "stopped" : null;
@@ -461,6 +490,38 @@ export class ServersService {
       return id;
     });
     return { jobId };
+  }
+
+  /**
+   * Re-provisioning a server whose first provisioning failed: it released its allocation and hold,
+   * so take a free allocation and a new hold again (capacity re-checked under the node lock).
+   */
+  private async reacquireResources(tx: Tx, row: ServerRow): Promise<void> {
+    const [primary] = await tx.select({ id: allocations.id }).from(allocations).where(and(eq(allocations.serverId, row.id), eq(allocations.isPrimary, true))).limit(1);
+    if (primary) return;
+    await lockNodeForPlacement(tx, row.nodeId);
+    const issues = await serverCapacityIssues(tx, this.d.clock, row.nodeId, row.id, row);
+    if (issues.length) throw new AppError(422, "CAPACITY_EXCEEDED", "The server's node no longer has capacity for it", { reasons: issues });
+    const [alloc] = await tx
+      .select()
+      .from(allocations)
+      .where(and(eq(allocations.nodeId, row.nodeId), isNull(allocations.serverId)))
+      .orderBy(asc(allocations.port))
+      .limit(1)
+      .for("update", { skipLocked: true });
+    if (!alloc) throw new AppError(422, "CAPACITY_EXCEEDED", "No free allocation is left on the server's node");
+    await tx.update(allocations).set({ serverId: row.id, isPrimary: true }).where(eq(allocations.id, alloc.id));
+    await tx.delete(resourceReservations).where(eq(resourceReservations.serverId, row.id));
+    await tx.insert(resourceReservations).values({
+      id: randomUUID(),
+      nodeId: row.nodeId,
+      serverId: row.id,
+      kind: "hold",
+      cpuMillicores: row.cpuLimitMillicores ?? 0,
+      memoryBytes: row.memoryLimitBytes,
+      storageBytes: row.storageQuotaBytes ?? 0,
+      expiresAt: new Date(this.d.clock.now() + HOLD_MS),
+    });
   }
 
   async sendConsole(access: ServerAccess, line: string, actor: AuditActor): Promise<void> {
@@ -497,12 +558,16 @@ export class ServersService {
       ownerId?: string | undefined;
       restartPolicy?: ServerRow["restartPolicy"] | undefined;
       startup?: "manual" | "auto" | undefined;
+      /** Allow exceeding the node's capacity (needs nodes.manage on the node; audited). */
+      overrideCapacity?: boolean | undefined;
     },
     actor: AuditActor,
   ): Promise<{ server: Server; restartRequired: boolean }> {
     const id = access.server.id;
     let restartRequired = false;
     await withTransaction(this.d.db, async (tx) => {
+      // Same per-node lock as placement: concurrent creates/resizes cannot overbook the node.
+      await lockNodeForPlacement(tx, access.server.nodeId);
       const [row] = await tx.select().from(servers).where(eq(servers.id, id)).for("update").limit(1);
       if (!row) throw notFound("Server");
       const set: Partial<ServerRow> = {};
@@ -531,6 +596,23 @@ export class ServersService {
         restartRequired = true;
       }
       if (input.storageQuotaBytes !== undefined) set.storageQuotaBytes = input.storageQuotaBytes;
+      const need = {
+        memoryLimitBytes: set.memoryLimitBytes ?? row.memoryLimitBytes,
+        cpuLimitMillicores: set.cpuLimitMillicores !== undefined ? set.cpuLimitMillicores : row.cpuLimitMillicores,
+        storageQuotaBytes: set.storageQuotaBytes !== undefined ? set.storageQuotaBytes : row.storageQuotaBytes,
+      };
+      const grows =
+        need.memoryLimitBytes > row.memoryLimitBytes ||
+        (need.cpuLimitMillicores ?? 0) > (row.cpuLimitMillicores ?? 0) ||
+        (need.storageQuotaBytes ?? 0) > (row.storageQuotaBytes ?? 0);
+      if (grows) {
+        const issues = await serverCapacityIssues(tx, this.d.clock, row.nodeId, id, need);
+        if (issues.length) {
+          if (!input.overrideCapacity) throw new AppError(409, "CAPACITY_EXCEEDED", "The node does not have enough free capacity for these limits", { reasons: issues });
+          if (!authorize(access.principal, "nodes.manage", { type: "node", id: row.nodeId })) throw forbidden("Overriding capacity needs nodes.manage on the node");
+          await this.d.audit.record({ ...actor, action: "server.build.override", targetType: "server", targetId: id, outcome: "success", details: { nodeId: row.nodeId, reasons: issues } }, tx);
+        }
+      }
       if (set.memoryLimitBytes !== undefined || set.cpuLimitMillicores !== undefined || set.storageQuotaBytes !== undefined) {
         await tx
           .update(resourceReservations)
@@ -629,6 +711,7 @@ export class ServersService {
       .insert(serverVariables)
       .values({ serverId: access.server.id, envName, value })
       .onConflictDoUpdate({ target: [serverVariables.serverId, serverVariables.envName], set: { value } });
+    this.d.masks?.invalidate(access.server.id);
     // Values may be secrets (passwords, tokens): only the name is audited.
     await this.d.audit.record({ ...actor, action: "server.startup.variable", targetType: "server", targetId: access.server.id, outcome: "success", details: { envName } });
     return this.startup(access);
@@ -718,11 +801,6 @@ export class ServersService {
     if (!deleted.length) throw notFound("Subuser");
     await this.d.audit.record({ ...actor, action: "server.subuser.remove", targetType: "server", targetId: access.server.id, outcome: "success", details: { userId: deleted[0]!.userId } });
   }
-}
-
-/** Whether the principal holds servers.admin anywhere (role bindings; used for creation-time variable rules). */
-function roleServerAdminAnywhere(principal: Principal): boolean {
-  return principal.grants.some((g) => g.permissions.has("servers.admin"));
 }
 
 export const ServerIdParams = z.object({ id: z.uuid() });

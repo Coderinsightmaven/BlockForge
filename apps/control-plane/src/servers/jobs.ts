@@ -30,6 +30,7 @@ import {
   type ExitStatus,
   type ServerRuntimeContext,
 } from "./runtime.js";
+import { maskSecrets } from "./secret-masks.js";
 import type { ServerStateService } from "./state.js";
 
 export const SERVER_JOBS = {
@@ -56,6 +57,8 @@ export interface ServerJobDeps {
   readyTimeoutMs?: number;
   slpWaitMs?: number;
   installTimeoutMs?: number;
+  /** Masks secret variable values in install output written to the job log. */
+  masks?: { forServer(serverId: string): Promise<readonly string[]> };
 }
 
 const ProvisionInput = z.object({ serverId: z.uuid(), eulaAcceptedBy: z.string().max(254).nullable().default(null) });
@@ -165,7 +168,8 @@ async function runInstall(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, r
     }
   });
   if (result.timedOut || result.exitCode !== 0) {
-    for (const l of result.logTail.slice(-20)) await ctx.log("error", `[install] ${l}`);
+    const secrets = (await deps.masks?.forServer(s.id)) ?? [];
+    for (const l of result.logTail.slice(-20)) await ctx.log("error", `[install] ${maskSecrets(l, secrets)}`);
     throw new JobError("INSTALL_FAILED", result.timedOut ? "the install script timed out" : `the install script exited with code ${result.exitCode}`);
   }
   await ctx.log("info", `Install finished in ${Math.round(result.durationMs / 1000)} s`);
@@ -310,6 +314,19 @@ function startupExit(state: Record<string, unknown>): ExitStatus | null {
   return { exitCode: typeof e.exitCode === "number" ? e.exitCode : null, oomKilled: e.oomKilled === true };
 }
 
+/**
+ * A server whose provisioning failed before it was ever installed releases its allocations and
+ * reservation (no capacity or ports held by a server that never ran); re-provisioning re-acquires.
+ */
+async function releaseUninstalled(deps: ServerJobDeps, serverId: string): Promise<void> {
+  await withTransaction(deps.db, async (tx) => {
+    const [row] = await tx.select({ installedAt: servers.installedAt }).from(servers).where(eq(servers.id, serverId)).for("update").limit(1);
+    if (!row || row.installedAt !== null) return;
+    await tx.update(allocations).set({ serverId: null, isPrimary: false, notes: null }).where(eq(allocations.serverId, serverId));
+    await tx.delete(resourceReservations).where(eq(resourceReservations.serverId, serverId));
+  });
+}
+
 async function convertHold(deps: ServerJobDeps, serverId: string): Promise<void> {
   await deps.db
     .update(resourceReservations)
@@ -353,8 +370,8 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
     ],
     async finalize(f: FinalizeContext<z.infer<typeof ProvisionInput>>) {
       const id = f.input.serverId;
-      await convertHold(deps, id);
       if (f.status === "succeeded") {
+        await convertHold(deps, id);
         await deps.db.update(servers).set({ installedAt: new Date(deps.clock.now()) }).where(eq(servers.id, id));
         if (f.state.startedAt === undefined) await deps.state.transition(id, "stopped", {}, { reason: "provisioned" });
         await deps.bus.publish({ type: "server.installed", subjectType: "server", subjectId: id, data: { jobId: f.jobId } });
@@ -364,10 +381,13 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         const exit = startupExit(f.state);
         const [row] = await deps.db.select({ state: servers.state }).from(servers).where(eq(servers.id, id));
         if (row?.state === "starting") {
+          // Installed; only the first start failed: the server keeps its resources.
+          await convertHold(deps, id);
           await deps.db.update(servers).set({ installedAt: new Date(deps.clock.now()) }).where(eq(servers.id, id));
           await deps.state.transition(id, crashed ? "crashed" : "stopped", crashed ? { lastCrashAt: new Date(deps.clock.now()), ...exitColumns(exit) } : {}, { reason: f.error?.message ?? "provision start failed" });
           if (crashed) await deps.bus.publish({ type: "server.crashed", subjectType: "server", subjectId: id, data: { during: "provision", reason: f.error?.code ?? null, exitCode: exit?.exitCode ?? null, oomKilled: exit?.oomKilled ?? false } });
         } else {
+          await releaseUninstalled(deps, id);
           await deps.state.transition(id, "provision_failed", {}, { reason: f.error?.message ?? f.status });
         }
         if (f.error?.code === "INSTALL_FAILED" || f.error?.code === "INSTALL_INCOMPLETE") {
@@ -395,10 +415,13 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
     async finalize(f) {
       const id = f.input.serverId;
       if (f.status === "succeeded") {
+        await convertHold(deps, id);
         await deps.db.update(servers).set({ installedAt: new Date(deps.clock.now()) }).where(eq(servers.id, id));
         await deps.state.transition(id, "stopped", {}, { reason: "reinstalled" });
         await deps.bus.publish({ type: "server.installed", subjectType: "server", subjectId: id, data: { jobId: f.jobId, reinstall: true } });
       } else {
+        // A re-provision of a server that never installed gives its allocation and hold back again.
+        await releaseUninstalled(deps, id);
         await deps.state.transition(id, "provision_failed", {}, { reason: f.error?.message ?? f.status });
         await deps.bus.publish({ type: "server.install.failed", subjectType: "server", subjectId: id, data: { jobId: f.jobId, message: f.error?.message ?? f.status } });
       }
