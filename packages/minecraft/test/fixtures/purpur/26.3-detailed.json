@@ -1,0 +1,92 @@
+{
+  "project": "purpur",
+  "version": "26.3",
+  "builds": {
+    "latest": {
+      "project": "purpur",
+      "version": "26.3",
+      "build": "2647",
+      "result": "SUCCESS",
+      "timestamp": 1791590061560,
+      "duration": 510980,
+      "commits": [
+        {
+          "author": "granny",
+          "email": "granny@purpurmc.org",
+          "description": "Updated Upstream (Paper)\n",
+          "hash": "4cd2cf6966b5e1c251f94755946d400fcde13862",
+          "timestamp": 1791589965000
+        }
+      ],
+      "metadata": {
+        "type": "experimental"
+      },
+      "md5": "95a58b3088cac65601f6cab363c2315b"
+    },
+    "all": [
+      {
+        "project": "purpur",
+        "version": "26.3",
+        "build": "2645",
+        "result": "SUCCESS",
+        "timestamp": 1791418280719,
+        "duration": 488618,
+        "commits": [
+          {
+            "author": "granny",
+            "email": "granny@purpurmc.org",
+            "description": "Updated Upstream (Paper)\n",
+            "hash": "a2e4e44feafb9f6751ea3be49fb0a6d06742c7bd",
+            "timestamp": 1791417900000
+          }
+        ],
+        "metadata": {
+          "type": "experimental"
+        },
+        "md5": "ad3dfe99b6aff9fc26afd68d97b4a6a6"
+      },
+      {
+        "project": "purpur",
+        "version": "26.3",
+        "build": "2646",
+        "result": "SUCCESS",
+        "timestamp": 1791498258498,
+        "duration": 492565,
+        "commits": [
+          {
+            "author": "granny",
+            "email": "granny@purpurmc.org",
+            "description": "Updated Upstream (Paper)\n",
+            "hash": "0db898738a02f27649faa2cce8b736f1d36a2914",
+            "timestamp": 1791498236000
+          }
+        ],
+        "metadata": {
+          "type": "experimental"
+        },
+        "md5": "7cd38d9daeacdee4e2c68985a3dd7731"
+      },
+      {
+        "project": "purpur",
+        "version": "26.3",
+        "build": "2647",
+        "result": "SUCCESS",
+        "timestamp": 1791590061560,
+        "duration": 510980,
+        "commits": [
+          {
+            "author": "granny",
+            "email": "granny@purpurmc.org",
+            "description": "Updated Upstream (Paper)\n",
+            "hash": "4cd2cf6966b5e1c251f94755946d400fcde13862",
+            "timestamp": 1791589965000
+          }
+        ],
+        "metadata": {
+          "type": "experimental"
+        },
+        "md5": "95a58b3088cac65601f6cab363c2315b"
+      }
+    ]
+  }
+}

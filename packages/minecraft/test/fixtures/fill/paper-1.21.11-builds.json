@@ -1,0 +1,150 @@
+[
+  {
+    "id": 132,
+    "time": "2026-05-11T11:43:09Z",
+    "channel": "STABLE",
+    "commits": [
+      {
+        "sha": "c5eb0790f199da6c38d0a650e1e5cd5415b28185",
+        "time": "2026-05-11T11:41:08Z",
+        "message": "Fork friendly byte buf correctly\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-132.jar",
+        "checksums": {
+          "sha256": "5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba"
+        },
+        "size": 54846016,
+        "url": "https://fill-data.papermc.io/v1/objects/5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba/paper-1.21.11-132.jar"
+      }
+    }
+  },
+  {
+    "id": 131,
+    "time": "2026-05-03T16:08:07Z",
+    "channel": "STABLE",
+    "commits": [
+      {
+        "sha": "6d5b910ff0b3c9a9d164f3d90d60a4f2467b510f",
+        "time": "2026-05-03T16:07:01Z",
+        "message": "Fix spear jab attack not connecting after charge attack (#13843)"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-131.jar",
+        "checksums": {
+          "sha256": "6c099540fccd27e10750d1adcb382f1552fb5aa2816aeaf2cc1efb23ddd9e3df"
+        },
+        "size": 54836919,
+        "url": "https://fill-data.papermc.io/v1/objects/6c099540fccd27e10750d1adcb382f1552fb5aa2816aeaf2cc1efb23ddd9e3df/paper-1.21.11-131.jar"
+      }
+    }
+  },
+  {
+    "id": 130,
+    "time": "2026-04-11T11:14:19Z",
+    "channel": "STABLE",
+    "commits": [
+      {
+        "sha": "c5a2736aaa33a6447badd2ed294fbf5940cb014b",
+        "time": "2026-04-11T11:13:57Z",
+        "message": "Drop hunk from previous commit (#13772)"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-130.jar",
+        "checksums": {
+          "sha256": "25eb85bd8415195ce4bc188e1939e0c7cef77fb51d26d4e766407ee922561097"
+        },
+        "size": 54836966,
+        "url": "https://fill-data.papermc.io/v1/objects/25eb85bd8415195ce4bc188e1939e0c7cef77fb51d26d4e766407ee922561097/paper-1.21.11-130.jar"
+      }
+    }
+  },
+  {
+    "id": 66,
+    "time": "2025-12-30T14:15:39Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "5875d88002d9beeb8b0a3dc8af352777d32265c0",
+        "time": "2025-12-30T14:13:53Z",
+        "message": "Fix inventory desyncs with certain cancelled interactions (#12960)\n\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-66.jar",
+        "checksums": {
+          "sha256": "22322ae26aa839afb6ab51763fd629ded1044e0ad83510fb50942880fa622c7f"
+        },
+        "size": 54815533,
+        "url": "https://fill-data.papermc.io/v1/objects/22322ae26aa839afb6ab51763fd629ded1044e0ad83510fb50942880fa622c7f/paper-1.21.11-66.jar"
+      }
+    }
+  },
+  {
+    "id": 65,
+    "time": "2025-12-29T21:56:22Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "8c6b632718d099b22cc32407b01e15e4ef899708",
+        "time": "2025-12-29T21:54:32Z",
+        "message": "Properly update hidden effects (#13173)\n\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-65.jar",
+        "checksums": {
+          "sha256": "a7bcf3ad65733f168a0d83be1fc40f23c7762f34bf01b7d29c3f90f643258f57"
+        },
+        "size": 54813900,
+        "url": "https://fill-data.papermc.io/v1/objects/a7bcf3ad65733f168a0d83be1fc40f23c7762f34bf01b7d29c3f90f643258f57/paper-1.21.11-65.jar"
+      }
+    }
+  },
+  {
+    "id": 35,
+    "time": "2025-12-09T16:48:54Z",
+    "channel": "ALPHA",
+    "commits": [],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-35.jar",
+        "checksums": {
+          "sha256": "1ee11063cee55387994338ee0b32e795d9087007daa224f53ac6fa16cc2fb920"
+        },
+        "size": 53333387,
+        "url": "https://fill-data.papermc.io/v1/objects/1ee11063cee55387994338ee0b32e795d9087007daa224f53ac6fa16cc2fb920/paper-1.21.11-35.jar"
+      }
+    }
+  },
+  {
+    "id": 34,
+    "time": "2025-12-09T16:42:49Z",
+    "channel": "ALPHA",
+    "commits": [
+      {
+        "sha": "ba4b700e133f6de66101393b56f4d9068cd4d3b0",
+        "time": "2025-12-09T16:14:43Z",
+        "message": "1.21.11\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "paper-1.21.11-34.jar",
+        "checksums": {
+          "sha256": "623705ec041ca7547f9e8746ad5a30f10c14fb92ea7c44666e10182e7340d127"
+        },
+        "size": 53333322,
+        "url": "https://fill-data.papermc.io/v1/objects/623705ec041ca7547f9e8746ad5a30f10c14fb92ea7c44666e10182e7340d127/paper-1.21.11-34.jar"
+      }
+    }
+  }
+]

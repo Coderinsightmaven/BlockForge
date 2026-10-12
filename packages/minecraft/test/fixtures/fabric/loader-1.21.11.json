@@ -1,0 +1,90 @@
+[
+  {
+    "loader": {
+      "separator": ".",
+      "build": 5,
+      "maven": "net.fabricmc:fabric-loader:0.19.5",
+      "version": "0.19.5",
+      "stable": true
+    },
+    "intermediary": {
+      "maven": "net.fabricmc:intermediary:1.21.11",
+      "version": "1.21.11",
+      "stable": true
+    },
+    "launcherMeta": {
+      "version": 2,
+      "min_java_version": 8,
+      "mainClass": {
+        "client": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+        "server": "net.fabricmc.loader.impl.launch.knot.KnotServer"
+      }
+    }
+  },
+  {
+    "loader": {
+      "separator": ".",
+      "build": 4,
+      "maven": "net.fabricmc:fabric-loader:0.19.4",
+      "version": "0.19.4",
+      "stable": false
+    },
+    "intermediary": {
+      "maven": "net.fabricmc:intermediary:1.21.11",
+      "version": "1.21.11",
+      "stable": true
+    },
+    "launcherMeta": {
+      "version": 2,
+      "min_java_version": 8,
+      "mainClass": {
+        "client": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+        "server": "net.fabricmc.loader.impl.launch.knot.KnotServer"
+      }
+    }
+  },
+  {
+    "loader": {
+      "separator": ".",
+      "build": 3,
+      "maven": "net.fabricmc:fabric-loader:0.19.3",
+      "version": "0.19.3",
+      "stable": false
+    },
+    "intermediary": {
+      "maven": "net.fabricmc:intermediary:1.21.11",
+      "version": "1.21.11",
+      "stable": true
+    },
+    "launcherMeta": {
+      "version": 2,
+      "min_java_version": 8,
+      "mainClass": {
+        "client": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+        "server": "net.fabricmc.loader.impl.launch.knot.KnotServer"
+      }
+    }
+  },
+  {
+    "loader": {
+      "separator": ".",
+      "build": 2,
+      "maven": "net.fabricmc:fabric-loader:0.19.2",
+      "version": "0.19.2",
+      "stable": false
+    },
+    "intermediary": {
+      "maven": "net.fabricmc:intermediary:1.21.11",
+      "version": "1.21.11",
+      "stable": true
+    },
+    "launcherMeta": {
+      "version": 2,
+      "min_java_version": 8,
+      "mainClass": {
+        "client": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+        "server": "net.fabricmc.loader.impl.launch.knot.KnotServer"
+      }
+    }
+  }
+]

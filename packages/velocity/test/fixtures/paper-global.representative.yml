@@ -1,0 +1,43 @@
+# This is the global configuration file for Paper.
+# As you can see, there's a lot to configure. Some options may impact gameplay, so use
+# with caution, and make sure you know what each option does before configuring.
+# 
+# If you need help with the configuration or have any questions related to Paper,
+# join us in our Discord or check the docs page.
+# 
+# Docs: https://docs.papermc.io/
+# Discord: https://discord.gg/papermc
+# Website: https://papermc.io/
+
+_version: 31
+anticheat:
+  obfuscation:
+    items:
+      all-models:
+        also-obfuscate: []
+        dont-obfuscate:
+        - minecraft:lodestone_tracker
+        sanitize-count: true
+      enable-item-obfuscation: false
+chunk-loading-basic:
+  player-max-chunk-generate-rate: -1.0
+  player-max-chunk-load-rate: 100.0
+  player-max-chunk-send-rate: 75.0
+messages:
+  kick:
+    authentication-servers-down: <lang:multiplayer.disconnect.authservers_down>
+    connection-throttle: Connection throttled! Please wait before reconnecting.
+    flying-player: <lang:multiplayer.disconnect.flying>
+  no-permission: <red>I'm sorry, but you do not have permission to perform this command.
+    Please contact the server administrators if you believe that this is in error.
+proxies:
+  bungee-cord:
+    online-mode: true
+  proxy-protocol: false
+  velocity:
+    enabled: false
+    online-mode: true
+    secret: ''
+scoreboards:
+  save-empty-scoreboard-teams: true
+  track-plugin-scoreboards: false

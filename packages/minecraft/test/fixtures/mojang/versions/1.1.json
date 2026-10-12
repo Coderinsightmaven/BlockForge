@@ -1,0 +1,20 @@
+{
+  "id": "1.1",
+  "type": "release",
+  "time": "2012-01-11T22:00:00+00:00",
+  "releaseTime": "2012-01-11T22:00:00+00:00",
+  "mainClass": "net.minecraft.launchwrapper.Launch",
+  "minimumLauncherVersion": 4,
+  "complianceLevel": 0,
+  "javaVersion": {
+    "component": "jre-legacy",
+    "majorVersion": 8
+  },
+  "downloads": {
+    "client": {
+      "sha1": "f690d4136b0026d452163538495b9b0e8513d718",
+      "size": 3862147,
+      "url": "https://launcher.mojang.com/v1/objects/f690d4136b0026d452163538495b9b0e8513d718/client.jar"
+    }
+  }
+}

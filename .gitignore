@@ -13,3 +13,4 @@ playwright-report/
 test-results/
 *.tsbuildinfo
 .pnpm.lock.d/
+.cp-dev.log

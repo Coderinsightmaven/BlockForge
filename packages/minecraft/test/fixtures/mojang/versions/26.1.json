@@ -1,0 +1,25 @@
+{
+  "id": "26.1",
+  "type": "release",
+  "time": "2026-03-24T12:11:04+00:00",
+  "releaseTime": "2026-03-24T12:11:04+00:00",
+  "mainClass": "net.minecraft.client.main.Main",
+  "minimumLauncherVersion": 21,
+  "complianceLevel": 1,
+  "javaVersion": {
+    "component": "java-runtime-epsilon",
+    "majorVersion": 25
+  },
+  "downloads": {
+    "client": {
+      "sha1": "191771837687b766537a8c4607cb6fad79c533a1",
+      "size": 38113398,
+      "url": "https://piston-data.mojang.com/v1/objects/191771837687b766537a8c4607cb6fad79c533a1/client.jar"
+    },
+    "server": {
+      "sha1": "3872a7f07a1a595e651aef8b058dfc2bb3772f46",
+      "size": 60417588,
+      "url": "https://piston-data.mojang.com/v1/objects/3872a7f07a1a595e651aef8b058dfc2bb3772f46/server.jar"
+    }
+  }
+}

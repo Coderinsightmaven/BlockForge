@@ -52,14 +52,14 @@ that implements/tests a requirement. Status keys:
 - [~] Notification adapters: Discord webhook, email (SMTP), generic webhook (SSRF-safe) — channel CRUD (URL stored as secret, never returned), SSRF guard and delivery/retry recording tested with an injected transport; the pinned HTTPS transport has not been run against a real endpoint, and email (nodemailer) is untested (no SMTP server in the dev stack).
 
 ## Phase 3 — Server provisioning
-- [ ] `packages/minecraft`: catalogue adapters — Vanilla (piston-meta), Paper/Folia/Velocity (Fill API v3), Purpur, Fabric, Forge, NeoForge; Java mapping; checksums; restrictions
-- [ ] server.properties editor (preserve unknown keys/comments) + schema with descriptions/validation per version
+- [x] `packages/minecraft`: catalogue adapters — Vanilla (piston-meta), Paper/Folia/Velocity (Fill API v3), Purpur, Fabric, Forge, NeoForge; Java mapping; checksums; restrictions — fixture tests + live smoke test (all 8 adapters, 2026-10-12); Forge/NeoForge/Fabric/Paper install+launch argv run in containers up to the EULA gate. Purpur publishes MD5 only and the Fabric launcher no checksum (contract change requested); Spigot deliberately unsupported (BuildTools only).
+- [x] server.properties editor (preserve unknown keys/comments) + schema with descriptions/validation per version — byte-for-byte round-trip on files written by the real 26.3/1.21.8/1.20.3 jars; schema from 1.14→26.3 jars incl. the 1.21.9 move of pvp/allow-nether/enable-command-block to game rules (`packages/minecraft`).
 - [ ] Placement scheduler (capacity, health, maintenance, tags/affinity, hard vs soft) + override audit
 - [ ] Resource reservations
 - [ ] Provision job (17 stages) idempotent, resumable, observable
 - [x] Agent: workload.ensure/start/stop/kill/remove/status, hardened containers, restart policy, artifact.fetch w/ checksum + allowlist — Docker integration tests (hardening inspected on the engine, crash restart, limit, deliberate stop/kill, OOM, SIGTERM path, pull progress, re-attach, desired-state recovery, unmanaged-container safety) + Paper end-to-end through signed commands. Control-plane side (jobs/reconciler) not covered here.
 - [ ] Lifecycle state machine + operation locks + reconciler from agent workload events
-- [ ] Readiness (log `Done (` + SLP) and crash detection
+- [~] Readiness (log `Done (` + SLP) and crash detection — log parsers (readiness, crash/OOM/watchdog, Java class-version mismatch, port bind, EULA) done and tested in `packages/minecraft`; SLP + control-plane wiring pending.
 - [~] Console: live stream, send commands, search/filter, colours, pause/follow, reconnect, download — agent side done and tested (rate-limited `logs` frames, ring buffer + Docker fallback for `workload.logs.tail`, persistent stdin attach for `workload.console`); UI/control plane pending.
 - [ ] Server creation wizard (6 steps, simple/advanced)
 - [ ] Server management page (overview, controls, state, metrics, alerts)
@@ -73,15 +73,15 @@ that implements/tests a requirement. Status keys:
 - [ ] Schedules: restarts/backups/updates/commands, cron + human readable, TZ, history, retries, concurrency, maintenance windows
 - [ ] Server templates/profiles
 - [ ] Software updates w/ rollback
-- [ ] Java runtime management (images per major, per-server selection, JVM args presets, incompatibility diagnostics)
+- [~] Java runtime management (images per major, per-server selection, JVM args presets, incompatibility diagnostics) — library done and tested (`packages/minecraft`: Temurin JRE image per major, override validation, default/aikar/none presets, forbidden JVM flags, UnsupportedClassVersionError detection); UI/control plane pending.
 
 ## Phase 5 — Velocity & networks
-- [ ] `packages/velocity`: velocity.toml targeted editor, servers/try/forced-hosts generation, forwarding compatibility matrix, backend forwarding config writers
+- [x] `packages/velocity`: velocity.toml targeted editor, servers/try/forced-hosts generation, forwarding compatibility matrix, backend forwarding config writers — tested on the real Velocity 4.2.0 default config; plus redaction, network validator, plan/diff/rollout order, secret generation. YAML fixtures are representative (Paper writes its configs only after EULA acceptance).
 - [ ] Network creation wizard (15 steps)
 - [ ] Proxy provisioning (Velocity builds via Fill API)
 - [ ] Backend registration (internal Docker network / private IP binding)
-- [ ] Modern forwarding with secure secret storage; unsafe combination warnings
-- [ ] Forced hosts CRUD, duplicate detection, DNS/port guidance, preview, apply, rollback
+- [~] Modern forwarding with secure secret storage; unsafe combination warnings — secret generation/assessment, unsafe-combination validator and redaction done in `packages/velocity`; encrypted storage + API pending (control plane).
+- [~] Forced hosts CRUD, duplicate detection, DNS/port guidance, preview, apply, rollback — normalisation (IDNA/RFC 1123/no wildcards), duplicate/conflict detection, DNS/SRV guidance and diff preview done in `packages/velocity`; CRUD/apply/rollback pending (control plane + UI).
 - [ ] Topology editor (React Flow) backed by persisted drafts/plans; diff/apply/rollback
 - [ ] Connectivity checks (proxy→backend probes, health)
 - [ ] Network ops: rolling restart, maintenance mode, drain, cross-server player counts

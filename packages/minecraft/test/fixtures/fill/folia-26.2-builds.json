@@ -1,0 +1,68 @@
+[
+  {
+    "id": 7,
+    "time": "2026-08-25T13:29:28Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "14b7fee5c866fca9a40ede4a58998fb928140f65",
+        "time": "2026-08-25T13:16:38Z",
+        "message": "Update Paper\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "folia-26.2-7.jar",
+        "checksums": {
+          "sha256": "128a634192261cd38bb4a5dc54075018a0f896fd6c6f529e37dca6e99e32b3b3"
+        },
+        "size": 64717630,
+        "url": "https://fill-data.papermc.io/v1/objects/128a634192261cd38bb4a5dc54075018a0f896fd6c6f529e37dca6e99e32b3b3/folia-26.2-7.jar"
+      }
+    }
+  },
+  {
+    "id": 6,
+    "time": "2026-08-23T09:21:52Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "68b2af18edf378b89dfbef1d86bd21759cb81aad",
+        "time": "2026-08-23T09:21:18Z",
+        "message": "Update Paper\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "folia-26.2-6.jar",
+        "checksums": {
+          "sha256": "9a728381da3a3bea6732ee210519f8f6ab7d6affe132a430ee167c44c4603d08"
+        },
+        "size": 64694365,
+        "url": "https://fill-data.papermc.io/v1/objects/9a728381da3a3bea6732ee210519f8f6ab7d6affe132a430ee167c44c4603d08/folia-26.2-6.jar"
+      }
+    }
+  },
+  {
+    "id": 5,
+    "time": "2026-08-19T10:02:44Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "95c3f27c42f901ab8e44bbed992c7a6c53e3daaf",
+        "time": "2026-08-19T10:01:01Z",
+        "message": "Thread check eigencraft redstone and game events\n\nThis prevents performing actions out-of-region.\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "folia-26.2-5.jar",
+        "checksums": {
+          "sha256": "faae55d240337cd6341fee2ce1512dafe658cfb03c88f6b213fd15c37bb07307"
+        },
+        "size": 62127491,
+        "url": "https://fill-data.papermc.io/v1/objects/faae55d240337cd6341fee2ce1512dafe658cfb03c88f6b213fd15c37bb07307/folia-26.2-5.jar"
+      }
+    }
+  }
+]

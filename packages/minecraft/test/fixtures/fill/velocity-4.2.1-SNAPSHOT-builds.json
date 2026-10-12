@@ -1,0 +1,73 @@
+[
+  {
+    "id": 41,
+    "time": "2026-10-07T00:53:39.098Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "5e641c6533db6b75a236b5ae79f76e27ad3169a8",
+        "time": "2026-10-07T00:49:31Z",
+        "message": "Fix space that somehow leaked in there\n"
+      },
+      {
+        "sha": "ef18d59c2f1f6a9e036094defac16e49fe28542b",
+        "time": "2026-10-06T23:05:18Z",
+        "message": "Bump netty to 4.2.19.Final\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "velocity-4.2.1-SNAPSHOT-41.jar",
+        "checksums": {
+          "sha256": "aab3cc7e60ee758ea8cfff3cb0ab88e92aececfd0025061c90f00d6aa9f1aa1e"
+        },
+        "size": 42275614,
+        "url": "https://fill-data.papermc.io/v1/objects/aab3cc7e60ee758ea8cfff3cb0ab88e92aececfd0025061c90f00d6aa9f1aa1e/velocity-4.2.1-SNAPSHOT-41.jar"
+      }
+    }
+  },
+  {
+    "id": 39,
+    "time": "2026-10-06T20:33:17.747Z",
+    "channel": "BETA",
+    "commits": [
+      {
+        "sha": "aaf7c9dabcc119cbcf888a989dc8226fd811915a",
+        "time": "2026-10-06T20:29:30Z",
+        "message": "Publish snapshot builds to the beta channel\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "velocity-4.2.1-SNAPSHOT-39.jar",
+        "checksums": {
+          "sha256": "d41d3803d62a1e3a5a51e845064460bf4e00af815323432c589623fb3b185fe0"
+        },
+        "size": 42261759,
+        "url": "https://fill-data.papermc.io/v1/objects/d41d3803d62a1e3a5a51e845064460bf4e00af815323432c589623fb3b185fe0/velocity-4.2.1-SNAPSHOT-39.jar"
+      }
+    }
+  },
+  {
+    "id": 38,
+    "time": "2026-10-06T19:55:01.129Z",
+    "channel": "STABLE",
+    "commits": [
+      {
+        "sha": "9fb23a6855a919eb83b8c79d8bcc92e948a7d626",
+        "time": "2026-10-06T19:53:45Z",
+        "message": "Disconnect clients that take too long to log in\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "velocity-4.2.1-SNAPSHOT-38.jar",
+        "checksums": {
+          "sha256": "db6be7e3ffe9114e9a5d0645fbea398bf4591276603718ffeedf4d2d8eac1aaa"
+        },
+        "size": 42261760,
+        "url": "https://fill-data.papermc.io/v1/objects/db6be7e3ffe9114e9a5d0645fbea398bf4591276603718ffeedf4d2d8eac1aaa/velocity-4.2.1-SNAPSHOT-38.jar"
+      }
+    }
+  }
+]

@@ -1,0 +1,24 @@
+[
+  {
+    "id": 615,
+    "time": "2026-07-11T15:59:56.494Z",
+    "channel": "RECOMMENDED",
+    "commits": [
+      {
+        "sha": "4498f1e03d3ef8b2005bb19a430cc78665ea3923",
+        "time": "2026-07-11T15:56:22Z",
+        "message": "Release 3.5.1\n\nBumps fill plugin to mitigate a deployment issue\n"
+      }
+    ],
+    "downloads": {
+      "server:default": {
+        "name": "velocity-3.5.1-615.jar",
+        "checksums": {
+          "sha256": "b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3"
+        },
+        "size": 18932366,
+        "url": "https://fill-data.papermc.io/v1/objects/b4e3164df5377346854dc6cb9e6a78022b1946ff69e89676313f5f6f1c6f0fb3/velocity-3.5.1-615.jar"
+      }
+    }
+  }
+]

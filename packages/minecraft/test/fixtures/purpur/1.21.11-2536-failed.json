@@ -1,0 +1,13 @@
+{
+  "project": "purpur",
+  "version": "1.21.11",
+  "build": "2536",
+  "result": "FAILURE",
+  "timestamp": 1765430077635,
+  "duration": 244561,
+  "commits": [],
+  "metadata": {
+    "type": "experimental"
+  },
+  "md5": null
+}

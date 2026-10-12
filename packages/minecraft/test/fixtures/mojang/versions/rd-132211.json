@@ -1,0 +1,20 @@
+{
+  "id": "rd-132211",
+  "type": "old_alpha",
+  "time": "2009-05-13T20:11:00+00:00",
+  "releaseTime": "2009-05-13T20:11:00+00:00",
+  "mainClass": "com.mojang.rubydung.RubyDung",
+  "minimumLauncherVersion": 7,
+  "complianceLevel": 0,
+  "javaVersion": {
+    "component": "jre-legacy",
+    "majorVersion": 8
+  },
+  "downloads": {
+    "client": {
+      "sha1": "393e8d4b4d708587e2accd7c5221db65365e1075",
+      "size": 26704,
+      "url": "https://launcher.mojang.com/v1/objects/393e8d4b4d708587e2accd7c5221db65365e1075/client.jar"
+    }
+  }
+}

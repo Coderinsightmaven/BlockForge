@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "error": "sunset",
+  "message": "This API version has been sunset and is no longer available. To continue using the service, please upgrade to a supported API version."
+}
