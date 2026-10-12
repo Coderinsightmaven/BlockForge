@@ -1,6 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef } from "react";
-import { REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type { Server, WorkloadMetricSample } from "@blockforge/contracts";
 import { qk } from "../query-keys";
 import {
@@ -13,16 +12,17 @@ import { applyServerEvent, applyServerSample, type ServerBroadcast } from "../se
 import { useThrottledInvalidate } from "./handlers";
 import { useRealtimeClient, useRealtimeTopic } from "./provider";
 import type { RealtimeEvent } from "./client";
+import { SHELL_EVENT_PAYLOADS } from "./payloads";
 
 export function parseServerMetrics(data: unknown, serverId?: string): WorkloadMetricSample | null {
-  const parsed = REALTIME_EVENT_PAYLOADS["server.metrics"].safeParse(data);
+  const parsed = SHELL_EVENT_PAYLOADS["server.metrics"].safeParse(data);
   if (!parsed.success) return null;
   if (serverId && parsed.data.serverId !== serverId) return null;
   return parsed.data.sample;
 }
 
 export function parseServerUpdated(data: unknown): ServerBroadcast | null {
-  const parsed = REALTIME_EVENT_PAYLOADS["server.updated"].safeParse(data);
+  const parsed = SHELL_EVENT_PAYLOADS["server.updated"].safeParse(data);
   return parsed.success ? parsed.data : null;
 }
 
@@ -58,21 +58,21 @@ export function useServerRealtime(serverId: string, enabled: boolean): void {
       } else invalidate();
     } else if (event.type === "backup.updated") {
       // Status/progress/size of one backup (creation, upload, rotation, lock).
-      const parsed = REALTIME_EVENT_PAYLOADS["backup.updated"].safeParse(event.data);
+      const parsed = SHELL_EVENT_PAYLOADS["backup.updated"].safeParse(event.data);
       if (parsed.success && parsed.data.serverId === serverId) applyBackupEvent(queryClient, parsed.data);
       else invalidateBackups();
     } else if (event.type === "schedule.updated") {
       // Next/last run, running flag, edits from another session.
-      const parsed = REALTIME_EVENT_PAYLOADS["schedule.updated"].safeParse(event.data);
+      const parsed = SHELL_EVENT_PAYLOADS["schedule.updated"].safeParse(event.data);
       if (parsed.success && parsed.data.serverId === serverId) applyScheduleEvent(queryClient, parsed.data);
       else invalidateSchedules();
     } else if (event.type === "backup.deleted") {
-      const parsed = REALTIME_EVENT_PAYLOADS["backup.deleted"].safeParse(event.data);
+      const parsed = SHELL_EVENT_PAYLOADS["backup.deleted"].safeParse(event.data);
       if (parsed.success && parsed.data.serverId === serverId)
         void removeBackupFromCache(queryClient, serverId, parsed.data.backupId);
       else invalidateBackups();
     } else if (event.type === "schedule.deleted") {
-      const parsed = REALTIME_EVENT_PAYLOADS["schedule.deleted"].safeParse(event.data);
+      const parsed = SHELL_EVENT_PAYLOADS["schedule.deleted"].safeParse(event.data);
       if (parsed.success && parsed.data.serverId === serverId)
         void removeScheduleFromCache(queryClient, serverId, parsed.data.scheduleId);
       else invalidateSchedules();

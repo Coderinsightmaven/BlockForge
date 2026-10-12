@@ -78,8 +78,12 @@ export const NAV_ITEMS: NavItem[] = [
     permission: "monitoring.view",
     keywords: ["metrics", "charts"],
   },
-  { label: "Players", icon: Users, phase: 4 },
-  { label: "Plugins & Mods", icon: Puzzle, phase: 4 },
+  { label: "Players", icon: Users, perServer: "Available per server in the server page (Players tab)" },
+  {
+    label: "Plugins & Mods",
+    icon: Puzzle,
+    perServer: "Available per server in the server page (Plugins & mods tab)",
+  },
   { label: "Files", icon: FolderOpen, perServer: "Open a server's Files tab" },
   { label: "Backups", icon: Archive, perServer: "Available per server in the server page (Backups tab)" },
   {

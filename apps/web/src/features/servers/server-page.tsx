@@ -33,6 +33,8 @@ import {
 const FilesTab = lazy(() => import("./files/files-tab"));
 const StatsTab = lazy(() => import("./tabs/stats-tab"));
 const BackupsTab = lazy(() => import("./tabs/backups-tab"));
+const ExtensionsTab = lazy(() => import("./extensions/extensions-tab"));
+const PlayersTab = lazy(() => import("./players/players-tab"));
 const SchedulesTab = lazy(() => import("./tabs/schedules-tab"));
 const StartupTab = lazy(() => import("./tabs/startup-tab"));
 const NetworkTab = lazy(() => import("./tabs/network-tab"));
@@ -241,6 +243,8 @@ export function ServerPage({
                     onEditorDirty={onEditorDirty}
                   />
                 ) : null}
+                {tab === "extensions" ? <ExtensionsTab server={server} me={me} /> : null}
+                {tab === "players" ? <PlayersTab server={server} /> : null}
                 {tab === "backups" ? <BackupsTab server={server} me={me} /> : null}
                 {tab === "schedules" ? <SchedulesTab server={server} /> : null}
                 {tab === "startup" ? <StartupTab server={server} /> : null}

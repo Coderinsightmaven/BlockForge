@@ -3,6 +3,9 @@ import { Bytes, EpochMs, Id, PageQuery, Sha1Hex, Sha512Hex, page } from "../comm
 import type { Permission } from "../permissions.js";
 import { ServerSoftware } from "./servers.js";
 import { TransferUrlResponse } from "./files.js";
+import { ExtensionScanStatus } from "./extension-events.js";
+
+export { ExtensionScanStatus, ExtensionsUpdatedEvent } from "./extension-events.js";
 
 /**
  * Plugins & mods (Phase 4b): `/servers/:id/extensions/*`.
@@ -224,17 +227,16 @@ export const InstalledExtension = z.object({
 });
 export type InstalledExtension = z.infer<typeof InstalledExtension>;
 
-export const ExtensionScanStatus = z.object({
-  status: z.enum(["never", "running", "completed", "failed"]),
-  /** Completion time of the last successful scan. */
-  scannedAt: EpochMs.nullable(),
-  /** Running or last scan job. */
-  jobId: Id.nullable(),
-  error: z.string().max(1024).nullable(),
-});
-export type ExtensionScanStatus = z.infer<typeof ExtensionScanStatus>;
 
 /** `GET /servers/:id/extensions` — not paginated (bounded by the 4096-file scan cap). */
+/** Upload policy (`extensions.uploads` setting); also returned in `ExtensionList.uploads` for every reader. */
+export const ExtensionUploadSettings = z.object({
+  allowed: z.boolean().default(true),
+  /** Refuse jars without any plugin/mod metadata (`no_metadata`). */
+  requireMetadata: z.boolean().default(true),
+});
+export type ExtensionUploadSettings = z.infer<typeof ExtensionUploadSettings>;
+
 export const ExtensionList = z.object({
   /** null = the server software loads no extensions (vanilla, non-Minecraft): `items` is empty. */
   installDir: ExtensionInstallDir.nullable(),
@@ -252,6 +254,8 @@ export const ExtensionList = z.object({
   scan: ExtensionScanStatus,
   /** More than 4096 jars: the list is cut (sorted by file name). */
   truncated: z.boolean(),
+  /** The current upload policy, so clients can hide/explain the upload action without `settings.manage`. */
+  uploads: ExtensionUploadSettings,
 });
 export type ExtensionList = z.infer<typeof ExtensionList>;
 
@@ -562,6 +566,14 @@ export const ModrinthPlanChangedDetails = z.object({ reason: z.literal("plan_cha
 
 /** Why an available update cannot be applied (library `FileProblem`). */
 export const ExtensionUpdateProblem = z.enum(["NO_JAR", "UNSAFE_FILENAME", "URL_NOT_ALLOWED", "TOO_LARGE", "NO_SHA512"]);
+/** Description of each `ExtensionUpdateProblem` (for UI labels). */
+export const EXTENSION_UPDATE_PROBLEMS = {
+  NO_JAR: "The new version's primary file is not an installable jar",
+  UNSAFE_FILENAME: "The new version's file name is not safe to install",
+  URL_NOT_ALLOWED: "The new version is not hosted on the Modrinth CDN",
+  TOO_LARGE: "The new version's file is larger than BlockForge installs",
+  NO_SHA512: "Modrinth has no SHA-512 checksum for the new version's file",
+} as const satisfies Record<z.infer<typeof ExtensionUpdateProblem>, string>;
 
 export const ExtensionUpdateStatus = z.object({
   extensionId: Id,
@@ -681,12 +693,6 @@ export const ExtensionUploadRejectedDetails = z.object({
  * files appear as `source: "unknown"` after the next scan.
  */
 export const EXTENSION_UPLOAD_SETTINGS_KEY = "extensions.uploads";
-export const ExtensionUploadSettings = z.object({
-  allowed: z.boolean().default(true),
-  /** Refuse jars without any plugin/mod metadata (`no_metadata`). */
-  requireMetadata: z.boolean().default(true),
-});
-export type ExtensionUploadSettings = z.infer<typeof ExtensionUploadSettings>;
 
 // ---------------------------------------------------------------------------------------------
 // History and rollback
@@ -757,14 +763,3 @@ export const ExtensionRollbackUnavailableDetails = z.object({
 // ---------------------------------------------------------------------------------------------
 // Realtime
 
-/**
- * `extensions.updated` on `server:<id>`: the extension list (or the scan status) changed. `changed` lists
- * the affected extension ids (re-read them with `GET …/extensions/:extensionId`; 404 = removed); null means
- * "many / unknown" — refetch the whole list. History changes are covered by the same event.
- */
-export const ExtensionsUpdatedEvent = z.object({
-  serverId: Id,
-  scan: ExtensionScanStatus,
-  changed: z.array(Id).max(256).nullable(),
-});
-export type ExtensionsUpdatedEvent = z.infer<typeof ExtensionsUpdatedEvent>;

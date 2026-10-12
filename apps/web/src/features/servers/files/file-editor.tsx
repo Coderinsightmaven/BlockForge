@@ -3,7 +3,7 @@ import { ArrowLeft, Download, Lock, Save } from "lucide-react";
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { Server } from "@blockforge/contracts";
-import { filesApi } from "@/lib/api/servers-api";
+import { filesApi } from "@/lib/api/files-api";
 import { formatBytes } from "@/lib/format";
 import { toastError } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";

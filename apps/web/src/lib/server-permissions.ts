@@ -1,5 +1,5 @@
 import { SUBUSER_ASSIGNABLE_PERMISSIONS } from "@blockforge/contracts";
-import type { Me, Permission, Server } from "@blockforge/contracts";
+import type { Me, Permission, Server, ServerSoftware } from "@blockforge/contracts";
 import { canAny, hasGlobal } from "./permissions";
 
 /*
@@ -27,6 +27,8 @@ export type ServerTab =
   | "console"
   | "stats"
   | "files"
+  | "extensions"
+  | "players"
   | "backups"
   | "schedules"
   | "startup"
@@ -35,8 +37,46 @@ export type ServerTab =
   | "activity"
   | "settings";
 
-/** What tab gating reads from a server (`backupLimit` may be absent in partial fixtures). */
-export type TabServer = Pick<Server, "myPermissions"> & Partial<Pick<Server, "backupLimit">>;
+/**
+ * `EXTENSIONS_READ_PERMISSION` of the contract, spelled out so the always-loaded bundle does not pull
+ * in the whole Plugins & mods contract module (pinned by a test).
+ */
+export const EXTENSIONS_VIEW: Permission = "servers.extensions.view";
+
+/** What tab gating reads from a server (the optional fields may be absent in partial fixtures). */
+export type TabServer = Pick<Server, "myPermissions"> &
+  Partial<Pick<Server, "backupLimit" | "software" | "game">>;
+
+/**
+ * Where the server software loads plugins/mods from (same mapping as `extensionDirFor` in
+ * @blockforge/minecraft, pinned by a test): none for vanilla and non-Minecraft servers.
+ */
+export function extensionInstallDir(software: ServerSoftware | null | undefined): "plugins" | "mods" | null {
+  switch (software) {
+    case "paper":
+    case "purpur":
+    case "folia":
+    case "spigot":
+    case "velocity":
+      return "plugins";
+    case "fabric":
+    case "forge":
+    case "neoforge":
+      return "mods";
+    default:
+      return null;
+  }
+}
+
+/** Plugins & mods: only for software that loads them (unknown in partial fixtures → shown). */
+export function extensionsTabVisible(server: TabServer): boolean {
+  return server.software === undefined || extensionInstallDir(server.software) !== null;
+}
+
+/** Players: Minecraft servers and proxies (not other games). */
+export function playersTabVisible(server: TabServer): boolean {
+  return server.game !== "other";
+}
 
 export interface ServerTabDef {
   id: ServerTab;
@@ -56,6 +96,13 @@ export const SERVER_TABS: ServerTabDef[] = [
   { id: "console", label: "Console", anyOf: ["servers.console.view"] },
   { id: "stats", label: "Stats", anyOf: ["monitoring.view"] },
   { id: "files", label: "Files", anyOf: ["servers.files.read"] },
+  {
+    id: "extensions",
+    label: "Plugins & mods",
+    anyOf: [EXTENSIONS_VIEW],
+    visible: extensionsTabVisible,
+  },
+  { id: "players", label: "Players", anyOf: ["servers.players.view"], visible: playersTabVisible },
   { id: "backups", label: "Backups", anyOf: ["servers.backups.view"], visible: backupsTabVisible },
   { id: "schedules", label: "Schedules", anyOf: ["schedules.view"] },
   { id: "startup", label: "Startup", anyOf: ["servers.startup.view"] },
@@ -223,7 +270,6 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "players",
     label: "Players",
-    uiPhase: 4,
     permissions: [
       P("servers.players.view", "View players", "See online players and player history."),
       P(
@@ -236,10 +282,17 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "extensions",
     label: "Plugins & mods",
-    uiPhase: 4,
     permissions: [
-      P("servers.extensions.view", "View", "See installed plugins and mods, search Modrinth and check for updates."),
-      P("servers.extensions.manage", "Manage", "Install, update, enable, disable and remove plugins and mods."),
+      P(
+        "servers.extensions.view",
+        "View",
+        "See installed plugins and mods, search Modrinth and check for updates.",
+      ),
+      P(
+        "servers.extensions.manage",
+        "Manage",
+        "Install, update, enable, disable and remove plugins and mods.",
+      ),
     ],
   },
   {

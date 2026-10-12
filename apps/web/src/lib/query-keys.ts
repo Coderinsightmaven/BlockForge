@@ -43,6 +43,18 @@ export const qk = {
     schedules: ["server", id, "schedules"] as const,
     scheduleRunsAll: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId] as const,
     scheduleRuns: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId, "history"] as const,
+    extensions: ["server", id, "extensions"] as const,
+    /** Modrinth-backed: not under `extensions` so list invalidations never re-query Modrinth. */
+    extensionUpdates: (allowPrerelease: boolean) =>
+      ["server", id, "extension-updates", allowPrerelease] as const,
+    extensionHistory: ["server", id, "extension-history"] as const,
+    modrinthSearch: (params: unknown) => ["server", id, "modrinth", "search", params] as const,
+    modrinthProject: (project: string) => ["server", id, "modrinth", "project", project] as const,
+    modrinthPlan: (body: unknown) => ["server", id, "modrinth", "plan", body] as const,
+    players: ["server", id, "players"] as const,
+    playerSessionsAll: ["server", id, "player-sessions"] as const,
+    playerSessions: (name: string) => ["server", id, "player-sessions", name] as const,
+    playerLookup: (name: string) => ["server", id, "player-lookup", name] as const,
   }),
   schedules: {
     preview: (body: unknown) => ["schedules", "preview", body] as const,
@@ -70,6 +82,7 @@ export const qk = {
   },
   settings: {
     backupStorage: ["settings", "backups.storage"] as const,
+    extensionUploads: ["settings", "extensions.uploads"] as const,
   },
   metrics: {
     all: ["metrics"] as const,

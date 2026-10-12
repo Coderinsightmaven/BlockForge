@@ -6,8 +6,8 @@ import { AlertIncident, Job, JobLogLine, OverviewSummary } from "./api/operation
 import { Server } from "./api/servers.js";
 import { Backup } from "./api/backups.js";
 import { Schedule } from "./api/schedules.js";
-import { ExtensionsUpdatedEvent } from "./api/extensions.js";
-import { PlayerJoinedEvent, PlayerLeftEvent } from "./api/players.js";
+import { ExtensionsUpdatedEvent } from "./api/extension-events.js";
+import { PlayerJoinedEvent, PlayerLeftEvent } from "./api/player-events.js";
 
 /**
  * UI realtime channel: WSS /api/v1/realtime (session cookie auth; Origin checked).

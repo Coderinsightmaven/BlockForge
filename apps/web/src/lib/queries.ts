@@ -4,15 +4,7 @@ import { isApiError } from "./api/errors";
 import { alertsApi, auditApi, authApi, monitoringApi, nodesApi, rolesApi, usersApi } from "./api/endpoints";
 import type { AuditFilters, IncidentStatus } from "./api/endpoints";
 import { shareNode, shareNodeList } from "./node-cache";
-import {
-  accountApi,
-  allocationsApi,
-  catalogApi,
-  filesApi,
-  jobsApi,
-  serversApi,
-  templatesApi,
-} from "./api/servers-api";
+import { accountApi, allocationsApi, catalogApi, jobsApi, serversApi, templatesApi } from "./api/servers-api";
 import type { ServerListFilter } from "./api/servers-api";
 import { shareServer, shareServerPages } from "./server-cache";
 import { qk } from "./query-keys";
@@ -218,21 +210,6 @@ export const serverActivityQuery = (id: string, filters: AuditFilters) =>
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,
     staleTime: 30_000,
-  });
-
-export const fileListQuery = (id: string, path: string) =>
-  queryOptions({
-    queryKey: qk.server(id).files(path),
-    queryFn: ({ signal }) => filesApi.list(id, path, signal),
-    staleTime: 5_000,
-    placeholderData: keepPreviousData,
-  });
-
-export const fileSearchQuery = (id: string, path: string, q: string) =>
-  queryOptions({
-    queryKey: qk.server(id).search(path, q),
-    queryFn: ({ signal }) => filesApi.search(id, path, q, signal),
-    staleTime: 5_000,
   });
 
 export const templatesQuery = queryOptions({

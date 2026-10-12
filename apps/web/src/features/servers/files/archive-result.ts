@@ -1,7 +1,7 @@
 import type { Job } from "@blockforge/contracts";
 import { toast } from "sonner";
 import { jobsApi } from "@/lib/api/servers-api";
-import type { FileArchiveOrJob } from "@/lib/api/servers-api";
+import type { FileArchiveOrJob } from "@/lib/api/files-api";
 import { formatBytes } from "@/lib/format";
 import { baseName } from "./paths";
 

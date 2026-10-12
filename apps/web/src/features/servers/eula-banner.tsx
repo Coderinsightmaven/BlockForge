@@ -5,7 +5,10 @@ import { canStartOperation } from "@blockforge/contracts";
 import type { Server } from "@blockforge/contracts";
 import { newIdempotencyKey } from "@/lib/api/client";
 import { isApiError } from "@/lib/api/errors";
-import { filesApi, serversApi } from "@/lib/api/servers-api";
+import { serversApi } from "@/lib/api/servers-api";
+
+/** The file API loads on demand (it is not part of the server page's first-load bundle). */
+const loadFilesApi = () => import("@/lib/api/files-api").then((m) => m.filesApi);
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
 import { serverActionable, serverCan } from "@/lib/server-permissions";
@@ -45,7 +48,7 @@ export async function acceptEula(
     let content: string | null = null;
     let sha: string | null = null;
     try {
-      const current = await filesApi.contents(server.id, EULA_FILE);
+      const current = await (await loadFilesApi()).contents(server.id, EULA_FILE);
       content = current.encoding === "utf8" ? current.content : null;
       sha = current.sha256;
     } catch (err) {
@@ -53,7 +56,9 @@ export async function acceptEula(
     }
     if (content !== null && eulaAccepted(content)) break;
     try {
-      await filesApi.write(server.id, {
+      await (
+        await loadFilesApi()
+      ).write(server.id, {
         path: EULA_FILE,
         content: acceptEulaContent(content),
         baseSha256: sha,
@@ -85,7 +90,7 @@ export function EulaBanner({
   const canRead = serverCan(server, "servers.files.read");
   const file = useQuery({
     queryKey: qk.server(server.id).file(EULA_FILE),
-    queryFn: ({ signal }) => filesApi.contents(server.id, EULA_FILE, signal),
+    queryFn: async ({ signal }) => (await loadFilesApi()).contents(server.id, EULA_FILE, signal),
     enabled: isMinecraft && canRead && server.state !== "provisioning",
     retry: false,
     staleTime: 30_000,

@@ -4,20 +4,9 @@ import { NodeFacts } from "./facts.js";
 import { SlpStatus } from "./metrics.js";
 import { FileEntry, LogLine, WorkloadSpec, WorkloadStatus } from "./workload.js";
 
-/**
- * Path relative to a workload's data root. This is a first line of defence only — the agent
- * re-validates and resolves symlinks before touching the filesystem.
- */
-export const RelativePath = z
-  .string()
-  .max(1024)
-  .refine((p) => !p.includes("\0"), "NUL byte")
-  .refine((p) => !/^([/\\]|[a-zA-Z]:)/.test(p), "must be relative")
-  .refine((p) => !p.split(/[/\\]/).includes(".."), "must not contain '..'");
+import { MutableRelativePath, RelativePath } from "./paths.js";
 
-const isRootPath = (p: string) => p.split(/[/\\]/).every((seg) => seg === "" || seg === ".");
-/** A relative path that must not resolve to the data root itself ("", ".", "./", …). Used by every mutation. */
-export const MutableRelativePath = RelativePath.refine((p) => !isRootPath(p), "must not target the data root");
+export { MutableRelativePath, RelativePath } from "./paths.js";
 
 const WorkloadRef = z.object({ workloadId: z.uuid() });
 /**

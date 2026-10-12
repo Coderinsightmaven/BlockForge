@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, MapPin, Tag } from "lucide-react";
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import type { Me, Node } from "@blockforge/contracts";
 import { isApiError } from "@/lib/api/errors";
 import { can, canAny } from "@/lib/permissions";
@@ -23,13 +23,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApproveNodeDialog, NodeActions } from "./node-actions";
 import { CapacityFacts, FilesystemFacts, InterfacesFacts, RuntimeFacts, SystemFacts } from "./node-facts";
 import { CpuTile, DiskIoTile, FilesystemsTile, MemoryTile, NetworkTile } from "./node-live";
-import { NodeAllocations } from "./node-allocations";
 import { NODE_CHARTS } from "./node-charts";
 import { NodeSettings } from "./node-settings";
 import { isStale } from "./node-utils";
 import { NodeWarnings } from "./node-warnings";
 
 export type NodeTab = "overview" | "metrics" | "allocations" | "settings";
+
+// The allocations table (virtualised) loads when its tab is opened.
+const NodeAllocations = lazy(() =>
+  import("./node-allocations").then((m) => ({ default: m.NodeAllocations })),
+);
 
 export function PendingBanner({ node, canManage }: { node: Node; canManage: boolean }) {
   const [confirming, setConfirming] = useState(false);
@@ -233,7 +237,9 @@ export function NodeDetailPage({
 
         <TabsContent value="allocations">
           {tab === "allocations" ? (
-            <NodeAllocations node={node} canManage={can(me, "allocations.manage", scope)} />
+            <Suspense fallback={<Skeleton className="h-48 w-full" />}>
+              <NodeAllocations node={node} canManage={can(me, "allocations.manage", scope)} />
+            </Suspense>
           ) : null}
         </TabsContent>
 

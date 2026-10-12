@@ -3,7 +3,6 @@ import { ArrowDownToLine, Clock, Download, Pause, Play, Search, SendHorizontal, 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { KeyboardEvent } from "react";
 import { stripFormatting } from "@blockforge/minecraft";
-import { REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type { Server } from "@blockforge/contracts";
 import { serversApi } from "@/lib/api/servers-api";
 import { addCommand, getCommandHistory } from "@/lib/console-history";
@@ -22,6 +21,7 @@ import { isEulaPrompt } from "../eula";
 import { ConsoleLineView } from "./console-line";
 import { ConsoleStore } from "./console-store";
 import type { ConsoleLine, ConsoleStream } from "./console-store";
+import { SHELL_EVENT_PAYLOADS } from "@/lib/realtime/payloads";
 
 const HISTORY_LINES = 1000;
 const ACCEPTS_COMMANDS = new Set(["running", "starting", "degraded", "stopping"]);
@@ -105,7 +105,7 @@ export function ConsolePanel({
 
   useRealtimeTopic(`console:${server.id}`, (event) => {
     if (event.type !== "console.lines") return;
-    const parsed = REALTIME_EVENT_PAYLOADS["console.lines"].safeParse(event.data);
+    const parsed = SHELL_EVENT_PAYLOADS["console.lines"].safeParse(event.data);
     if (!parsed.success || parsed.data.serverId !== server.id) return;
     store.push(parsed.data);
     if (parsed.data.lines.some((l) => isEulaPrompt(l.line))) eulaRef.current?.();

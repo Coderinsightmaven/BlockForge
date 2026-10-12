@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { EpochMs, Id, PageQuery, page } from "../common.js";
+import { PlayerName, PlayerUuid } from "./player-events.js";
+
+export { PlayerJoinedEvent, PlayerLeftEvent, PlayerName, PlayerUuid } from "./player-events.js";
 
 /**
  * Players (Phase 4b): `/servers/:id/players/*`. Reads need `servers.players.view`, actions
@@ -13,12 +16,6 @@ import { EpochMs, Id, PageQuery, page } from "../common.js";
  * Velocity proxies have no lists and no built-in moderation commands (`availableActions` is empty).
  */
 
-/** Java Edition player name (the library's `PLAYER_NAME_RE`): no selectors, spaces or line breaks. */
-export const PlayerName = z.string().regex(/^[A-Za-z0-9_]{1,16}$/, "1–16 letters, digits or underscores");
-export type PlayerName = z.infer<typeof PlayerName>;
-/** Dashed lowercase UUID of any version (online-mode accounts are v4, offline-mode players v3). */
-export const PlayerUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, "dashed lowercase UUID");
-export type PlayerUuid = z.infer<typeof PlayerUuid>;
 /**
  * Address for IP bans: a dotted IPv4 quad without leading zeros. The server keys IP bans by the IPv4 string
  * of the client address (IPv4-mapped clients arrive as IPv4), so IPv6 bans could never match and are refused,
@@ -210,15 +207,3 @@ export type PlayerSession = z.infer<typeof PlayerSession>;
 export const PlayerSessionQuery = PageQuery.extend({ name: PlayerName.optional() });
 export const PlayerSessionPage = page(PlayerSession);
 
-/**
- * Realtime, published on `server:<id>` and delivered only to subscribers holding `servers.players.view` on
- * that server. Clients patch the online list and prepend/close sessions; on reconnect they refetch.
- */
-export const PlayerJoinedEvent = z.object({
-  serverId: Id,
-  name: PlayerName,
-  uuid: PlayerUuid.nullable(),
-  at: EpochMs,
-  sessionId: Id.nullable(),
-});
-export const PlayerLeftEvent = PlayerJoinedEvent.extend({ reason: z.string().max(256).nullable() });

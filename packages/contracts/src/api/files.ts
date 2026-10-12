@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Bytes, EpochMs } from "../common.js";
 import { FileEntry } from "../agent/workload.js";
-import { MutableRelativePath, RelativePath } from "../agent/commands.js";
+import { MutableRelativePath, RelativePath } from "../agent/paths.js";
 
 /**
  * File manager (`/servers/:id/files/*`). Paths are relative to the server's data root; the agent is the

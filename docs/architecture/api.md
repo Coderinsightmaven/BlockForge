@@ -268,7 +268,7 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   files are removed again and replaced files restored (history entries `status: "failed"`).
 * **Idempotency.** Install, apply updates, scan and rollback accept `Idempotency-Key` exactly like the backup
   routes (same 24 h replay, 409 `CONFLICT` with `details.reason` `in_progress` / `key_reused`). Upload
-  completion is idempotent per `uploadId`. One extension job per server at a time (409 `CONFLICT`,
+  completion is idempotent per `uploadId` once it has succeeded (refusals may be retried with other flags). One extension job per server at a time (409 `CONFLICT`,
   `details.reason: "extension_job_running"`); none while the server is provisioning, reinstalling, restoring,
   migrating or deleting (409 `INVALID_STATE`).
 * **`restartRequired`** is true whenever the server is not `stopped`/`crashed`: plugins and mods load only at
@@ -279,7 +279,10 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   size, hashes and reads the staged jar (`fs.hash`, `jar.readEntries`), evaluates compatibility, then renames it to
   `<installDir>/<filename>`. Refusals carry `ExtensionUploadRejectedDetails`: 422 `PRECONDITION_FAILED` for
   `not_a_jar` / `no_metadata` (policy `requireMetadata`) / `incompatible` (without `allowIncompatible`) /
-  `size_mismatch` / `uploads_disabled`, 409 `CONFLICT` for `exists`. Unfinished uploads are deleted after 1 h. The
+  `size_mismatch` / `uploads_disabled`, 409 `CONFLICT` for `exists`. A refusal keeps the staged file:
+  `…/complete` may be called again (e.g. with `replaceExisting` / `allowIncompatible`) until it succeeds; only a
+  successful completion is final and replayed for that `uploadId`. Unfinished uploads are deleted after 1 h.
+  `ExtensionList.uploads` exposes the policy to every reader. The
   policy is not a security boundary against holders of `servers.files.write`/SFTP (their jars show up as
   `source: "unknown"`).
 * **History & rollback.** Every mutation writes an `ExtensionHistoryEntry` (also failed ones). Rollback restores

@@ -1,4 +1,4 @@
-import { ServerFrame, Topic } from "@blockforge/contracts";
+import { ServerFrame, Topic } from "./protocol";
 import type { ClientFrame, RealtimeEventType } from "@blockforge/contracts";
 
 /*

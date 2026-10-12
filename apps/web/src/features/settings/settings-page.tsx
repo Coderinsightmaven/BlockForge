@@ -32,6 +32,7 @@ export type { SettingsTab } from "./settings-tabs";
 
 const ApiKeysCard = lazy(() => import("./api-keys"));
 const BackupStorageCard = lazy(() => import("./backup-storage"));
+const ExtensionUploadsCard = lazy(() => import("./extension-uploads"));
 
 function CardFallback() {
   return <Skeleton className="h-48 w-full" />;
@@ -368,7 +369,7 @@ export function SettingsPage({
   onTabChange: (t: SettingsTab) => void;
 }) {
   const canStorage = hasGlobal(me, "settings.manage");
-  const active = tab === "backups" && !canStorage ? "account" : tab;
+  const active = (tab === "backups" || tab === "extensions") && !canStorage ? "account" : tab;
   return (
     <>
       <PageHeader title="Settings" description="Your account, security and display preferences." />
@@ -380,6 +381,7 @@ export function SettingsPage({
           <TabsTrigger value="api-keys">API keys</TabsTrigger>
           <TabsTrigger value="appearance">Appearance</TabsTrigger>
           {canStorage ? <TabsTrigger value="backups">Backup storage</TabsTrigger> : null}
+          {canStorage ? <TabsTrigger value="extensions">Plugin uploads</TabsTrigger> : null}
         </TabsList>
         <TabsContent value="account" className="flex flex-col gap-3">
           <Card>
@@ -429,6 +431,13 @@ export function SettingsPage({
           <TabsContent value="backups">
             <Suspense fallback={<CardFallback />}>
               <BackupStorageCard />
+            </Suspense>
+          </TabsContent>
+        ) : null}
+        {canStorage ? (
+          <TabsContent value="extensions">
+            <Suspense fallback={<CardFallback />}>
+              <ExtensionUploadsCard />
             </Suspense>
           </TabsContent>
         ) : null}

@@ -27,6 +27,8 @@ describe("server tab gating (myPermissions)", () => {
       "console",
       "stats",
       "files",
+      "extensions",
+      "players",
       "backups",
       "schedules",
       "startup",
@@ -198,7 +200,7 @@ describe("subuser grants are a subset of the granter's permissions", () => {
     );
     const view = screen.getByRole("checkbox", { name: /Read the live console/ });
     expect((view as HTMLButtonElement).disabled).toBe(false);
-    const send = screen.getByRole("checkbox", { name: /Send commands/ });
+    const send = screen.getByRole("checkbox", { name: /^Send commands/ });
     expect((send as HTMLButtonElement).disabled).toBe(true);
     const power = screen.getByRole("checkbox", { name: /Start, stop, restart, kill/ });
     expect((power as HTMLButtonElement).disabled).toBe(true);

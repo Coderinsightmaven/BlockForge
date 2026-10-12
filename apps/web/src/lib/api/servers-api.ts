@@ -2,14 +2,7 @@ import {
   Allocation,
   ArtifactPlan,
   AuditEvent,
-  ConsoleLinesEvent,
   CreateAllocationsResponse,
-  FileArchiveResponse,
-  FileContentResponse,
-  FileCopyResponse,
-  FileJobResponse,
-  FileListResponse,
-  FileSearchResponse,
   Job,
   JobLogLine,
   PlacementPreviewResponse,
@@ -25,7 +18,6 @@ import {
   TemplateImportIssue,
   TemplateImportPreview,
   TemplateSummary,
-  TransferUrlResponse,
   page,
 } from "@blockforge/contracts";
 import type {
@@ -34,10 +26,6 @@ import type {
   CreateServerBase,
   CreateServerRequest,
   CreateSshKeyRequest,
-  FileChmodRequest,
-  FileCompressRequest,
-  FileDecompressRequest,
-  FileRenameRequest,
   ImportTemplateRequest,
   ServerActionRequest,
   UpdateAllocationRequest,
@@ -47,6 +35,7 @@ import type {
   UpdateTemplateRequest,
 } from "@blockforge/contracts";
 import { z } from "zod";
+import { ConsoleLinesEvent } from "../realtime/protocol";
 import { apiClient } from "./client";
 import type { AuditFilters } from "./endpoints";
 
@@ -65,14 +54,11 @@ const JobRef = z.object({ jobId: z.uuid() });
 
 export type PlacementCandidate = z.infer<typeof PlacementPreviewResponse>["candidates"][number];
 /** compress/decompress: synchronous result, or a background job (202). */
-const FileArchiveOrJob = z.union([FileArchiveResponse, FileJobResponse]);
-export type FileArchiveOrJob = z.infer<typeof FileArchiveOrJob>;
 
 export const CreateServerResponse = z.object({ server: Server, jobId: z.uuid() });
 const BuildChangeResponse = z.object({ server: Server, restartRequired: z.boolean() });
 const RestartRequired = z.object({ restartRequired: z.boolean() });
 const ImportResult = z.object({ template: Template, issues: z.array(TemplateImportIssue) });
-const FileWriteResponse = z.object({ sha256: z.string(), size: z.number().int().nonnegative() });
 
 export type ServerListFilter = "all" | "mine";
 export interface ServerListParams {
@@ -209,45 +195,6 @@ export const allocationsApi = {
   update: (id: string, body: In<typeof UpdateAllocationRequest>) =>
     apiClient.patch(`/allocations/${enc(id)}`, { body, schema: Allocation }),
   remove: (id: string) => apiClient.delete<void>(`/allocations/${enc(id)}`),
-};
-
-export const filesApi = {
-  list: (id: string, path: string, signal?: AbortSignal) =>
-    apiClient.get(`/servers/${enc(id)}/files/list`, { query: { path }, schema: FileListResponse, signal }),
-  contents: (id: string, path: string, signal?: AbortSignal) =>
-    apiClient.get(`/servers/${enc(id)}/files/contents`, {
-      query: { path },
-      schema: FileContentResponse,
-      signal,
-    }),
-  /** `baseSha256`: sha from the read (conflict check), `null` = must not exist, `undefined` = overwrite. */
-  write: (id: string, body: { path: string; content: string; baseSha256?: string | null }) =>
-    apiClient.put(`/servers/${enc(id)}/files/contents`, { body, schema: FileWriteResponse }),
-  // rename/delete/mkdir/chmod answer 204; copy and archive operations describe their result.
-  rename: (id: string, body: In<typeof FileRenameRequest>) =>
-    apiClient.post<void>(`/servers/${enc(id)}/files/rename`, { body }),
-  remove: (id: string, paths: string[]) =>
-    apiClient.post<void>(`/servers/${enc(id)}/files/delete`, { body: { paths } }),
-  copy: (id: string, path: string) =>
-    apiClient.post(`/servers/${enc(id)}/files/copy`, { body: { path }, schema: FileCopyResponse }),
-  mkdir: (id: string, path: string) =>
-    apiClient.post<void>(`/servers/${enc(id)}/files/mkdir`, { body: { path } }),
-  compress: (id: string, body: In<typeof FileCompressRequest>) =>
-    apiClient.post(`/servers/${enc(id)}/files/compress`, { body, schema: FileArchiveOrJob }),
-  decompress: (id: string, body: In<typeof FileDecompressRequest>) =>
-    apiClient.post(`/servers/${enc(id)}/files/decompress`, { body, schema: FileArchiveOrJob }),
-  chmod: (id: string, body: In<typeof FileChmodRequest>) =>
-    apiClient.post<void>(`/servers/${enc(id)}/files/chmod`, { body }),
-  search: (id: string, path: string, q: string, signal?: AbortSignal) =>
-    apiClient.get(`/servers/${enc(id)}/files/search`, {
-      query: { path, q, limit: 500 },
-      schema: FileSearchResponse,
-      signal,
-    }),
-  uploadUrl: (id: string, body: { directory: string; fileName: string; size: number }) =>
-    apiClient.post(`/servers/${enc(id)}/files/upload-url`, { body, schema: TransferUrlResponse }),
-  downloadUrl: (id: string, path: string) =>
-    apiClient.get(`/servers/${enc(id)}/files/download-url`, { query: { path }, schema: TransferUrlResponse }),
 };
 
 export const jobsApi = {
