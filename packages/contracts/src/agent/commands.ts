@@ -129,6 +129,7 @@ export const JAR_READ_LIMITS = {
   maxCentralDirectoryBytes: 16 * 1024 * 1024,
   maxEntryBytes: 256 * 1024,
   maxTotalBytes: 8 * 1024 * 1024,
+  maxReadBytes: 64 * 1024 ** 3,
 } as const;
 
 /** The complete command catalogue: payload and result schema per command type. */
@@ -389,6 +390,12 @@ export const AGENT_COMMANDS = {
         .max(JAR_READ_LIMITS.maxTotalBytes)
         .default(4 * 1024 * 1024),
       hash: z.array(z.enum(["sha1", "sha512"])).max(2).refine(isUniqueArray, "duplicate algorithm").default([]),
+      /**
+       * Command-wide budget of bytes read from disk (whole-file hashing + central directories + entry data).
+       * Once a jar would push the total past it, that jar and the rest answer `BUDGET_EXCEEDED` (the first jar
+       * is always processed).
+       */
+      maxReadBytes: Bytes.min(1).max(JAR_READ_LIMITS.maxReadBytes).default(8 * 1024 ** 3),
     }),
     result: z.object({ jars: z.array(JarReadResult).max(256) }),
   },
