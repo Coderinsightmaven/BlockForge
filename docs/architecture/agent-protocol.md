@@ -114,6 +114,9 @@ periodically. After an agent restart, a replayed command whose id is in the jour
 is harmless (`workload.ensure` by spec hash, `fs.write` with `ifMatchSha256`, start/stop
 converge to a state) — replay protection and idempotency are defence in depth.
 
+The control plane may send `welcome` again on an open session (e.g. when an administrator
+approves a pending node: `approved` flips to `true`). Agents must apply the new values in place.
+
 ### Agent → control plane
 
 | `t` | Shape | Purpose |

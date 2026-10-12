@@ -10,7 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
-    "db:generate": "drizzle-kit generate",
+    "db:generate": "node --conditions=@blockforge/source ./node_modules/drizzle-kit/bin.cjs generate",
     "db:migrate": "tsx --conditions=@blockforge/source src/db/migrate-cli.ts"
   },
   "dependencies": {

@@ -18,6 +18,7 @@ export const Job = z.object({
   status: JobStatus,
   targetType: z.string().nullable(),
   targetId: z.string().nullable(),
+  /** User id of the requester (null for system-initiated jobs). */
   requestedBy: z.string().nullable(),
   attempts: z.number().int(),
   error: z.object({ code: z.string(), message: z.string() }).nullable(),
@@ -215,6 +216,7 @@ export const AlertIncident = z.object({
   firstFiredAt: EpochMs,
   lastFiredAt: EpochMs,
   acknowledgedAt: EpochMs.nullable(),
+  /** Email of the acknowledging user (display identity). */
   acknowledgedBy: z.string().nullable(),
   resolvedAt: EpochMs.nullable(),
   occurrences: z.number().int(),

@@ -61,7 +61,7 @@ fresh key per user action and reuses it on automatic retries.
 | PATCH | `/nodes/:id` | `UpdateNodeRequest` → `Node` | nodes.manage |
 | POST | `/nodes/:id/approve` | → `Node` | nodes.manage |
 | POST | `/nodes/:id/revoke` | → `Node` (closes session, revokes key) | nodes.manage |
-| POST | `/nodes/:id/rotate-credentials` | → `Node` | nodes.manage |
+| POST | `/nodes/:id/rotate-credentials` | → `RotateCredentialsResponse` `{node, jobId}` (202) | nodes.manage |
 | DELETE | `/nodes/:id` | → 204 (only when it hosts no servers) | nodes.manage |
 | POST | `/nodes/:id/probe` | `{host, port, kind}` → `node.probe` result | nodes.manage |
 | GET | `/nodes/enrollment-tokens` | → `EnrollmentToken[]` | nodes.enroll |
@@ -85,6 +85,12 @@ fresh key per user action and reuses it on automatic retries.
 | PUT | `/notification-channels/:id` | same; omitting `config.url` keeps the stored secret URL | alerts.manage |
 | DELETE | `/notification-channels/:id` | → 204 | alerts.manage |
 | POST | `/notification-channels/:id/test` | → `NotificationTestResult` | alerts.manage |
+
+## Settings
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/settings/:key` | → `{key, value}` (known keys only, e.g. `notifications.webhookAllowlist`) | settings.manage |
+| PUT | `/settings/:key` | `{value}` (validated per key) → `{key, value}` | settings.manage |
 
 ## Jobs
 | Method | Path | Body → Response | Permission |

@@ -71,9 +71,13 @@ export const EnrollmentToken = z.object({
   usedByNodeId: Id.nullable(),
   requiresApproval: z.boolean(),
   createdAt: EpochMs,
+  /** Email of the creating user (display identity); null if that user was deleted. */
   createdBy: z.string().nullable(),
 });
 export type EnrollmentToken = z.infer<typeof EnrollmentToken>;
+
+/** `POST /nodes/:id/rotate-credentials` response: rotation runs as a job. */
+export const RotateCredentialsResponse = z.object({ node: Node, jobId: z.uuid() });
 
 /** Returned once on creation; the secret is never retrievable again. */
 export const CreatedEnrollmentToken = z.object({
