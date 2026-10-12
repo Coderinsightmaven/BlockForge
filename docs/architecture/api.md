@@ -231,8 +231,8 @@ Every other route accepts `Authorization: Bearer bfk_…` (no CSRF). Key request
 client IP as seen through `TRUST_PROXY`. Rate limit: 120 requests/min per key (configurable).
 
 ## Plugins & mods (Phase 4b) — see `api/extensions.ts`
-Reads use `EXTENSIONS_READ_PERMISSION` (today `servers.extensions.manage`; a separate `servers.extensions.view`
-is proposed — the constant is the single switch). Mutations need `servers.extensions.manage`. Vanilla and
+Reads use `EXTENSIONS_READ_PERMISSION` = `servers.extensions.view` (granted to the observer role through the
+`.view` rule, to server administrators and server owners). Mutations need `servers.extensions.manage`. Vanilla and
 non-Minecraft servers have no install dir: the list answers `installDir: null`, every other route 422
 `PRECONDITION_FAILED` (`details.reason: "unsupported_software"`).
 

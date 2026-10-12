@@ -226,14 +226,21 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
     uiPhase: 4,
     permissions: [
       P("servers.players.view", "View players", "See online players and player history."),
-      P("servers.players.manage", "Manage players", "Kick, ban, whitelist and op players."),
+      P(
+        "servers.players.manage",
+        "Manage players",
+        "Kick, ban and whitelist players. Making someone an operator also needs Console → Send commands.",
+      ),
     ],
   },
   {
     id: "extensions",
     label: "Plugins & mods",
     uiPhase: 4,
-    permissions: [P("servers.extensions.manage", "Manage", "Install, update and remove plugins and mods.")],
+    permissions: [
+      P("servers.extensions.view", "View", "See installed plugins and mods, search Modrinth and check for updates."),
+      P("servers.extensions.manage", "Manage", "Install, update, enable, disable and remove plugins and mods."),
+    ],
   },
   {
     id: "monitoring",

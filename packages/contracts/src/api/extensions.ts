@@ -23,10 +23,9 @@ import { TransferUrlResponse } from "./files.js";
 
 /**
  * Permission checked for extension *reads* (list, search, project, plan, updates, history). Mutations need
- * `servers.extensions.manage`. Proposed: a separate `servers.extensions.view` (would also reach the observer
- * role); switching is a one-line change here.
+ * `servers.extensions.manage`.
  */
-export const EXTENSIONS_READ_PERMISSION: Permission = "servers.extensions.manage";
+export const EXTENSIONS_READ_PERMISSION: Permission = "servers.extensions.view";
 export const EXTENSIONS_MANAGE_PERMISSION: Permission = "servers.extensions.manage";
 
 export const ExtensionKind = z.enum(["plugin", "mod"]);
