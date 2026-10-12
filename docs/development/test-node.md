@@ -39,3 +39,17 @@ ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -R 127.0.0.1:18080:
 
 Agent URL: `http://127.0.0.1:18080` with `--insecure-allow-http` (allowed: loopback; transport encrypted by SSH).
 Verified 2026-10-11: tunnel established, remote `127.0.0.1:18080` reached a workstation service.
+
+## Phase 3 end-to-end evidence (2026-10-12)
+* Allocation pool 25570–25600 (`0.0.0.0`, alias 10.10.10.240); allocating 25565 warned "already in use" (ATM11) and was removed.
+* **Paper 26.3** (built-in template) on :25570 — created via API, running in ~40 s incl. first `eclipse-temurin:25-jre` pull;
+  LAN SLP 9 ms; console `list`; graceful restart 14 s with world save; CPU/memory/JVM heap/players telemetry.
+* **Vanilla Minecraft egg** (official Pterodactyl egg, imported) on :25571 — install container, EULA via file manager
+  (stale write → 409, correct `baseSha256` → 200), SLP + JVM telemetry after the `kind: minecraft` fix.
+* **SFTP** (agent :2022, enabled after the Phase 3 review fixes): key login with host-key fingerprint matching the panel,
+  list/upload/download/rename/delete, symlink creation refused, `../` stays inside the data root (verified on the host),
+  every mutation in the server activity log; read-only subuser can download but upload/delete/rename/mkdir/chmod are
+  refused; login to a server the user is not on is refused.
+  **LAN access to 2022 is blocked by the node's `ufw`** (Docker-published game ports bypass ufw; host-network listeners
+  don't). Opening it needs `sudo ufw allow 2022/tcp` (or restricted to the LAN) by the node owner. Tests above ran through
+  `ssh -L 12022:127.0.0.1:2022 game@10.10.10.240`.
