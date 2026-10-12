@@ -78,6 +78,7 @@ function v6Blocked(ip: string): boolean {
   if (allZero(0, 5) && g[5] === 0xffff) return v4Blocked(embeddedV4(g)); // ::ffff:a.b.c.d (IPv4-mapped)
   if (allZero(0, 6)) return v4Blocked(embeddedV4(g)); // ::a.b.c.d (IPv4-compatible, deprecated)
   if (a === 0x64 && b === 0xff9b && allZero(2, 6)) return v4Blocked(embeddedV4(g)); // NAT64 64:ff9b::/96
+  if (a === 0x64 && b === 0xff9b && g[2] === 1) return true; // RFC 8215 local-use NAT64 64:ff9b:1::/48 (site-internal)
   if (a === 0x2002) return v4Blocked([b >> 8, b & 0xff, g[2]! >> 8, g[2]! & 0xff].join(".")); // 6to4
   if (a === 0x100 && allZero(1, 4)) return true; // discard 100::/64
   if ((a & 0xfe00) === 0xfc00) return true; // ULA fc00::/7 (incl. fd00:ec2::254 metadata)

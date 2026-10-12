@@ -43,3 +43,40 @@ export function lockoutDurationMs(failedCount: number): number {
   if (failedCount < LOCKOUT_THRESHOLD) return 0;
   return Math.min(LOCKOUT_MAX_MS, LOCKOUT_BASE_MS * 2 ** (failedCount - LOCKOUT_THRESHOLD));
 }
+
+/** Canonical form of a login identifier for limiter/lockout keys (Unicode-normalised, trimmed, lowercase). */
+export function normalizeLoginKey(email: string): string {
+  return email.normalize("NFKC").trim().toLowerCase();
+}
+
+/**
+ * Lockout bookkeeping for login attempts against accounts that do not exist. It mirrors the
+ * database counters of real accounts, so a locked real account and a "locked" unknown address
+ * produce the same response and nobody can probe which addresses are registered. Bounded LRU.
+ */
+export class PhantomLockouts {
+  private readonly entries = new Map<string, { failed: number; lockedUntil: number }>();
+
+  constructor(private readonly maxKeys = 50_000) {}
+
+  /** Remaining lock time for the key (0 when not locked). */
+  lockedFor(key: string, now: number): number {
+    const e = this.entries.get(key);
+    return e && e.lockedUntil > now ? e.lockedUntil - now : 0;
+  }
+
+  /** Counts a failure; returns the new failure count. */
+  fail(key: string, now: number): number {
+    const e = this.entries.get(key) ?? { failed: 0, lockedUntil: 0 };
+    e.failed++;
+    const lockMs = lockoutDurationMs(e.failed);
+    if (lockMs > 0) e.lockedUntil = Math.max(e.lockedUntil, now + lockMs);
+    this.entries.delete(key);
+    this.entries.set(key, e);
+    if (this.entries.size > this.maxKeys) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest !== undefined) this.entries.delete(oldest);
+    }
+    return e.failed;
+  }
+}

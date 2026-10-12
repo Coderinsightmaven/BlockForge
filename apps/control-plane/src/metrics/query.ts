@@ -16,7 +16,8 @@ export class MetricsQueryService {
     const grid = stepGrid(q.from, q.to, stepMs);
     const meta = METRIC_SERIES[q.series];
     const base: MetricSeriesResult = { series: q.series, unit: meta.unit, from: q.from, to: q.to, stepMs, lines: [] };
-    if (target.nodeIds !== undefined && target.nodeIds !== "all" && target.nodeIds.length === 0) return base;
+    const subjectIds = q.series === "global.players" ? (target.serverIds ?? target.nodeIds) : target.nodeIds;
+    if (subjectIds !== undefined && subjectIds !== "all" && subjectIds.length === 0) return base;
     let subs;
     try {
       subs = buildSeriesQueries(q.series, target, stepMs);

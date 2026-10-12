@@ -6,7 +6,8 @@ import { actorOf, requirePermission, requirePrincipal } from "../http/auth-hooks
 import { parse } from "../http/validation.js";
 import { forbidden } from "../lib/errors.js";
 import { decodeCursor, encodeCursor, TimeIdCursor } from "../lib/pagination.js";
-import { authorize, GLOBAL, hasPermissionAnywhere, type Resource } from "../rbac/authorize.js";
+import { incidentScopeFilter } from "./scope.js";
+import { authorize, GLOBAL, hasPermissionAnywhere, permittedScopes, type Resource } from "../rbac/authorize.js";
 
 const IdParams = z.object({ id: z.uuid() });
 const IncidentQuery = z.object({
@@ -29,31 +30,18 @@ export function registerAlertRoutes(app: FastifyInstance, ctx: AppContext): void
     const principal = requirePrincipal(req);
     if (!hasPermissionAnywhere(principal, "alerts.view")) throw forbidden();
     const q = parse(IncidentQuery, req.query, "Query");
-    let cursor = decodeCursor(TimeIdCursor, q.cursor);
-    const visible: Awaited<ReturnType<typeof ctx.alerts.incidentRow>>[] = [];
-    let lastExamined: (typeof visible)[number] | null = null;
-    let exhausted = false;
-    // Scope filtering happens per incident, so keep reading (bounded) until the page is full.
-    for (let i = 0; i < 10 && visible.length < q.limit; i++) {
-      const page = await ctx.alerts.listIncidents({ status: q.status, severity: q.severity, limit: q.limit, cursor });
-      for (const [idx, row] of page.rows.entries()) {
-        lastExamined = row;
-        if (authorize(principal, "alerts.view", await ctx.alerts.subjectResource(row.subjectType, row.subjectId))) visible.push(row);
-        if (visible.length >= q.limit) {
-          exhausted = idx === page.rows.length - 1 && !page.next;
-          break;
-        }
-      }
-      if (visible.length >= q.limit) break;
-      if (!page.next) {
-        exhausted = true;
-        break;
-      }
-      cursor = page.next;
-    }
-    const next = !exhausted && lastExamined ? { t: lastExamined.lastFiredAt.getTime(), id: lastExamined.id } : null;
-    const items = await ctx.alerts.incidentDtos(visible);
-    return { items, nextCursor: next ? encodeCursor(next) : null };
+    // Scope filtering happens in SQL: one page query, no per-incident lookups.
+    const scopes = permittedScopes(principal, "alerts.view");
+    const nodeIds = await ctx.rbac.visibleNodeIds(scopes);
+    const serverIds = await ctx.rbac.visibleServerIds(scopes);
+    const page = await ctx.alerts.listIncidents({
+      status: q.status,
+      severity: q.severity,
+      limit: q.limit,
+      cursor: decodeCursor(TimeIdCursor, q.cursor),
+      scope: incidentScopeFilter(nodeIds, serverIds),
+    });
+    return { items: await ctx.alerts.incidentDtos(page.rows), nextCursor: page.next ? encodeCursor(page.next) : null };
   });
 
   app.post("/alerts/incidents/:id/ack", async (req) => {
@@ -77,8 +65,10 @@ export function registerAlertRoutes(app: FastifyInstance, ctx: AppContext): void
     const rules = await ctx.alerts.listRules();
     const out = [];
     for (const r of rules) {
-      // Global rules apply everywhere, so anyone who can view alerts sees them.
-      if (r.scopeType === "global" || authorize(principal, "alerts.view", await ruleScope(r).catch(() => GLOBAL))) out.push(r);
+      // A rule is visible to holders of alerts.view at its scope; global rules need global scope.
+      // Rules scoped to a server that no longer exists are only shown to global viewers.
+      const scope = await ruleScope(r).catch(() => GLOBAL);
+      if (authorize(principal, "alerts.view", scope)) out.push(r);
     }
     return out;
   });

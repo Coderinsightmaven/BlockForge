@@ -50,22 +50,25 @@ export function rotateCredentialsJob(deps: RotateDeps): JobDefinition<Input> {
           const { nodeId } = ctx.input;
           const commandId = randomUUID();
           await ctx.log("info", "Sending credentials.rotate to the agent");
-          const result = await deps.gateway.send(nodeId, "credentials.rotate", {}, {
-            jobId: ctx.jobId,
-            userId: ctx.requestedBy,
-            signal: ctx.signal,
-            timeoutMs: 60_000,
-            commandId,
-          });
-          // Register the pending-key insert synchronously, before any I/O, so an agent that reconnects
-          // with the new key right away waits for it instead of being rejected.
-          const store = (async () => {
+          // Registered before the command is sent: the agent may reconnect with its next key the moment
+          // it has answered, possibly before this process has even processed the result frame.
+          const end = deps.rotations.begin(nodeId);
+          let result: { publicKey: string; proof: string };
+          try {
+            result = await deps.gateway.send(nodeId, "credentials.rotate", {}, {
+              jobId: ctx.jobId,
+              userId: ctx.requestedBy,
+              signal: ctx.signal,
+              timeoutMs: 60_000,
+              commandId,
+            });
             const key = ed25519PublicKeyFromRaw(result.publicKey);
             const message = Buffer.from(`${ROTATION_PROOF_PREFIX}${nodeId}:${commandId}`, "utf8");
             if (!key || !ed25519Verify(key, message, result.proof)) {
               throw new JobError("ROTATION_PROOF_INVALID", "The agent's proof of possession for the new key is invalid");
             }
             const now = deps.clock.now();
+            const publicKey = result.publicKey;
             await deps.db.transaction(async (tx) => {
               // At most one pending key per node: a newer rotation supersedes an unfinished one.
               await tx
@@ -75,7 +78,7 @@ export function rotateCredentialsJob(deps: RotateDeps): JobDefinition<Input> {
               await tx.insert(nodeCredentials).values({
                 id: randomUUID(),
                 nodeId,
-                publicKey: result.publicKey,
+                publicKey,
                 status: "pending",
                 createdAt: new Date(now),
                 expiresAt: new Date(now + AGENT_LIMITS.credentialRotationPendingTtlMs),
@@ -89,14 +92,14 @@ export function rotateCredentialsJob(deps: RotateDeps): JobDefinition<Input> {
                   targetType: "node",
                   targetId: nodeId,
                   outcome: "success",
-                  details: { jobId: ctx.jobId, publicKey: result.publicKey },
+                  details: { jobId: ctx.jobId, publicKey },
                 },
                 tx,
               );
             });
-          })();
-          deps.rotations.track(nodeId, store);
-          await store;
+          } finally {
+            end();
+          }
           ctx.state.publicKey = result.publicKey;
           await ctx.log("info", "New key verified and stored as pending");
         },

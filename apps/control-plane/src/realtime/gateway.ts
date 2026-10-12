@@ -78,7 +78,7 @@ export function registerRealtimeRoutes(app: FastifyInstance, ctx: AppContext): v
       const revalidate = setInterval(() => {
         void (async () => {
           const s = await ctx.sessions.lookup(token);
-          if (!s || (s.user.mfaEnabled && !s.mfaVerified)) {
+          if (!s || !s.mfaVerified) {
             socket.close(REALTIME_CLOSE.sessionEnded, "session ended");
             return;
           }

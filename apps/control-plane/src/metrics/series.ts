@@ -21,6 +21,12 @@ export interface SeriesTarget {
   serverId?: string | undefined;
   /** For `global.*`: "all" or the node ids the user may see (already validated UUIDs). */
   nodeIds?: "all" | readonly string[];
+  /**
+   * For `global.players`: "all" or the server ids the user may see. Players are a per-server metric,
+   * so server- and network-scoped grants count here (node-level series stay node-grant only, since
+   * a server grant must not reveal the whole node's CPU/memory).
+   */
+  serverIds?: "all" | readonly string[];
 }
 
 /** Interfaces excluded from global network totals (loopback, container bridges/veths). */
@@ -136,8 +142,12 @@ export function buildSeriesQueries(series: MetricSeriesId, target: SeriesTarget,
           labels: { direction: d },
           keep: [],
         }));
-      case "global.players":
-        return [{ promql: `sum(bf_server_players_online${sel()})`, labels: { kind: "online" }, keep: [] }];
+      case "global.players": {
+        const sids = target.serverIds ?? ids;
+        if (sids !== "all") for (const id of sids) uuid(id, "serverId");
+        const filter = sids === "all" ? "" : `{server=~"${sids.join("|")}"}`;
+        return [{ promql: `sum(bf_server_players_online${filter})`, labels: { kind: "online" }, keep: [] }];
+      }
     }
   }
   throw new SeriesQueryError(`unsupported series ${series}`);

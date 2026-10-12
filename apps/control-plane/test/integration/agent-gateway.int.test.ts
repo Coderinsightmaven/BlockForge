@@ -234,7 +234,7 @@ describe("agent sessions and commands", () => {
 });
 
 function agentFacts() {
-  return { hostname: "mc-node-1", os: "linux", arch: "amd64", cpuLogicalCores: 4, memoryTotalBytes: 8 * 1024 ** 3, dataRoot: "/var/lib/blockforge", interfaces: [], filesystems: [], containerRuntime: null, javaRuntimes: [] };
+  return { hostname: "mc-node-1", os: "linux", arch: "amd64", cpuLogicalCores: 4, memoryTotalBytes: 8 * 1024 ** 3, dataRoot: "/var/lib/blockforge", interfaces: [], filesystems: [], containerRuntime: null, javaRuntimes: [], sftp: null };
 }
 
 describe("telemetry", () => {

@@ -159,7 +159,8 @@ export async function createUserClient(
   roles: { roleKey: string; scopeType: string; scopeId: string | null }[],
 ): Promise<ApiClient> {
   const password = "user password is long enough";
-  const res = await owner.post("/users", { email, displayName: email.split("@")[0], password, roles });
+  const username = (email.split("@")[0] ?? "user").toLowerCase().replace(/[^a-z0-9_-]/g, "-").padEnd(3, "0");
+  const res = await owner.post("/users", { email, username, displayName: email.split("@")[0], password, roles });
   if (res.statusCode !== 201) throw new Error(`create user failed: ${res.statusCode} ${res.body}`);
   const client = new ApiClient(t);
   const login = await client.login(email, password);

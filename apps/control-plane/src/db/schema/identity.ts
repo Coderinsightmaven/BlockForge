@@ -10,6 +10,8 @@ export const users = pgTable(
   {
     id: uuid("id").primaryKey(),
     email: citext("email").notNull().unique("users_email_unique"),
+    /** Login-independent handle (SFTP `<username>.<shortId>`, subuser lookup). */
+    username: text("username").notNull().unique("users_username_unique"),
     displayName: text("display_name").notNull(),
     passwordHash: text("password_hash").notNull(),
     status: text("status").notNull().default("active"),
@@ -28,7 +30,30 @@ export const users = pgTable(
     updatedAt: tsz("updated_at").notNull().defaultNow(),
     version: integer("version").notNull().default(1),
   },
-  (t) => [enumCheck("users_status_check", t.status, USER_STATUSES)],
+  (t) => [
+    enumCheck("users_status_check", t.status, USER_STATUSES),
+    check("users_username_format", sql`${t.username} ~ '^[a-z0-9][a-z0-9_-]{2,31}$'`),
+  ],
+);
+
+/** SSH public keys used for SFTP logins (`/account/ssh-keys`). */
+export const userSshKeys = pgTable(
+  "user_ssh_keys",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    keyType: text("key_type").notNull(),
+    /** Normalised authorized_keys line: `<type> <base64>` (comment stripped). */
+    publicKey: text("public_key").notNull(),
+    /** OpenSSH `SHA256:<base64>` fingerprint. */
+    fingerprint: text("fingerprint").notNull(),
+    createdAt: tsz("created_at").notNull().defaultNow(),
+    lastUsedAt: tsz("last_used_at"),
+  },
+  (t) => [unique("user_ssh_keys_fingerprint_unique").on(t.userId, t.fingerprint), index("user_ssh_keys_user_idx").on(t.userId)],
 );
 
 export const sessions = pgTable(

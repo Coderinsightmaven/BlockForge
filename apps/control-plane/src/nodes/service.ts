@@ -1,11 +1,11 @@
 import type { Node, NodeConnection, NodeStatus } from "@blockforge/contracts";
-import { and, count, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, count, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { CLOSE, type AgentGateway } from "../agents/gateway.js";
 import type { NodeStateTracker } from "../agents/node-state.js";
 import type { AuditActor, AuditService } from "../audit/service.js";
 import type { Db } from "../db/client.js";
-import { alertRules, nodeCredentials, nodes, resourceReservations, roleBindings, servers } from "../db/schema/index.js";
+import { alertIncidents, alertRules, nodeCredentials, nodes, resourceReservations, roleBindings, servers } from "../db/schema/index.js";
 import { withTransaction } from "../db/tx.js";
 import type { EventBus } from "../events/bus.js";
 import type { Clock } from "../lib/clock.js";
@@ -128,7 +128,7 @@ export class NodesService {
     try {
       const dto = await this.get(id);
       this.hub.publish(topic, "node.updated", dto);
-      this.hub.publish("nodes", "node.updated", dto, { permission: "monitoring.view", resource: { type: "node", id } });
+      this.hub.publish("nodes", "node.updated", dto, { permission: "nodes.view", resource: { type: "node", id } });
     } catch (err) {
       this.logger.debug({ err, nodeId: id }, "node.updated not published");
     }
@@ -217,6 +217,11 @@ export class NodesService {
       // Scope references are polymorphic (no FK): remove grants and alert rules scoped to this node.
       await tx.delete(roleBindings).where(and(eq(roleBindings.scopeType, "node"), eq(roleBindings.scopeId, id)));
       await tx.delete(alertRules).where(and(eq(alertRules.scopeType, "node"), eq(alertRules.scopeId, id)));
+      // Incidents about the node would otherwise stay open forever (and only global viewers could see them).
+      await tx
+        .update(alertIncidents)
+        .set({ status: "resolved", resolvedAt: now })
+        .where(and(eq(alertIncidents.subjectType, "node"), eq(alertIncidents.subjectId, id), ne(alertIncidents.status, "resolved")));
       await tx.delete(nodes).where(eq(nodes.id, id));
       await this.audit.record({ ...actor, action: "node.delete", targetType: "node", targetId: id, outcome: "success", details: { name: row.name } }, tx);
     });

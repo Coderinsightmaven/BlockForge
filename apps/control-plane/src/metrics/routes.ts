@@ -26,7 +26,8 @@ export function registerMetricsRoutes(app: FastifyInstance, ctx: AppContext): vo
     if (authorize(principal, "monitoring.view", { type: "global" })) return ctx.metricsQuery.range(range, { nodeIds: "all" });
     const scopes = permittedScopes(principal, "monitoring.view");
     if (!hasPermissionAnywhere(principal, "monitoring.view")) throw forbidden();
-    return ctx.metricsQuery.range(range, { nodeIds: [...scopes.nodeIds] });
+    const serverIds = await ctx.rbac.visibleServerIds(scopes);
+    return ctx.metricsQuery.range(range, { nodeIds: [...scopes.nodeIds], serverIds });
   });
 
   app.get("/overview", async (req) => {

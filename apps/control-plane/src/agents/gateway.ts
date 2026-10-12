@@ -31,6 +31,7 @@ import { agentCommands, type AgentCommandStatus } from "../db/schema/index.js";
 import type { EventBus } from "../events/bus.js";
 import { zodDetails } from "../http/errors.js";
 import { toJsonSafe } from "../lib/canonical-json.js";
+import { redactDeep, redactString } from "../lib/redact.js";
 import type { Clock } from "../lib/clock.js";
 import type { LatestCache } from "../metrics/latest.js";
 import { encodeNodeSample, encodeWorkloadSample } from "../metrics/encode.js";
@@ -43,6 +44,26 @@ import type { ControlPlaneSigner } from "./signing-key.js";
 import type { WorkloadOwnership } from "./workload-ownership.js";
 
 export type ProgressUpdate = z.infer<typeof ProgressFrame>;
+
+/**
+ * Agent error bodies are untrusted and persisted (`agent_commands.error`, job errors, logs): secrets
+ * are redacted and message/details are byte-capped before anything stores them.
+ */
+export function sanitizeAgentError(e: { code: string; message: string; retryable: boolean; details?: unknown }): {
+  code: string;
+  message: string;
+  retryable: boolean;
+  details?: unknown;
+} {
+  const message = redactString(e.message).slice(0, MAX_STORED_ERROR_MESSAGE);
+  let details: unknown;
+  if (e.details !== undefined) {
+    const safe = toJsonSafe(redactDeep(e.details));
+    const json = JSON.stringify(safe) ?? "null";
+    details = json.length > MAX_STORED_ERROR_DETAILS ? { truncated: true, preview: json.slice(0, MAX_STORED_ERROR_DETAILS) } : safe;
+  }
+  return { code: e.code, message, retryable: e.retryable, ...(details !== undefined ? { details } : {}) };
+}
 
 /** Error from a command dispatch: agent error codes plus gateway-side conditions. */
 export class AgentCommandError extends Error {
@@ -80,7 +101,14 @@ export const CLOSE = {
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const HELLO_TIMEOUT_MS = 10_000;
 const PING_INTERVAL_MS = 30_000;
-const MAX_QUEUED_FRAMES = 1000;
+/** Default per-session budget of received-but-unprocessed frame bytes (approved nodes). */
+export const DEFAULT_MAX_QUEUED_BYTES = 32 * 1024 * 1024;
+/** Pending (unapproved) nodes only exchange hello/heartbeat/node.facts: tiny budgets. */
+const PENDING_MAX_QUEUED_BYTES = 1024 * 1024;
+const PENDING_MAX_FRAME_BYTES = 512 * 1024;
+/** Stored agent error messages/details are capped (they are untrusted and persisted). */
+const MAX_STORED_ERROR_MESSAGE = 1024;
+const MAX_STORED_ERROR_DETAILS = 4096;
 
 interface PendingCommand {
   id: string;
@@ -95,12 +123,17 @@ interface PendingCommand {
 export class AgentSession {
   readonly id = randomUUID();
   ready = false;
+  /** Socket closed; queued frames are still being drained. */
+  closing = false;
   closed = false;
   replaced = false;
   agentVersion: string | null = null;
   capabilities: string[] = [];
   readonly pending = new Map<string, PendingCommand>();
   queueDepth = 0;
+  /** Bytes of frames received but not yet processed. */
+  queuedBytes = 0;
+  paused = false;
   queue: Promise<void> = Promise.resolve();
   alive = true;
   helloTimer: NodeJS.Timeout | null = null;
@@ -114,7 +147,7 @@ export class AgentSession {
   ) {}
 
   sendFrame(frame: ControlPlaneFrame): void {
-    if (this.closed || this.socket.readyState !== this.socket.OPEN) throw new Error("session closed");
+    if (this.closing || this.closed || this.socket.readyState !== this.socket.OPEN) throw new Error("session closed");
     this.socket.send(JSON.stringify(frame));
   }
 
@@ -131,6 +164,10 @@ export interface GatewayStats {
   unknownResults: number;
   droppedWorkloadFrames: number;
   droppedQueuedFrames: number;
+  /** Largest number of queued frame bytes any session reached (diagnostics, tests). */
+  peakQueuedBytes: number;
+  /** Times a session's socket was paused because its queue exceeded the soft budget. */
+  backpressurePauses: number;
 }
 
 export interface GatewayEvents {
@@ -154,6 +191,8 @@ export interface GatewayDeps {
   bus: EventBus;
   heartbeatIntervalMs: number;
   metricsIntervalMs: number;
+  /** Soft budget of queued frame bytes per approved session; reading pauses above it, frames are shed above 2×. */
+  maxQueuedBytes?: number;
 }
 
 /**
@@ -171,6 +210,8 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     unknownResults: 0,
     droppedWorkloadFrames: 0,
     droppedQueuedFrames: 0,
+    peakQueuedBytes: 0,
+    backpressurePauses: 0,
   };
   private lastMalformedLogAt = 0;
 
@@ -183,7 +224,8 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
   }
 
   isReady(nodeId: string): boolean {
-    return this.sessions.get(nodeId)?.ready ?? false;
+    const s = this.sessions.get(nodeId);
+    return Boolean(s?.ready && !s.closing);
   }
 
   session(nodeId: string): AgentSession | undefined {
@@ -196,13 +238,42 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
 
   // --- Session lifecycle -------------------------------------------------------
 
-  attach(nodeId: string, socket: WebSocket, ip: string | null): AgentSession {
+  /** Frame budgets for a session: pending nodes get tiny ones. */
+  private limitsFor(session: AgentSession): { soft: number; hard: number; maxFrame: number } {
+    if (this.tracker.get(session.nodeId)?.status === "pending") {
+      return { soft: PENDING_MAX_QUEUED_BYTES / 2, hard: PENDING_MAX_QUEUED_BYTES, maxFrame: PENDING_MAX_FRAME_BYTES };
+    }
+    const soft = this.deps.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
+    return { soft, hard: soft * 2, maxFrame: AGENT_LIMITS.maxFrameBytes };
+  }
+
+  private shed(session: AgentSession, reason: string, bytes: number): void {
+    this.stats.droppedQueuedFrames++;
+    const now = this.deps.clock.now();
+    if (now - this.lastMalformedLogAt > 10_000) {
+      this.lastMalformedLogAt = now;
+      this.deps.logger.warn({ nodeId: session.nodeId, reason, bytes, dropped: this.stats.droppedQueuedFrames }, "agent frame shed");
+    }
+  }
+
+  /**
+   * Attaches an authenticated socket. A node revoked or disabled while its handshake was in flight
+   * (authenticated before the revocation committed) is refused here; revocation itself closes any
+   * session that attached earlier, so no window remains.
+   */
+  attach(nodeId: string, socket: WebSocket, ip: string | null): AgentSession | null {
+    const status = this.tracker.get(nodeId)?.status;
+    if (!status || status === "revoked" || status === "disabled") {
+      socket.close(CLOSE.revoked, status ? `node ${status}` : "unknown node");
+      return null;
+    }
     const session = new AgentSession(nodeId, socket, ip, this.deps.clock.now());
     const previous = this.sessions.get(nodeId);
     if (previous) {
       previous.replaced = true;
-      this.failPending(previous, "session replaced by a newer connection");
       previous.close(CLOSE.replaced, "replaced by a newer session");
+      // Frames the old socket already delivered (e.g. a `result`) are still processed first.
+      void previous.queue.then(() => this.failPending(previous, "session replaced by a newer connection"));
     }
     this.sessions.set(nodeId, session);
 
@@ -234,17 +305,31 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
         this.malformed(session, "binary frame");
         return;
       }
-      if (session.queueDepth >= MAX_QUEUED_FRAMES) {
-        this.stats.droppedQueuedFrames++;
-        return;
-      }
+      const buf = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      const size = buf.length;
+      const limits = this.limitsFor(session);
+      // Bounded by bytes, not frame count: above the soft budget the socket stops being read (TCP
+      // backpressure to the agent); frames that would exceed the hard budget are shed.
+      if (size > limits.maxFrame) return this.shed(session, "frame too large", size);
+      if (session.queuedBytes + size > limits.hard) return this.shed(session, "queue full", size);
+      session.queuedBytes += size;
       session.queueDepth++;
-      const text = Array.isArray(data) ? Buffer.concat(data).toString("utf8") : Buffer.from(data as ArrayBuffer).toString("utf8");
+      if (session.queuedBytes > this.stats.peakQueuedBytes) this.stats.peakQueuedBytes = session.queuedBytes;
+      if (session.queuedBytes > limits.soft && !session.paused) {
+        session.paused = true;
+        this.stats.backpressurePauses++;
+        socket.pause();
+      }
       session.queue = session.queue
-        .then(() => this.handleFrame(session, text))
+        .then(() => this.handleFrame(session, buf.toString("utf8")))
         .catch((err) => this.deps.logger.error({ err, nodeId }, "agent frame handling failed"))
         .finally(() => {
           session.queueDepth--;
+          session.queuedBytes -= size;
+          if (session.paused && session.queuedBytes <= limits.soft / 2) {
+            session.paused = false;
+            socket.resume();
+          }
         });
     });
     socket.on("close", (code) => void this.onClose(session, code));
@@ -254,10 +339,13 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
   }
 
   private async onClose(session: AgentSession, code: number): Promise<void> {
-    if (session.closed) return;
-    session.closed = true;
+    if (session.closing) return;
+    session.closing = true;
     if (session.helloTimer) clearTimeout(session.helloTimer);
     if (session.pingTimer) clearInterval(session.pingTimer);
+    // Drain frames received before the close (an agent typically sends a result and then closes).
+    await session.queue;
+    session.closed = true;
     this.failPending(session, "node disconnected");
     if (this.sessions.get(session.nodeId) === session) this.sessions.delete(session.nodeId);
     this.deps.logger.info({ nodeId: session.nodeId, code, replaced: session.replaced }, "agent disconnected");
@@ -339,6 +427,11 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     const t = typeof raw === "object" && raw !== null ? (raw as { t?: unknown }).t : undefined;
     if (t !== "hello" && !session.ready) {
       this.malformed(session, `frame "${String(t)}" before hello`);
+      return;
+    }
+    if (this.tracker.get(session.nodeId)?.status === "pending" && t !== "hello" && t !== "heartbeat" && t !== "result") {
+      // Unapproved nodes cannot feed telemetry, logs or events into the system.
+      this.stats.droppedWorkloadFrames++;
       return;
     }
     switch (t) {
@@ -435,8 +528,8 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       await this.persistOutcome(frame.id, "succeeded", null);
       pending.resolve(parsed.data);
     } else {
-      const e = frame.error;
-      await this.persistOutcome(frame.id, e.code === "COMMAND_REJECTED" ? "rejected" : "failed", toJsonSafe(e));
+      const e = sanitizeAgentError(frame.error);
+      await this.persistOutcome(frame.id, e.code === "COMMAND_REJECTED" ? "rejected" : "failed", e);
       pending.reject(new AgentCommandError(e.code, e.message, e.retryable, e.details));
     }
   }
@@ -453,7 +546,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     );
     const data = { nodeId, sample: frame.node };
     this.deps.hub.publish(`node:${nodeId}`, "node.metrics", data);
-    this.deps.hub.publish("nodes", "node.metrics", data, { permission: "monitoring.view", resource: { type: "node", id: nodeId } });
+    this.deps.hub.publish("nodes", "node.metrics", data, { permission: "nodes.view", resource: { type: "node", id: nodeId } });
     if (frame.workloads.length) {
       const owned = await this.deps.ownership.owned(nodeId, frame.workloads.map((w) => w.workloadId));
       for (const w of frame.workloads) {
@@ -555,7 +648,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       throw new AgentCommandError("NODE_UNAVAILABLE", "node is awaiting approval; only node.facts is allowed", false);
     }
     const session = this.sessions.get(nodeId);
-    if (!session?.ready) throw new AgentCommandError("NODE_UNAVAILABLE", "node is not connected", true);
+    if (!session?.ready || session.closing) throw new AgentCommandError("NODE_UNAVAILABLE", "node is not connected", true);
     const parsed = AGENT_COMMANDS[type].payload.safeParse(payload);
     if (!parsed.success) {
       throw new AgentCommandError("VALIDATION_FAILED", "invalid command payload", false, zodDetails(parsed.error));
@@ -579,7 +672,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     }
 
     return new Promise<CommandResult<T>>((resolve, reject) => {
-      if (session.closed) {
+      if (session.closed || session.closing) {
         void this.persistOutcome(cmd.id, "failed", { code: "DISCONNECTED", message: "node disconnected", retryable: true });
         reject(new AgentCommandError("NODE_UNAVAILABLE", "node disconnected", true));
         return;

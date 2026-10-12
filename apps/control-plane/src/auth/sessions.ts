@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, lt, ne, or } from "drizzle-orm";
+import { and, eq, lt, ne, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { Db, DbOrTx } from "../db/client.js";
 import { sessions, users } from "../db/schema/index.js";
@@ -125,12 +125,25 @@ export class SessionService {
     await tx.update(sessions).set({ mfaVerified: true, mfaFailedAttempts: 0 }).where(eq(sessions.id, sessionId));
   }
 
-  /** Increments failed MFA attempts; returns the new count. */
+  /** Atomically increments failed MFA attempts; returns the new count (0 if the session is gone). */
   async recordMfaFailure(sessionId: string): Promise<number> {
-    const [row] = await this.db.select({ n: sessions.mfaFailedAttempts }).from(sessions).where(eq(sessions.id, sessionId));
-    const n = (row?.n ?? 0) + 1;
-    await this.db.update(sessions).set({ mfaFailedAttempts: n }).where(eq(sessions.id, sessionId));
-    return n;
+    const [row] = await this.db
+      .update(sessions)
+      .set({ mfaFailedAttempts: sql`${sessions.mfaFailedAttempts} + 1` })
+      .where(eq(sessions.id, sessionId))
+      .returning({ n: sessions.mfaFailedAttempts });
+    return row?.n ?? 0;
+  }
+
+  /** Deletes a session and reports whether it still existed (used to consume a pending-MFA session exactly once). */
+  async consume(sessionId: string, tx: DbOrTx = this.db): Promise<boolean> {
+    const rows = await tx.delete(sessions).where(eq(sessions.id, sessionId)).returning({ id: sessions.id });
+    return rows.length > 0;
+  }
+
+  /** Removes a user's sessions that are still waiting for MFA (e.g. after MFA was disabled). */
+  async revokeUnverified(userId: string, tx: DbOrTx = this.db): Promise<void> {
+    await tx.delete(sessions).where(and(eq(sessions.userId, userId), eq(sessions.mfaVerified, false)));
   }
 
   async revoke(sessionId: string, tx: DbOrTx = this.db): Promise<void> {

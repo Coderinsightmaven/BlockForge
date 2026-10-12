@@ -64,8 +64,8 @@ export function registerNodeRoutes(app: FastifyInstance, ctx: AppContext): void 
   });
 
   /**
-   * Starts a `node.credentials.rotate` job and returns the node; the job id is in the
-   * `x-blockforge-job-id` header. An `Idempotency-Key` maps to the same job on retries.
+   * Starts a `node.credentials.rotate` job → `RotateCredentialsResponse {node, jobId}` (the job id
+   * is also in `x-blockforge-job-id`). An `Idempotency-Key` maps to the same job on retries.
    */
   app.post("/nodes/:id/rotate-credentials", async (req, reply) => {
     const { id } = parse(IdParams, req.params, "Path");
@@ -88,7 +88,7 @@ export function registerNodeRoutes(app: FastifyInstance, ctx: AppContext): void 
     await ctx.audit.record({ ...actorOf(req), action: "node.credentials.rotate", targetType: "node", targetId: id, outcome: "success", details: { jobId } });
     reply.header("x-blockforge-job-id", jobId);
     reply.status(202);
-    return ctx.nodes.get(id);
+    return { node: await ctx.nodes.get(id), jobId };
   });
 
   app.delete("/nodes/:id", async (req, reply) => {

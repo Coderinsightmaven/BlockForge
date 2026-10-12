@@ -9,6 +9,7 @@ interface ServerConsole {
   buffer: RingBuffer<ConsoleLine>;
   nextSeq: number;
   dropped: number;
+  lastAppendAt: number;
 }
 
 /**
@@ -23,7 +24,7 @@ export class ConsoleBuffers {
   private get(serverId: string): ServerConsole {
     let c = this.consoles.get(serverId);
     if (!c) {
-      c = { buffer: new RingBuffer(this.capacity), nextSeq: 1, dropped: 0 };
+      c = { buffer: new RingBuffer(this.capacity), nextSeq: 1, dropped: 0, lastAppendAt: Date.now() };
       this.consoles.set(serverId, c);
     }
     return c;
@@ -31,6 +32,7 @@ export class ConsoleBuffers {
 
   append(serverId: string, lines: readonly LogLine[], dropped = 0): ConsoleLine[] {
     const c = this.get(serverId);
+    c.lastAppendAt = Date.now();
     c.dropped += dropped;
     const out: ConsoleLine[] = [];
     for (const l of lines) {
@@ -44,6 +46,7 @@ export class ConsoleBuffers {
   /** Appends a control-plane generated line (e.g. "[BlockForge] server stopped"). */
   appendSystem(serverId: string, ts: number, line: string): ConsoleLine {
     const c = this.get(serverId);
+    c.lastAppendAt = Date.now();
     const entry: ConsoleLine = { seq: c.nextSeq++, ts, stream: "system", line };
     c.buffer.push(entry);
     return entry;
@@ -56,5 +59,22 @@ export class ConsoleBuffers {
 
   remove(serverId: string): void {
     this.consoles.delete(serverId);
+  }
+
+  /** Frees buffers of servers that produced no output for `idleMs` (or no longer exist). */
+  prune(idleMs: number, exists: (serverId: string) => boolean = () => true): number {
+    const cutoff = Date.now() - idleMs;
+    let removed = 0;
+    for (const [id, c] of this.consoles) {
+      if (c.lastAppendAt < cutoff || !exists(id)) {
+        this.consoles.delete(id);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  get size(): number {
+    return this.consoles.size;
   }
 }

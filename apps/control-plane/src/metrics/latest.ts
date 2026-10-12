@@ -63,6 +63,29 @@ export class LatestCache {
     return [...this.workloads.values()].filter((e) => this.fresh(e.receivedAt));
   }
 
+  /** Drops samples older than `maxAgeMs` (stale entries of nodes/servers that stopped reporting). */
+  prune(maxAgeMs: number): number {
+    const cutoff = this.clock.now() - maxAgeMs;
+    let removed = 0;
+    for (const [id, e] of this.nodes) {
+      if (e.receivedAt < cutoff) {
+        this.nodes.delete(id);
+        removed++;
+      }
+    }
+    for (const [id, e] of this.workloads) {
+      if (e.receivedAt < cutoff) {
+        this.workloads.delete(id);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  removeWorkload(serverId: string): void {
+    this.workloads.delete(serverId);
+  }
+
   removeNode(nodeId: string): void {
     this.nodes.delete(nodeId);
     for (const [id, e] of this.workloads) if (e.nodeId === nodeId) this.workloads.delete(id);

@@ -42,6 +42,7 @@ describe("users & roles", () => {
     const { nodeA, srvA } = await setupFleet(t);
     const created = await owner.post("/users", {
       email: "Infra@Example.com",
+      username: "infra",
       displayName: "Infra",
       password: "a long enough password",
       roles: [
@@ -56,7 +57,7 @@ describe("users & roles", () => {
       ["infra_admin", "node-a"],
       ["server_admin", "srv-a"],
     ]);
-    expect((await owner.post("/users", { email: "infra@example.com", displayName: "Dup", password: "a long enough password" })).statusCode).toBe(409);
+    expect((await owner.post("/users", { email: "infra@example.com", username: "infra-dup", displayName: "Dup", password: "a long enough password" })).statusCode).toBe(409);
 
     const badScope = await owner.post(`/users/${user.id}/roles`, { roleKey: "observer", scopeType: "node", scopeId: "00000000-0000-4000-8000-000000000000" });
     expect(badScope.statusCode).toBe(400);
@@ -66,7 +67,7 @@ describe("users & roles", () => {
     expect(globalMismatch.statusCode).toBe(400);
     expect((await owner.post(`/users/${user.id}/roles`, { roleKey: "infra_admin", scopeType: "node", scopeId: nodeA })).statusCode).toBe(409);
 
-    for (let i = 0; i < 3; i++) await owner.post("/users", { email: `u${i}@example.com`, displayName: `U${i}`, password: "a long enough password" });
+    for (let i = 0; i < 3; i++) await owner.post("/users", { email: `u${i}@example.com`, username: `user-${i}`, displayName: `U${i}`, password: "a long enough password" });
     const p1 = (await owner.get("/users?limit=2")).json();
     expect(p1.items).toHaveLength(2);
     const p2 = (await owner.get(`/users?limit=2&cursor=${p1.nextCursor}`)).json();
@@ -81,7 +82,7 @@ describe("users & roles", () => {
     let owner: ApiClient;
     ({ t, owner } = await startWithOwner());
     const admin = await createUserClient(t, owner, "admin@example.com", [{ roleKey: "admin", scopeType: "global", scopeId: null }]);
-    const plain = (await owner.post("/users", { email: "plain@example.com", displayName: "Plain", password: "a long enough password" })).json();
+    const plain = (await owner.post("/users", { email: "plain@example.com", username: "plain", displayName: "Plain", password: "a long enough password" })).json();
     const ownerMe = (await owner.get("/auth/me")).json();
     const ownerId: string = ownerMe.user.id;
     const ownerBinding: string = ownerMe.user.roles[0].id;
@@ -90,7 +91,7 @@ describe("users & roles", () => {
     expect((await admin.post(`/users/${plain.id}/roles`, { roleKey: "observer", scopeType: "global", scopeId: null })).statusCode).toBe(200);
     expect((await admin.post(`/users/${plain.id}/roles`, { roleKey: "owner", scopeType: "global", scopeId: null })).statusCode).toBe(403);
     expect((await admin.post(`/users/${plain.id}/roles`, { roleKey: "admin", scopeType: "global", scopeId: null })).statusCode).toBe(403);
-    expect((await admin.post("/users", { email: "x@example.com", displayName: "X", password: "a long enough password", roles: [{ roleKey: "admin", scopeType: "global", scopeId: null }] })).statusCode).toBe(403);
+    expect((await admin.post("/users", { email: "x@example.com", username: "xuser", displayName: "X", password: "a long enough password", roles: [{ roleKey: "admin", scopeType: "global", scopeId: null }] })).statusCode).toBe(403);
     expect((await admin.patch(`/users/${ownerId}`, { status: "disabled" })).statusCode).toBe(403);
     expect((await admin.post(`/users/${ownerId}/password`, { password: "hijacked password!!" })).statusCode).toBe(403);
     expect((await admin.delete(`/users/${ownerId}/roles/${ownerBinding}`)).statusCode).toBe(403);
@@ -169,7 +170,7 @@ describe("audit log", () => {
   it("is hash-chained, paginated, filterable and detects tampering", async () => {
     let owner: ApiClient;
     ({ t, owner } = await startWithOwner());
-    for (let i = 0; i < 3; i++) await owner.post("/users", { email: `a${i}@example.com`, displayName: `A${i}`, password: "a long enough password" });
+    for (let i = 0; i < 3; i++) await owner.post("/users", { email: `a${i}@example.com`, username: `auser-${i}`, displayName: `A${i}`, password: "a long enough password" });
     const verify = (await owner.get("/audit/verify")).json();
     expect(verify.valid).toBe(true);
     expect(verify.checked).toBeGreaterThanOrEqual(4);

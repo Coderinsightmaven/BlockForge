@@ -279,7 +279,7 @@ describe("alert rules and evaluation", () => {
     await t.ctx.alertEvaluator.evaluate();
     expect((await owner.get("/alerts/incidents")).json().items).toHaveLength(2);
     const infra = new ApiClient(t);
-    await owner.post("/users", { email: "infra@example.com", displayName: "Infra", password: "a long enough password", roles: [{ roleKey: "infra_admin", scopeType: "node", scopeId: a.nodeId }] });
+    await owner.post("/users", { email: "infra@example.com", username: "infra", displayName: "Infra", password: "a long enough password", roles: [{ roleKey: "infra_admin", scopeType: "node", scopeId: a.nodeId }] });
     await infra.login("infra@example.com", "a long enough password");
     const visible = (await infra.get("/alerts/incidents?limit=1")).json();
     expect(visible.items.map((i: { subjectId: string }) => i.subjectId)).toEqual([a.nodeId]);

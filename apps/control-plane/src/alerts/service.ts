@@ -180,8 +180,10 @@ export class AlertService {
     severity?: string | undefined;
     limit: number;
     cursor: TimeIdCursor | null;
+    /** Visibility filter (see `incidentScopeFilter`). */
+    scope?: SQL | undefined;
   }): Promise<{ rows: IncidentRow[]; next: TimeIdCursor | null }> {
-    const conds: (SQL | undefined)[] = [];
+    const conds: (SQL | undefined)[] = [filter.scope];
     if (filter.severity) conds.push(eq(alertIncidents.severity, filter.severity));
     if (filter.status === "open") conds.push(ne(alertIncidents.status, "resolved"));
     else if (filter.status) conds.push(eq(alertIncidents.status, filter.status));

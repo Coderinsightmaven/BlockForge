@@ -7,7 +7,8 @@ import type { Clock } from "../lib/clock.js";
 import type { LatestCache } from "../metrics/latest.js";
 import { dataRootFilesystem } from "../nodes/capacity.js";
 import { computeCapacity } from "../nodes/capacity.js";
-import { authorize, permittedScopes, type Principal } from "../rbac/authorize.js";
+import { incidentScopeFilter } from "../alerts/scope.js";
+import { permittedScopes, type Principal } from "../rbac/authorize.js";
 import type { RbacService } from "../rbac/service.js";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -132,15 +133,15 @@ export class OverviewService {
       }
     }
 
-    // Active alerts, filtered by subject scope.
-    const open = await this.db
-      .select({ severity: alertIncidents.severity, subjectType: alertIncidents.subjectType, subjectId: alertIncidents.subjectId })
+    // Active alerts, filtered by subject scope in SQL (one aggregate query, no per-incident lookups).
+    const alertRows = await this.db
+      .select({ severity: alertIncidents.severity, n: count() })
       .from(alertIncidents)
-      .where(ne(alertIncidents.status, "resolved"));
+      .where(and(ne(alertIncidents.status, "resolved"), incidentScopeFilter(nodeIds, serverIds)))
+      .groupBy(alertIncidents.severity);
     const activeAlerts = { critical: 0, warning: 0, info: 0 };
-    for (const a of open) {
-      if (!(await this.canSeeSubject(principal, a.subjectType, a.subjectId))) continue;
-      if (a.severity === "critical" || a.severity === "warning" || a.severity === "info") activeAlerts[a.severity]++;
+    for (const a of alertRows) {
+      if (a.severity === "critical" || a.severity === "warning" || a.severity === "info") activeAlerts[a.severity] = Number(a.n);
     }
 
     const since = new Date(now - DAY_MS);
@@ -206,14 +207,4 @@ export class OverviewService {
     return out;
   }
 
-  /** Whether an alert subject is in the principal's monitoring scope. */
-  async canSeeSubject(principal: Principal, subjectType: string, subjectId: string): Promise<boolean> {
-    if (authorize(principal, "monitoring.view", { type: "global" })) return true;
-    if (subjectType === "node") return authorize(principal, "monitoring.view", { type: "node", id: subjectId });
-    if (subjectType === "server") {
-      const r = await this.rbac.server(subjectId);
-      return r ? authorize(principal, "monitoring.view", r) : false;
-    }
-    return false;
-  }
 }

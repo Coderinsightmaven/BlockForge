@@ -62,6 +62,8 @@ const EnvSchema = z
     /** A cleanly disconnected node turns from `unreachable` into `offline` after this long. */
     NODE_OFFLINE_AFTER_MS: intFrom(1000, 86_400_000).default(5 * 60_000),
     NODE_SWEEP_INTERVAL_MS: intFrom(50, 60_000).default(5000),
+    /** Soft per-session budget of queued agent frame bytes (backpressure above, shedding above 2×). */
+    AGENT_MAX_QUEUED_BYTES: intFrom(64 * 1024, 1024 * 1024 * 1024).default(32 * 1024 * 1024),
     ALERT_EVAL_INTERVAL_MS: intFrom(100, 300_000).default(20_000),
     METRICS_FLUSH_INTERVAL_MS: intFrom(50, 60_000).default(1000),
   })
@@ -109,6 +111,7 @@ export interface AppConfig {
     metricsIntervalMs: number;
     offlineAfterMs: number;
     sweepIntervalMs: number;
+    maxQueuedBytes: number;
   };
   alertEvalIntervalMs: number;
   metricsFlushIntervalMs: number;
@@ -162,6 +165,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, cwd = proces
       metricsIntervalMs: e.AGENT_METRICS_INTERVAL_MS,
       offlineAfterMs: e.NODE_OFFLINE_AFTER_MS,
       sweepIntervalMs: e.NODE_SWEEP_INTERVAL_MS,
+      maxQueuedBytes: e.AGENT_MAX_QUEUED_BYTES,
     },
     alertEvalIntervalMs: e.ALERT_EVAL_INTERVAL_MS,
     metricsFlushIntervalMs: e.METRICS_FLUSH_INTERVAL_MS,

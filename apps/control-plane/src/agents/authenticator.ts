@@ -18,32 +18,48 @@ export interface AuthenticatedAgent {
 /** Node statuses whose agents may not authenticate at all. */
 const REJECTED_STATUSES: readonly string[] = ["revoked", "disabled"];
 
+/** Upper bound for an authentication waiting on an in-flight rotation. */
+const ROTATION_WAIT_MS = 15_000;
+
 /**
  * Tracks in-flight staged rotations so an agent reconnecting with its *next* key immediately after
- * returning the rotation result does not race the insert of the pending credential.
+ * returning the rotation result does not race the insert of the pending credential. A rotation is
+ * registered with `begin()` *before* the `credentials.rotate` command is sent and ended once the
+ * pending key is stored (or the attempt failed), so there is no window in which the agent already
+ * holds a result the authenticator does not know about.
  */
 export class RotationCoordinator {
-  private readonly inFlight = new Map<string, Promise<unknown>>();
+  private readonly inFlight = new Map<string, Promise<void>>();
 
-  track(nodeId: string, work: Promise<unknown>): void {
-    const settled = work.catch(() => undefined).finally(() => {
-      if (this.inFlight.get(nodeId) === settled) this.inFlight.delete(nodeId);
-    });
-    this.inFlight.set(nodeId, settled);
+  /** Registers an in-flight rotation; call the returned function when it settled. */
+  begin(nodeId: string): () => void {
+    let done!: () => void;
+    const p = new Promise<void>((resolve) => (done = resolve));
+    this.inFlight.set(nodeId, p);
+    return () => {
+      done();
+      if (this.inFlight.get(nodeId) === p) this.inFlight.delete(nodeId);
+    };
   }
 
-  async waitFor(nodeId: string): Promise<boolean> {
+  /** Waits (bounded) for an in-flight rotation; true if there was one. */
+  async waitFor(nodeId: string, timeoutMs = ROTATION_WAIT_MS): Promise<boolean> {
     const p = this.inFlight.get(nodeId);
     if (!p) return false;
-    await p;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([p, new Promise<void>((r) => (timer = setTimeout(r, timeoutMs)))]);
+    if (timer) clearTimeout(timer);
     return true;
   }
 }
 
 /**
  * Verifies `BFAgent` tokens (agent-protocol.md §3): shape → times → node status → signature over
- * an active or unexpired pending key → durable jti insert (replay = conflict). The first successful
- * authentication with a pending key atomically promotes it and retires the previous active key.
+ * an active or unexpired pending key → durable jti insert (replay = conflict). The decisive checks
+ * (node status, credential still usable) are repeated inside the jti transaction under row locks,
+ * so a revocation that commits concurrently either happens-before (token rejected) or after (the
+ * revocation closes the session). The first successful authentication with a pending key atomically
+ * promotes it and retires the previous active key.
  */
 export class AgentAuthenticator {
   constructor(
@@ -68,14 +84,24 @@ export class AgentAuthenticator {
     if (!match && (await this.rotations.waitFor(nodeId))) match = await this.matchCredential(nodeId, token, now);
     if (!match) throw new AgentAuthError("bad_signature");
 
-    const promoted = await this.db.transaction(async (tx) => {
+    const result = await this.db.transaction(async (tx) => {
+      // Revocation takes `FOR UPDATE` on the node row; share-locking it serialises with that.
+      const [locked] = await tx.select({ status: nodes.status }).from(nodes).where(eq(nodes.id, nodeId)).for("share");
+      if (!locked) throw new AgentAuthError("unknown_node");
+      if (REJECTED_STATUSES.includes(locked.status)) throw new AgentAuthError("node_rejected");
+      const [cred] = await tx
+        .select({ status: nodeCredentials.status })
+        .from(nodeCredentials)
+        .where(and(eq(nodeCredentials.id, match.id), inArray(nodeCredentials.status, ["active", "pending"])))
+        .for("share");
+      if (!cred) throw new AgentAuthError("bad_signature");
       const inserted = await tx
         .insert(agentAuthJti)
         .values({ jti: token.claims.jti, nodeId, expiresAt: new Date(token.claims.exp) })
         .onConflictDoNothing()
         .returning({ jti: agentAuthJti.jti });
       if (inserted.length === 0) throw new AgentAuthError("replayed");
-      if (match.status !== "pending") return false;
+      if (cred.status !== "pending") return { promoted: false, status: locked.status };
       const at = new Date(now);
       // Retire the old key first so the "one active key" partial unique index holds.
       await tx
@@ -88,10 +114,10 @@ export class AgentAuthenticator {
         .where(and(eq(nodeCredentials.id, match.id), eq(nodeCredentials.status, "pending")))
         .returning({ id: nodeCredentials.id });
       if (updated.length === 0) throw new AgentAuthError("bad_signature");
-      return true;
+      return { promoted: true, status: locked.status };
     });
-    if (promoted) this.logger.info({ nodeId, credentialId: match.id }, "rotated agent key promoted to active");
-    return { nodeId, status: node.status as NodeStatus, credentialId: match.id, promoted };
+    if (result.promoted) this.logger.info({ nodeId, credentialId: match.id }, "rotated agent key promoted to active");
+    return { nodeId, status: result.status as NodeStatus, credentialId: match.id, promoted: result.promoted };
   }
 
   private async matchCredential(nodeId: string, token: ReturnType<typeof parseAgentAuthorization>, now: number) {

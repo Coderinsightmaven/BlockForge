@@ -80,6 +80,13 @@ describe("PromQL templates", () => {
     expect(net[0]!.promql).toContain('iface!~"lo|docker');
   });
 
+  it("filters global.players by visible servers (server/network grants count)", () => {
+    const [q] = buildSeriesQueries("global.players", { nodeIds: [], serverIds: [SERVER] }, 5000);
+    expect(q!.promql).toBe(`sum(bf_server_players_online{server=~"${SERVER}"})`);
+    expect(buildSeriesQueries("global.players", { nodeIds: "all", serverIds: "all" }, 5000)[0]!.promql).toBe("sum(bf_server_players_online)");
+    expect(() => buildSeriesQueries("global.players", { serverIds: ["x|.*"] }, 5000)).toThrow(SeriesQueryError);
+  });
+
   it("uses rate() windows of at least a minute for counters", () => {
     expect(rateWindow(5000)).toBe("60s");
     expect(rateWindow(120_000)).toBe("240s");

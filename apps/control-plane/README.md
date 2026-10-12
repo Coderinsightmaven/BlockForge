@@ -16,6 +16,12 @@ Migrations run automatically at start-up (under a Postgres advisory lock). On fi
 log prints a one-time **setup token** (`POST /api/v1/auth/setup`); a new one is printed on every
 restart until an owner exists.
 
+> Trade-off (review #17): the setup token is written into the log *message* so an operator can
+> read it from `docker logs`/journald; the structured `setupToken` field is redacted. Anyone who can
+> read the control-plane log before setup completes can claim the installation, so restrict log
+> access during first boot. The token is single-use, replaced on every restart and stored only as
+> a hash.
+
 | Script | |
 |---|---|
 | `dev` | `tsx watch` on `src/main.ts` (workspace packages resolve to their TS sources) |

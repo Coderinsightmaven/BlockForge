@@ -239,21 +239,45 @@ export class FakeAgent {
    * Implements staged rotation (agent-protocol §3.1): answers `credentials.rotate` with a new key and
    * proof, closes the socket, reconnects with the new key and promotes it after `welcome`.
    */
-  enableKeyRotation(): void {
+  /**
+   * Implements staged rotation (agent-protocol §3.1). `mode`:
+   *  - `"after-result"` (default): answer, close, reconnect with the new key, promote after `welcome`.
+   *  - `"immediate"`: answer, then close and reconnect in the same tick.
+   *  - `"reconnect-first"`: open the new-key connection *before* sending the result over the old one,
+   *    so the control plane authenticates the new key while the rotation is still in flight.
+   */
+  enableKeyRotation(mode: "after-result" | "immediate" | "reconnect-first" = "after-result"): void {
     this.onCommandType("credentials.rotate", (body) => {
       const next = generateKeyPairSync("ed25519").privateKey;
       const proof = sign(null, Buffer.from(`${ROTATION_PROOF_PREFIX}${this.nodeId}:${body.id}`, "utf8"), next).toString("base64url");
-      this.send({ t: "result", id: body.id, ts: Date.now(), ok: true, data: { publicKey: rawPublicKey(next), proof } });
-      setTimeout(() => {
+      const result = { t: "result", id: body.id, ts: Date.now(), ok: true, data: { publicKey: rawPublicKey(next), proof } };
+      const promote = () => {
+        this.privateKey = next;
+        this.publicKey = rawPublicKey(next);
+      };
+      const fail = (err: unknown) => this.notify({ t: "__rotation_failed", error: String(err) });
+      if (mode === "reconnect-first") {
+        const old = this.ws;
         void (async () => {
-          this.ws?.close(1000, "rotating key");
-          await new Promise((r) => setTimeout(r, 50));
-          await this.connect(this.authHeader({ key: next }));
+          const connecting = this.connect(this.authHeader({ key: next }));
+          await new Promise((r) => setTimeout(r, 150));
+          old?.send(JSON.stringify(result));
+          await connecting;
           await this.hello();
-          this.privateKey = next;
-          this.publicKey = rawPublicKey(next);
-        })().catch((err) => this.notify({ t: "__rotation_failed", error: String(err) }));
-      }, 20);
+          promote();
+        })().catch(fail);
+        return null;
+      }
+      this.send(result);
+      const reconnect = async () => {
+        this.ws?.close(1000, "rotating key");
+        if (mode === "after-result") await new Promise((r) => setTimeout(r, 50));
+        await this.connect(this.authHeader({ key: next }));
+        await this.hello();
+        promote();
+      };
+      if (mode === "immediate") void reconnect().catch(fail);
+      else setTimeout(() => void reconnect().catch(fail), 20);
       return null;
     });
   }

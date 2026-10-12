@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Me } from "@blockforge/contracts";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { AuditActor, AuditService } from "../audit/service.js";
-import type { Db } from "../db/client.js";
+import type { Db, DbOrTx } from "../db/client.js";
 import { roleBindings, roles, setupState, users } from "../db/schema/index.js";
 import { withTransaction } from "../db/tx.js";
 import type { SessionInfo } from "../http/types.js";
@@ -16,7 +16,8 @@ import type { SecretBox } from "../secrets/secret-box.js";
 import type { UsersService } from "../users/service.js";
 import { burnPasswordCheck, hashPassword, verifyPassword } from "./passwords.js";
 import type { CreatedSession, SessionService } from "./sessions.js";
-import { LOCKOUT_THRESHOLD, lockoutDurationMs, SlidingWindowLimiter } from "./throttle.js";
+import { LOCKOUT_THRESHOLD, lockoutDurationMs, normalizeLoginKey, PhantomLockouts, SlidingWindowLimiter } from "./throttle.js";
+import { uniqueUsername } from "../users/username.js";
 import { newTotpSecret, totpUri, verifyTotp } from "./totp.js";
 
 const MFA_MAX_FAILURES = 5;
@@ -34,8 +35,10 @@ export type LoginResult =
 
 /** Setup, login, MFA and password flows. Route handlers only translate HTTP ⇄ these calls. */
 export class AuthService {
-  /** Per-email attempt limiter (covers unknown accounts too); 10 attempts / 15 min. */
+  /** Per-email attempt limiter (covers unknown accounts too); 10 attempts / 15 min, keyed on the normalised address. */
   private readonly emailLimiter = new SlidingWindowLimiter(10, 15 * 60_000);
+  /** Lockout counters for unknown addresses, so they behave exactly like real accounts. */
+  private readonly phantom = new PhantomLockouts();
 
   constructor(
     private readonly db: Db,
@@ -73,7 +76,7 @@ export class AuthService {
   }
 
   async completeSetup(
-    input: { setupToken: string; email: string; displayName: string; password: string },
+    input: { setupToken: string; email: string; username?: string | undefined; displayName: string; password: string },
     client: ClientInfo,
   ): Promise<CreatedSession> {
     const passwordHash = await hashPassword(input.password);
@@ -96,7 +99,8 @@ export class AuthService {
       }
       const [ownerRole] = await tx.select({ id: roles.id }).from(roles).where(eq(roles.key, "owner")).limit(1);
       if (!ownerRole) throw new Error("built-in roles are not seeded");
-      await tx.insert(users).values({ id: userId, email: input.email, displayName: input.displayName, passwordHash });
+      const username = input.username ?? (await uniqueUsername(tx, input.email));
+      await tx.insert(users).values({ id: userId, email: input.email, username, displayName: input.displayName, passwordHash });
       await tx.insert(roleBindings).values({ id: randomUUID(), userId, roleId: ownerRole.id, scopeType: "global", scopeId: null });
       await tx
         .update(setupState)
@@ -123,43 +127,79 @@ export class AuthService {
 
   // --- Login -----------------------------------------------------------------
 
+  /**
+   * Password login. Unknown, wrong-password and disabled accounts give the same 401; locked real
+   * accounts and "locked" unknown addresses give the same 429 (see `PhantomLockouts`). Failure
+   * counters are incremented atomically, and the session is only created inside a transaction that
+   * re-reads the user row under a lock and confirms the verified hash is still current, so a login
+   * racing a password change, reset or disable can never mint a session the revocation missed.
+   */
   async login(email: string, password: string, client: ClientInfo): Promise<LoginResult> {
     const now = this.clock.now();
-    const waitMs = this.emailLimiter.hit(email, now);
+    const key = normalizeLoginKey(email);
+    const waitMs = this.emailLimiter.hit(key, now);
     if (waitMs > 0) {
-      await this.auditLogin(email, null, client, "denied", { reason: "rate limited" });
+      await this.auditLogin(key, null, client, "denied", { reason: "rate limited" });
       throw rateLimited(waitMs / 1000);
     }
-    const [user] = await this.db.select().from(users).where(eq(users.email, email)).limit(1);
-    if (user?.lockedUntil && user.lockedUntil.getTime() > now) {
+    const [user] = await this.db.select().from(users).where(eq(users.email, key)).limit(1);
+    const lockedMs = user ? Math.max(0, (user.lockedUntil?.getTime() ?? 0) - now) : this.phantom.lockedFor(key, now);
+    if (lockedMs > 0) {
       await burnPasswordCheck(password);
-      await this.auditLogin(email, user.id, client, "denied", { reason: "account locked" });
-      throw rateLimited((user.lockedUntil.getTime() - now) / 1000);
+      await this.auditLogin(key, user?.id ?? null, client, "denied", { reason: "account locked" });
+      throw rateLimited(lockedMs / 1000);
     }
     const ok = user ? await verifyPassword(user.passwordHash, password) : (await burnPasswordCheck(password), false);
     if (!user || !ok || user.status !== "active") {
-      if (user && !ok) {
-        const failed = user.failedLoginCount + 1;
-        const lockMs = lockoutDurationMs(failed);
-        await this.db
-          .update(users)
-          .set({ failedLoginCount: failed, lockedUntil: lockMs > 0 ? new Date(now + lockMs) : user.lockedUntil })
-          .where(eq(users.id, user.id));
-        if (failed >= LOCKOUT_THRESHOLD) this.logger.warn({ userId: user.id, failed }, "account temporarily locked after failed logins");
-      }
-      await this.auditLogin(email, user?.id ?? null, client, "failed", {
+      if (!user) this.phantom.fail(key, now);
+      else if (!ok) await this.recordFailure(user.id, now);
+      await this.auditLogin(key, user?.id ?? null, client, "failed", {
         reason: !user ? "unknown account" : !ok ? "wrong password" : "account disabled",
       });
       throw unauthenticated("Invalid email or password");
     }
+    const created = await withTransaction(this.db, async (tx) => {
+      const [current] = await tx
+        .select({ passwordHash: users.passwordHash, status: users.status, lockedUntil: users.lockedUntil, mfaEnabled: users.mfaEnabled })
+        .from(users)
+        .where(eq(users.id, user.id))
+        .for("update")
+        .limit(1);
+      if (!current || current.status !== "active" || current.passwordHash !== user.passwordHash) return null;
+      if (current.lockedUntil && current.lockedUntil.getTime() > now) return { kind: "locked", ms: current.lockedUntil.getTime() - now } as const;
+      await tx.update(users).set({ failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date(now) }).where(eq(users.id, user.id));
+      const session = await this.sessions.create(user.id, { mfaVerified: !current.mfaEnabled, ip: client.ip, userAgent: client.userAgent }, tx);
+      return { kind: "ok", session, mfaEnabled: current.mfaEnabled } as const;
+    });
+    if (!created) {
+      await this.auditLogin(key, user.id, client, "failed", { reason: "credentials changed during login" });
+      throw unauthenticated("Invalid email or password");
+    }
+    if (created.kind === "locked") {
+      await this.auditLogin(key, user.id, client, "denied", { reason: "account locked" });
+      throw rateLimited(created.ms / 1000);
+    }
+    this.emailLimiter.reset(key);
+    await this.auditLogin(key, user.id, client, "success", { mfaRequired: created.mfaEnabled });
+    return { status: created.mfaEnabled ? "mfa_required" : "ok", created: created.session };
+  }
+
+  /** Atomic `failed_login_count + 1`; sets (never shortens) the lock once the threshold is reached. */
+  private async recordFailure(userId: string, now: number): Promise<void> {
+    const [row] = await this.db
+      .update(users)
+      .set({ failedLoginCount: sql`${users.failedLoginCount} + 1` })
+      .where(eq(users.id, userId))
+      .returning({ failed: users.failedLoginCount });
+    const failed = row?.failed ?? 0;
+    const lockMs = lockoutDurationMs(failed);
+    if (lockMs <= 0) return;
+    const until = new Date(now + lockMs);
     await this.db
       .update(users)
-      .set({ failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date(now) })
-      .where(eq(users.id, user.id));
-    this.emailLimiter.reset(email);
-    const created = await this.sessions.create(user.id, { mfaVerified: !user.mfaEnabled, ip: client.ip, userAgent: client.userAgent });
-    await this.auditLogin(email, user.id, client, "success", { mfaRequired: user.mfaEnabled });
-    return { status: user.mfaEnabled ? "mfa_required" : "ok", created };
+      .set({ lockedUntil: until })
+      .where(and(eq(users.id, userId), or(isNull(users.lockedUntil), lt(users.lockedUntil, until))));
+    if (failed >= LOCKOUT_THRESHOLD) this.logger.warn({ userId, failed }, "account temporarily locked after failed logins");
   }
 
   private auditLogin(
@@ -197,7 +237,7 @@ export class AuthService {
     return {
       user,
       ...summarizePermissions(principal),
-      session: { mfaVerified: session.mfaVerified || !session.user.mfaEnabled, expiresAt: session.expiresAt.getTime() },
+      session: { mfaVerified: session.mfaVerified, expiresAt: session.expiresAt.getTime() },
       csrfToken: this.sessions.csrfTokenFor(session.tokenHash),
     };
   }
@@ -205,32 +245,70 @@ export class AuthService {
   // --- MFA -----------------------------------------------------------------------
 
   /**
-   * Second factor for a session created by `login`. On success the session is *replaced* by a new
-   * one (fresh token + CSRF token) so a token observed before verification cannot be used after.
+   * Accepts a TOTP time step for a user exactly once: the conditional UPDATE only succeeds when the
+   * step is newer than the last accepted one, so concurrent requests with the same code (or an older,
+   * out-of-order code) cannot both pass.
+   */
+  private async consumeTimeStep(tx: DbOrTx, userId: string, step: number | undefined): Promise<boolean> {
+    if (step === undefined) return false;
+    const rows = await tx
+      .update(users)
+      .set({ mfaLastTimeStep: step })
+      .where(and(eq(users.id, userId), or(isNull(users.mfaLastTimeStep), lt(users.mfaLastTimeStep, step))))
+      .returning({ id: users.id });
+    return rows.length > 0;
+  }
+
+  /**
+   * Second factor for a session created by `login`. On success the pending session is consumed and
+   * replaced by a new one (fresh token + CSRF token) so a token observed before verification cannot be
+   * used after. The pending session must still exist when the replacement is created (a concurrent
+   * password change or MFA reset revokes it).
    */
   async verifyMfa(session: SessionInfo, code: string, client: ClientInfo): Promise<CreatedSession | null> {
-    if (session.mfaVerified || !session.user.mfaEnabled) return null;
+    if (session.mfaVerified) return null;
     const [user] = await this.db.select().from(users).where(eq(users.id, session.user.id)).limit(1);
-    if (!user?.mfaTotpSecretEnc) throw unauthenticated();
+    if (!user?.mfaEnabled || !user.mfaTotpSecretEnc) {
+      // MFA was disabled or reset after this session was created: the pending session is unusable.
+      await this.sessions.revoke(session.id);
+      throw unauthenticated("Sign in again");
+    }
     const secret = this.box.decryptString(user.mfaTotpSecretEnc, mfaAad(user.id));
     const check = await verifyTotp(secret, code, this.clock.now(), user.mfaLastTimeStep);
     const actor: AuditActor = { actorType: "user", actorId: user.id, actorName: user.email, ip: client.ip, requestId: client.requestId };
-    if (!check.valid) {
+    const result = check.valid
+      ? await withTransaction(this.db, async (tx) => {
+          const [locked] = await tx
+            .select({ status: users.status, mfaEnabled: users.mfaEnabled })
+            .from(users)
+            .where(eq(users.id, user.id))
+            .for("update");
+          if (locked?.status !== "active" || !locked.mfaEnabled) return "gone" as const;
+          if (!(await this.consumeTimeStep(tx, user.id, check.timeStep))) return "replay" as const;
+          if (!(await this.sessions.consume(session.id, tx))) return "gone" as const;
+          const created = await this.sessions.create(user.id, { mfaVerified: true, ip: client.ip, userAgent: client.userAgent }, tx);
+          await this.audit.record({ ...actor, action: "auth.mfa.verify", targetType: "user", targetId: user.id, outcome: "success" }, tx);
+          return created;
+        })
+      : ("invalid" as const);
+    if (result === "gone") throw unauthenticated("Sign in again");
+    if (typeof result === "string") {
       const failures = await this.sessions.recordMfaFailure(session.id);
-      await this.audit.record({ ...actor, action: "auth.mfa.verify", targetType: "user", targetId: user.id, outcome: "failed", details: { failures } });
-      if (failures >= MFA_MAX_FAILURES) {
+      await this.audit.record({
+        ...actor,
+        action: "auth.mfa.verify",
+        targetType: "user",
+        targetId: user.id,
+        outcome: "failed",
+        details: { failures, reason: result === "replay" ? "code already used" : "invalid code" },
+      });
+      if (failures >= MFA_MAX_FAILURES || failures === 0) {
         await this.sessions.revoke(session.id);
         throw unauthenticated("Too many invalid codes; sign in again");
       }
       throw badRequest("Invalid verification code");
     }
-    return withTransaction(this.db, async (tx) => {
-      await tx.update(users).set({ mfaLastTimeStep: check.timeStep ?? null }).where(eq(users.id, user.id));
-      await this.sessions.revoke(session.id, tx);
-      const created = await this.sessions.create(user.id, { mfaVerified: true, ip: client.ip, userAgent: client.userAgent }, tx);
-      await this.audit.record({ ...actor, action: "auth.mfa.verify", targetType: "user", targetId: user.id, outcome: "success" }, tx);
-      return created;
-    });
+    return result;
   }
 
   async startMfaEnrollment(session: SessionInfo, actor: AuditActor): Promise<{ otpauthUrl: string; secret: string }> {
@@ -257,18 +335,21 @@ export class AuthService {
       await this.audit.record({ ...actor, action: "auth.mfa.enroll.confirm", targetType: "user", targetId: user.id, outcome: "failed" });
       throw badRequest("Invalid verification code");
     }
+    const pending = user.mfaPendingSecretEnc;
     await withTransaction(this.db, async (tx) => {
-      await tx
+      const updated = await tx
         .update(users)
         .set({
           mfaEnabled: true,
-          mfaTotpSecretEnc: user.mfaPendingSecretEnc,
+          mfaTotpSecretEnc: pending,
           mfaPendingSecretEnc: null,
           mfaLastTimeStep: check.timeStep ?? null,
           updatedAt: new Date(),
-          version: user.version + 1,
+          version: sql`${users.version} + 1`,
         })
-        .where(eq(users.id, user.id));
+        .where(and(eq(users.id, user.id), eq(users.mfaEnabled, false), eq(users.mfaPendingSecretEnc, pending)))
+        .returning({ id: users.id });
+      if (updated.length === 0) throw conflict("Enrollment changed concurrently; start again");
       await this.sessions.markMfaVerified(session.id, tx);
       await this.sessions.requireMfaOnOthers(user.id, session.id, tx);
       await this.audit.record({ ...actor, action: "auth.mfa.enable", targetType: "user", targetId: user.id, outcome: "success" }, tx);
@@ -285,11 +366,35 @@ export class AuthService {
       await this.audit.record({ ...actor, action: "auth.mfa.disable", targetType: "user", targetId: user.id, outcome: "failed" });
       throw badRequest("Invalid verification code");
     }
-    await this.db
-      .update(users)
-      .set({ mfaEnabled: false, mfaTotpSecretEnc: null, mfaPendingSecretEnc: null, mfaLastTimeStep: null, updatedAt: new Date(), version: user.version + 1 })
-      .where(eq(users.id, user.id));
-    await this.audit.record({ ...actor, action: "auth.mfa.disable", targetType: "user", targetId: user.id, outcome: "success" });
+    const done = await withTransaction(this.db, async (tx) => {
+      if (!(await this.consumeTimeStep(tx, user.id, check.timeStep))) return false;
+      await tx
+        .update(users)
+        .set({
+          mfaEnabled: false,
+          mfaTotpSecretEnc: null,
+          mfaPendingSecretEnc: null,
+          mfaLastTimeStep: null,
+          updatedAt: new Date(),
+          version: sql`${users.version} + 1`,
+        })
+        .where(eq(users.id, user.id));
+      // Sessions still waiting for a second factor must not become fully authenticated now.
+      await this.sessions.revokeUnverified(user.id, tx);
+      await this.audit.record({ ...actor, action: "auth.mfa.disable", targetType: "user", targetId: user.id, outcome: "success" }, tx);
+      return true;
+    });
+    if (!done) {
+      await this.audit.record({
+        ...actor,
+        action: "auth.mfa.disable",
+        targetType: "user",
+        targetId: user.id,
+        outcome: "failed",
+        details: { reason: "code already used" },
+      });
+      throw badRequest("Invalid verification code");
+    }
   }
 
   // --- Password ----------------------------------------------------------------
@@ -304,10 +409,12 @@ export class AuthService {
     if (currentPassword === newPassword) throw badRequest("The new password must differ from the current one");
     const passwordHash = await hashPassword(newPassword);
     await withTransaction(this.db, async (tx) => {
-      await tx
+      const updated = await tx
         .update(users)
-        .set({ passwordHash, passwordChangedAt: new Date(this.clock.now()), updatedAt: new Date(), version: user.version + 1 })
-        .where(eq(users.id, user.id));
+        .set({ passwordHash, passwordChangedAt: new Date(this.clock.now()), updatedAt: new Date(), version: sql`${users.version} + 1` })
+        .where(and(eq(users.id, user.id), eq(users.passwordHash, user.passwordHash)))
+        .returning({ id: users.id });
+      if (updated.length === 0) throw conflict("The password was changed concurrently; try again");
       await this.sessions.revokeOthers(user.id, session.id, tx);
       await this.audit.record({ ...actor, action: "auth.password.change", targetType: "user", targetId: user.id, outcome: "success" }, tx);
     });

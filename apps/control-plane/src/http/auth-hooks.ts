@@ -58,7 +58,8 @@ export function registerAuthHooks(app: FastifyInstance, deps: AuthHookDeps): voi
       }
     }
     if (mode === "session") return;
-    if (session.user.mfaEnabled && !session.mfaVerified) throw mfaRequired();
+    // Strict: a session created while MFA was required stays gated even if MFA is later disabled.
+    if (!session.mfaVerified) throw mfaRequired();
     req.principal = await deps.rbac.loadPrincipal(session.user.id);
     if (!req.principal) throw unauthenticated();
   });

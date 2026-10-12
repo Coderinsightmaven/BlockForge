@@ -15,7 +15,7 @@ import { withTransaction } from "../db/tx.js";
 import type { AuditActor, AuditService } from "../audit/service.js";
 import { hashPassword } from "../auth/passwords.js";
 import type { SessionService } from "../auth/sessions.js";
-import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, notFound, validationDetails } from "../lib/errors.js";
 import type { TimeIdCursor } from "../lib/pagination.js";
 import { isOwner, isPrivilegedRole, type Principal } from "../rbac/authorize.js";
 import type { RbacService } from "../rbac/service.js";
@@ -79,6 +79,7 @@ export class UsersService {
     return rows.map((r) => ({
       id: r.id,
       email: r.email,
+      username: r.username,
       displayName: r.displayName,
       status: r.status as User["status"],
       mfaEnabled: r.mfaEnabled,
@@ -209,16 +210,18 @@ export class UsersService {
   async create(
     actor: Principal,
     audit: AuditActor,
-    input: { email: string; displayName: string; password: string; roles: RoleBindingInput[] },
+    input: { email: string; username: string; displayName: string; password: string; roles: RoleBindingInput[] },
   ): Promise<User> {
     const passwordHash = await hashPassword(input.password);
     const id = randomUUID();
     await withTransaction(this.db, async (tx) => {
       const [existing] = await tx.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
       if (existing) throw conflict("A user with this email already exists");
+      const [sameName] = await tx.select({ id: users.id }).from(users).where(eq(users.username, input.username)).limit(1);
+      if (sameName) throw conflict("A user with this username already exists", validationDetails("already taken", "username"));
       const checked = [];
       for (const r of input.roles) checked.push({ role: await this.checkGrant(actor, r, tx), input: r });
-      await tx.insert(users).values({ id, email: input.email, displayName: input.displayName, passwordHash });
+      await tx.insert(users).values({ id, email: input.email, username: input.username, displayName: input.displayName, passwordHash });
       for (const c of checked) {
         await tx
           .insert(roleBindings)
@@ -226,7 +229,7 @@ export class UsersService {
           .onConflictDoNothing();
       }
       await this.audit.record(
-        { ...audit, action: "user.create", targetType: "user", targetId: id, outcome: "success", details: { email: input.email, roles: input.roles } },
+        { ...audit, action: "user.create", targetType: "user", targetId: id, outcome: "success", details: { email: input.email, username: input.username, roles: input.roles } },
         tx,
       );
     });
@@ -237,11 +240,15 @@ export class UsersService {
     actor: Principal,
     audit: AuditActor,
     userId: string,
-    input: { displayName?: string | undefined; status?: "active" | "disabled" | undefined },
+    input: { displayName?: string | undefined; username?: string | undefined; status?: "active" | "disabled" | undefined },
   ): Promise<User> {
     await withTransaction(this.db, async (tx) => {
       const [row] = await tx.select().from(users).where(eq(users.id, userId)).for("update").limit(1);
       if (!row) throw notFound("User");
+      if (input.username !== undefined && input.username !== row.username) {
+        const [sameName] = await tx.select({ id: users.id }).from(users).where(eq(users.username, input.username)).limit(1);
+        if (sameName) throw conflict("A user with this username already exists", validationDetails("already taken", "username"));
+      }
       if (input.status && input.status !== row.status) {
         await this.checkCanManage(actor, userId, tx);
         if (input.status === "disabled") {
@@ -257,6 +264,7 @@ export class UsersService {
         .update(users)
         .set({
           ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+          ...(input.username !== undefined ? { username: input.username } : {}),
           ...(input.status !== undefined ? { status: input.status } : {}),
           updatedAt: new Date(),
           version: row.version + 1,

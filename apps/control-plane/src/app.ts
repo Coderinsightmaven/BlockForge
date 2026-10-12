@@ -6,7 +6,6 @@ import fastifyHelmet from "@fastify/helmet";
 import fastifyRateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import { lt } from "drizzle-orm";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from "fastify";
 import type pg from "pg";
 import type { Logger } from "pino";
@@ -31,7 +30,6 @@ import type { AppConfig } from "./config/env.js";
 import { loadMasterKey } from "./config/master-key.js";
 import type { AppContext } from "./context.js";
 import { createDb, createPool } from "./db/client.js";
-import { agentCommands, events } from "./db/schema/index.js";
 import { EventBus } from "./events/bus.js";
 import { registerAuthHooks } from "./http/auth-hooks.js";
 import { errorBody, registerErrorHandling } from "./http/errors.js";
@@ -48,6 +46,7 @@ import { deriveKey } from "./lib/crypto.js";
 import { rateLimited } from "./lib/errors.js";
 import { PeriodicTask } from "./lib/periodic.js";
 import { createLogger } from "./logging/logger.js";
+import { runRetention } from "./maintenance/retention.js";
 import { LatestCache } from "./metrics/latest.js";
 import { MetricsQueryService } from "./metrics/query.js";
 import { registerMetricsRoutes } from "./metrics/routes.js";
@@ -67,12 +66,11 @@ import { RealtimeHub } from "./realtime/hub.js";
 import { SecretBox } from "./secrets/secret-box.js";
 import { SecretsService } from "./secrets/service.js";
 import { registerSettingsRoutes } from "./settings/routes.js";
+import { seedBuiltinTemplates } from "./templates/builtin.js";
 import { SettingsService } from "./settings/service.js";
 import { registerUserRoutes } from "./users/routes.js";
 import { UsersService } from "./users/service.js";
 
-const EVENT_RETENTION_MS = 90 * 24 * 60 * 60_000;
-const AGENT_COMMAND_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 export interface BuildAppOptions {
   config: AppConfig;
@@ -187,6 +185,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     bus,
     heartbeatIntervalMs: config.agent.heartbeatIntervalMs,
     metricsIntervalMs: config.agent.metricsIntervalMs,
+    maxQueuedBytes: config.agent.maxQueuedBytes,
   });
   const tracker = new NodeStateTracker(
     db,
@@ -239,6 +238,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
 
   // --- Seed & wiring -------------------------------------------------------------------
   await rbac.seedBuiltinRoles();
+  await seedBuiltinTemplates(db);
   await alerts.seedDefaults();
   alertEvaluator.subscribe();
   tracker.onChange(async (change, node) => {
@@ -335,9 +335,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
         await authenticator.prune();
         await sessions.pruneExpired();
         await idempotency.prune();
-        const now = clock.now();
-        await db.delete(events).where(lt(events.occurredAt, new Date(now - EVENT_RETENTION_MS)));
-        await db.delete(agentCommands).where(lt(agentCommands.issuedAt, new Date(now - AGENT_COMMAND_RETENTION_MS)));
+        await runRetention({ db, clock, latest, consoles });
       },
       logger,
     ),
