@@ -94,6 +94,15 @@ Control plane restarted with migration 0005 (`servers.extensions.view` in the ro
   level 2, ban, IP ban); cleanup through the console.
 * **Plugins & mods on an outdated agent**: `GET …/extensions` 200 (scan `never`, upload policy), `POST …/extensions/scan`
   → 409 `agent_outdated` with `missingCapabilities: ["fs.hash", "jar.readEntries"]` (no timeout).
-* Not yet live: sessions (no Minecraft client available on the LAN test), Modrinth install/update/upload/rollback
-  (needs the 3125c66 agent, deployed after its Codex review).
+* Not yet live: sessions (no Minecraft client available on the LAN test).
+* **Plugins & mods, agent 61669b0 deployed** (image built on the workstation, `docker save | ssh … docker load`,
+  `docker compose up -d agent` in `~/blockforge-deploy`; agent reconnected, SFTP up, other containers untouched;
+  `.data/e2e_extensions.py`): full scan 1.6 s; Modrinth search "chunky" (2 hits, both `match`); project + plan
+  (1 file, no warnings, `restartRequired`); install job (SHA-512-verified `artifact.fetch` + rescan) 1.5 s →
+  `Chunky-Bukkit-1.5.3.jar` source `modrinth`, metadata `Chunky`, loadable; disable → `.jar.disabled`, enable;
+  upload of a generated plugin jar (transfer PUT + completion: metadata `BfE2E`, compatible); remove → keep area →
+  history (`rollback.available`) → rollback job restored it; restart → Paper console `[Chunky] Enabling Chunky v1.5.3`.
+  **Bug found:** update checks (`GET …/extensions/updates`) → 404 and hash identification fails: the control plane's
+  pinned HTTPS transport (`catalog/safe-fetch.ts`) sends every request as a GET without the caller's method, body or
+  headers (so Modrinth POSTs 404 and no User-Agent is sent); tests injected a transport and missed it — fix in progress.
 * No error-level lines in the control-plane log.
