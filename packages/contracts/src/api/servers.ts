@@ -164,11 +164,17 @@ export const SoftwareInfo = z.object({
   restrictions: z.array(z.string()),
   source: z.string(),
 });
+export const JavaSource = z.enum(["upstream", "mojang", "table"]);
 export const SoftwareVersion = z.object({
+  /** Minecraft version for game servers; for proxies (Velocity) the proxy's own version. */
   minecraftVersion: z.string(),
   channel: z.enum(["release", "snapshot", "beta", "alpha", "experimental"]),
   javaMajor: z.number().int().nullable(),
   releasedAt: EpochMs.nullable(),
+  /** Where `javaMajor` came from: upstream build metadata, Mojang's per-version JSON, or BlockForge's table. */
+  javaSource: JavaSource.nullable().default(null),
+  support: z.enum(["supported", "deprecated", "unsupported"]).nullable().default(null),
+  notes: z.array(z.string()).default([]),
 });
 export const SoftwareBuild = z.object({
   build: z.string(),
@@ -182,3 +188,54 @@ export const SoftwareBuild = z.object({
 export type SoftwareInfo = z.infer<typeof SoftwareInfo>;
 export type SoftwareVersion = z.infer<typeof SoftwareVersion>;
 export type SoftwareBuild = z.infer<typeof SoftwareBuild>;
+
+/**
+ * Resolved provisioning plan for one build (wizard review step: `GET /catalog/software/:software/
+ * versions/:version/builds/:build/plan`; `build = "latest"` resolves the newest stable build).
+ * Structurally identical to `ResolvedArtifact` in `@blockforge/minecraft`.
+ *
+ * Checksums: `checksum` is the strongest value the upstream publishes (may be MD5, shown to users as
+ * weak); `agentChecksum` is what the agent enforces (sha1/sha256/sha512 only) — `null` means the file
+ * is protected by TLS only, and the UI must say so. MD5 is intentionally not an agent algorithm: it
+ * comes from the same origin as the file, so it adds no protection beyond TLS.
+ */
+export const ArtifactPlan = z.object({
+  software: ServerSoftware,
+  version: z.string(),
+  build: z.string(),
+  channel: z.enum(["stable", "beta", "alpha", "experimental"]),
+  releasedAt: EpochMs.nullable(),
+  downloads: z.array(
+    z.object({
+      role: z.enum(["server", "installer", "launcher", "vanilla-server"]),
+      url: z.string(),
+      destPath: z.string(),
+      checksum: z.object({ algorithm: z.enum(["md5", "sha1", "sha256", "sha512"]), value: z.string() }).nullable(),
+      agentChecksum: z.object({ algorithm: z.enum(["sha1", "sha256", "sha512"]), value: z.string() }).nullable(),
+      sizeBytes: z.number().int().nullable(),
+      provenance: z.string(),
+    }),
+  ),
+  java: z.object({ major: z.number().int(), source: JavaSource, notes: z.array(z.string()) }),
+  install: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("none") }),
+    z.object({
+      kind: z.literal("installer"),
+      javaArgs: z.array(z.string()),
+      expects: z.array(z.string()),
+      cleanup: z.array(z.string()),
+      requiresNetwork: z.boolean(),
+      notes: z.array(z.string()),
+    }),
+  ]),
+  launch: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("jar"), jar: z.string(), programArgs: z.array(z.string()) }),
+    z.object({ kind: z.literal("argfile"), argFile: z.string(), programArgs: z.array(z.string()) }),
+    z.object({ kind: z.literal("jar-candidates"), candidates: z.array(z.string()), programArgs: z.array(z.string()) }),
+  ]),
+  requiresNetworkAtFirstStart: z.boolean(),
+  recommendedJvmFlags: z.array(z.string()).nullable(),
+  provenance: z.string(),
+  notes: z.array(z.string()),
+});
+export type ArtifactPlan = z.infer<typeof ArtifactPlan>;
