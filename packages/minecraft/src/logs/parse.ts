@@ -75,6 +75,38 @@ export function isChatMessage(message: string): boolean {
 }
 
 /**
+ * Prefix Minecraft 26.3+ (vanilla and Paper; absent in 26.2 and earlier) puts on everything the
+ * server sends to its own console as a system message: command feedback ("Saved the game",
+ * "There are 0 of a max of 20 players online: "), and the join/leave/death/advancement
+ * broadcasts (`MinecraftServer.sendSystemMessage` logs `"System chat: {}"`). Player chat is
+ * logged separately (`<name> …`, `[Not Secure] <name> …`) and never carries it.
+ */
+export const COMMAND_FEEDBACK_PREFIX = "System chat: ";
+
+/**
+ * Removes a leading `System chat: ` from a log message (the message part, see `parseLogLine`).
+ * Chat lines (`<name> …`, `[Not Secure] <name> …`, `* name …`) are returned unchanged, so a
+ * player typing "System chat: Saved the game" stays a chat line. Messages from older versions
+ * have no prefix and are returned as they are.
+ */
+export function stripCommandFeedbackPrefix(message: string): string {
+  if (isChatMessage(message) || !message.startsWith(COMMAND_FEEDBACK_PREFIX)) return message;
+  return message.slice(COMMAND_FEEDBACK_PREFIX.length);
+}
+
+/**
+ * The server's own message on a console line — log prefix and formatting removed, 26.3+
+ * `System chat: ` prefix removed — or null when the line is player chat (before or after the
+ * prefix), so callers can anchor their patterns without letting players forge them.
+ */
+export function consoleMessage(raw: string | ParsedLogLine): string | null {
+  const p = typeof raw === "string" ? parseLogLine(raw) : raw;
+  if (isChatMessage(p.message)) return null;
+  const m = stripCommandFeedbackPrefix(p.message);
+  return isChatMessage(m) ? null : m;
+}
+
+/**
  * Player name: Mojang names are [A-Za-z0-9_]{1,16}; offline-mode servers accept any printable
  * ASCII, Floodgate prefixes Bedrock names with "." — brackets/parentheses/angle brackets are
  * excluded so names cannot swallow the surrounding log syntax.
@@ -116,9 +148,10 @@ function num(s: string): number {
 /** All events a single line carries (usually 0 or 1). */
 export function detectLogEvents(raw: string | ParsedLogLine): LogEvent[] {
   const p = typeof raw === "string" ? parseLogLine(raw) : raw;
-  const msg = p.message;
   const events: LogEvent[] = [];
-  if (isChatMessage(msg)) return events;
+  // 26.3+ logs join/leave broadcasts as "System chat: Steve joined the game".
+  const msg = consoleMessage(p);
+  if (msg === null) return events;
 
   // Readiness: game servers `Done (3.456s)! For help, type "help"`; Velocity `Done (1.55s)!`.
   let m = /^Done \((\d+(?:[.,]\d+)?)s\)!(?: For help, type "help")?/.exec(msg);
@@ -137,6 +170,9 @@ export function detectLogEvents(raw: string | ParsedLogLine): LogEvent[] {
   }
   if ((m = new RegExp(String.raw`^${NAME} lost connection: (.*)$`).exec(msg)) && validName(m[1]!)) {
     events.push({ type: "player_disconnect", name: m[1]!, reason: m[2]! });
+  } else if ((m = new RegExp(String.raw`^${NAME} \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\) lost connection: (.*)$`).exec(msg)) && validName(m[1]!)) {
+    // Configuration phase (1.20.2+): `{name} ({uuid}) lost connection: {reason}`.
+    events.push({ type: "player_disconnect", name: m[1]!, reason: m[3]! });
   }
   // Velocity (ConnectedPlayer#toString / VelocityServerConnection#toString, 4.2.0 source).
   if ((m = new RegExp(String.raw`^\[connected player\] ${NAME} \((.*?)\) has connected$`).exec(msg))) {
@@ -187,9 +223,9 @@ export function detectCrashIndicator(raw: string | ParsedLogLine): Extract<LogEv
  * older builds prefix values above 20 with `*`). Colour codes are stripped first.
  */
 export function parsePaperTps(raw: string | ParsedLogLine): Extract<LogEvent, { type: "tps" }> | null {
-  const p = typeof raw === "string" ? parseLogLine(raw) : raw;
-  if (isChatMessage(p.message)) return null;
-  const m = /TPS from last 1m, 5m, 15m: \*?(\d+(?:\.\d+)?), \*?(\d+(?:\.\d+)?), \*?(\d+(?:\.\d+)?)\s*$/.exec(p.message);
+  const msg = consoleMessage(raw);
+  if (msg === null) return null;
+  const m = /TPS from last 1m, 5m, 15m: \*?(\d+(?:\.\d+)?), \*?(\d+(?:\.\d+)?), \*?(\d+(?:\.\d+)?)\s*$/.exec(msg);
   if (!m) return null;
   return { type: "tps", tps1m: Number(m[1]), tps5m: Number(m[2]), tps15m: Number(m[3]) };
 }

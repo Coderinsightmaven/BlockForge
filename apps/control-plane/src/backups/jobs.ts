@@ -1,5 +1,5 @@
 import type { ServerState, WorkloadStatus } from "@blockforge/contracts";
-import { isChatMessage, parseLogLine } from "@blockforge/minecraft";
+import { isSaveConfirmation } from "@blockforge/minecraft";
 import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { AgentCommandError } from "../agents/gateway.js";
@@ -29,19 +29,8 @@ export interface BackupJobDeps extends ServerJobDeps {
 type BackupRow = typeof backups.$inferSelect;
 type Ctx<I> = StepContext<I>;
 
-/**
- * Save confirmation after `save-all flush` (vanilla/Paper/Forge `commands.save.success`: "Saved the
- * game"; older versions "Saved the world"). Classified on the parsed log message, so chat lines and
- * other output cannot fake it. (Not in @blockforge/minecraft yet — local matcher.)
- */
-export function isSaveConfirmation(line: string): boolean {
-  const p = parseLogLine(line);
-  if (isChatMessage(p.message)) return false;
-  // Minecraft 26.x (vanilla and Paper) prefixes console command feedback with "System chat: ".
-  // Player chat starts with "<name>", so a player cannot produce a line with this prefix.
-  const message = p.message.trim().replace(/^System chat: /, "");
-  return /^Saved the (game|world)\b/.test(message);
-}
+/** Save confirmation after `save-all flush` (vanilla/Paper/Forge, 26.x "System chat:" prefix) — from @blockforge/minecraft. */
+export { isSaveConfirmation };
 
 function wrap(err: unknown, what: string): never {
   if (err instanceof AgentCommandError) throw new JobError(err.code, `${what}: ${err.message}`, err.retryable);

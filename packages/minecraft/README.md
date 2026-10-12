@@ -18,6 +18,7 @@ web-standard globals (`fetch`, `TextEncoder`, Web Crypto) are used.
 | server.properties | `parseProperties` / `serializeProperties` / `getProperties` / `getProperty` / `setProperties` / `updatePropertiesText` (format-preserving), `escapePropertyKey/Value`, `PROPERTY_SCHEMA`, `validateProperties`, `gameplayToProperties` (incl. 1.21.9+ game rules), `platformProperties`, `redactServerProperties` |
 | Launch | `buildLaunchSpec` → `{ image, command, stopCommand, env, heapMaxBytes, javaMajor, warnings }`, `buildInstallerSpec`, `validateJvmArgs`, `defaultHeapBytes`, `AIKAR_FLAGS` |
 | Logs | `parseLogLine`, `detectLogLevel`, `detectLogEvents` (ready, player join/leave/login/uuid/disconnect, Velocity proxy connect/switch/disconnect, crash indicators, Java version mismatch, port bind failure, EULA required, Paper TPS), `detectReadiness`, `detectCrashIndicator`, `parsePaperTps`, `tokenizeFormatting` / `stripFormatting` (`§` codes + ANSI → plain segments with style, never HTML) |
+| Console feedback | `stripCommandFeedbackPrefix` / `consoleMessage` (26.3+ `System chat: ` prefix removed, player chat → null; used by every event, list and feedback parser), `isSaveConfirmation`, `isSaveFailure`, `isSaveOffConfirmation`, `isSaveOnConfirmation` (1.13+ and ≤ 1.12 strings), `parseWhitelistListOutput` |
 | EULA / world | `generateEula`, `isEulaAccepted`, `validateSeed`, `javaStringHashCode`, `validateLevelType`, `validateLevelName`, `WORLD_PRESETS` |
 | Provisioning | `buildMinecraftProvisioning(input)` → `{ downloads (artifact.fetch payloads, cache: true), install (Forge/NeoForge `workload.install` payload) | null, workload: WorkloadSpec, files (server.properties, eula.txt, velocity.toml bind), deferredFiles, gamerules, warnings }`; `setVelocityBind` |
 | Fetch boundary | Every metadata request and redirect hop must be HTTPS on `CATALOG_HOSTS.metadata` (`redirect: "manual"`, max 5 hops); download URLs taken from upstream JSON must be on `CATALOG_HOSTS.artifacts` (`assertAllowedUrl`, `assertArtifactUrl`; override via `CatalogContext.metadataHosts/artifactHosts`). |
@@ -102,6 +103,17 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
 * Output parsers only read the message part of a console line (chat lines `<name> …` never match);
   the control plane should still only parse lines that follow the command it sent.
 
+## Minecraft 26.3 console prefix
+
+`MinecraftServer.sendSystemMessage` logs `System chat: {}` from 26.3 on (checked in the 26.1, 26.2
+and 26.3 server jars: only 26.3 has it). It covers command feedback (real Paper and vanilla 26.3
+lines in `test/fixtures/console/captured-26.3.json`) and, through
+`PlayerList.broadcastSystemMessage`, the join/leave/death/advancement broadcasts. Plain `LOGGER`
+lines are unchanged (`Done (…)!`, `… logged in with entity id …`, `UUID of player …`,
+`… lost connection: …`, watchdog/crash strings — all present verbatim in the 26.3 classes).
+Player chat (`MinecraftServer.logChatMessage`: `<name> …` / `[Not Secure] <name> …`) never
+carries the prefix, and `consoleMessage` rejects chat before and after stripping it.
+
 ## Known limitations
 
 * Player join/leave/readiness parsing is tested on lines built from verified format strings, not
@@ -116,6 +128,8 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
 * Player list files are Gson-generated (not written by a running server: that needs an accepted
   EULA); `list`/feedback parsing is tested on lines built from the jars' format strings, not on
   captured console output. Paper is assumed to use the vanilla `list` command.
+* 26.3 join/leave lines with `System chat: ` are derived from the 26.3 bytecode (vanilla); no
+  captured join/leave yet, and Paper's join/leave path is assumed to use the same broadcast.
 * Floodgate/Bedrock player names (prefix `.`) are rejected by the name validation.
 * Identifying installed jars needs agent support (hashes + jar entry reads; see below); uploads
   that are not on Modrinth are only identified through their metadata files.

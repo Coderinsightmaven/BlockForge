@@ -1,5 +1,5 @@
 import type { ServerSoftware } from "@blockforge/contracts";
-import { parseLogLine } from "../logs/parse.js";
+import { consoleMessage } from "../logs/parse.js";
 import { normalizeIp } from "./lists.js";
 import { PlayerInputError, assertPlayerName, normalizeUuid } from "./uuid.js";
 
@@ -9,7 +9,9 @@ import { PlayerInputError, assertPlayerName, normalizeUuid } from "./uuid.js";
  * player names are `[A-Za-z0-9_]{1,16}` (no `@` selectors, spaces or line breaks), IPs are
  * literal addresses, and free-text reasons are collapsed to one line. Output formats come from the
  * 26.3 and 1.12.2 server jars (`en_us.json` / `en_us.lang`) and Velocity 4.2.0
- * (`messages.properties`, `GlistCommand`).
+ * (`messages.properties`, `GlistCommand`). Minecraft 26.3+ prefixes console feedback with
+ * `System chat: ` (real Paper and vanilla 26.3 lines in test/fixtures/console); every parser
+ * reads lines through `consoleMessage`, which removes it and drops player chat.
  */
 
 export const MAX_REASON_LENGTH = 200;
@@ -90,9 +92,9 @@ export interface VelocityGlistOutput {
   servers: Array<{ server: string; count: number; players: string[] }>;
 }
 
-/** Message text of a console line (log prefix and formatting codes removed). */
+/** Server message of a console line (log prefix, formatting and `System chat: ` removed); "" for chat. */
 function messageOf(line: string): string {
-  return parseLogLine(line).message;
+  return consoleMessage(line) ?? "";
 }
 
 const NAME_AND_ID = /^([A-Za-z0-9_]{1,16}) \(([0-9a-fA-F-]{32,36})\)$/;
@@ -132,6 +134,33 @@ export function parsePlayerListOutput(lines: readonly string[]): PlayerListOutpu
       const online = Number(m[1]);
       const next = online > 0 && i + 1 < lines.length ? messageOf(lines[i + 1]!) : "";
       return { format: "legacy", online, max: Number(m[2]), players: splitPlayers(next) };
+    }
+  }
+  return null;
+}
+
+export interface WhitelistOutput {
+  format: "vanilla" | "legacy";
+  players: string[];
+}
+
+// 1.13+: commands.whitelist.list "There are %s whitelisted player(s): %s" / commands.whitelist.none
+const WHITELIST_LIST = /^There are (\d+) whitelisted player\(s\): (.*)$/;
+const WHITELIST_NONE = /^There are no whitelisted players$/;
+// ≤ 1.12: "There are %s (out of %s seen) whitelisted players:" + names on the next line
+const WHITELIST_LEGACY = /^There are (\d+) \(out of \d+ seen\) whitelisted players:$/;
+
+/** Parses `whitelist list` output (lets the control plane read the whitelist of a running server). */
+export function parseWhitelistListOutput(lines: readonly string[]): WhitelistOutput | null {
+  for (let i = 0; i < lines.length; i++) {
+    const msg = messageOf(lines[i]!).trim();
+    if (WHITELIST_NONE.test(msg)) return { format: "vanilla", players: [] };
+    let m = WHITELIST_LIST.exec(msg);
+    if (m) return { format: "vanilla", players: splitPlayers(m[2]!).map((p) => p.name) };
+    m = WHITELIST_LEGACY.exec(msg);
+    if (m) {
+      const next = Number(m[1]) > 0 && i + 1 < lines.length ? messageOf(lines[i + 1]!) : "";
+      return { format: "legacy", players: splitPlayers(next).map((p) => p.name) };
     }
   }
   return null;
