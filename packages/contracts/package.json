@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "sideEffects": false,
   "description": "Shared domain types, zod schemas, REST DTOs, realtime frames and the node-agent protocol.",
   "exports": {
     ".": {
@@ -12,7 +13,10 @@
     },
     "./fixtures/*": "./fixtures/*"
   },
-  "files": ["dist", "fixtures"],
+  "files": [
+    "dist",
+    "fixtures"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -164,7 +164,11 @@ export type MinecraftOptions = z.infer<typeof MinecraftOptions>;
 export const EggOptions = z.object({
   /** One of the template's images; default = the template's first image. */
   dockerImage: z.string().max(255).optional(),
-  /** envName → value; omitted variables use the template default. Validated with the variable's rules. */
+  /**
+   * envName → value; omitted variables use the template default. Validated with the variable's rules.
+   * Only `userEditable` variables are accepted, except from holders of `servers.admin` (who may also set
+   * non-editable ones, as Pterodactyl administrators can).
+   */
   variables: z.record(EnvVarName, z.string().max(8192)).default({}),
 });
 export type EggOptions = z.infer<typeof EggOptions>;
@@ -218,6 +222,30 @@ export type CreateServerRequest = z.infer<typeof CreateServerRequest>;
 // ---------------------------------------------------------------------------
 // Subusers, startup, settings
 
+/** `POST /servers/placement-preview` response. */
+export const PlacementPreviewResponse = z.object({
+  candidates: z.array(
+    z.object({
+      nodeId: Id,
+      nodeName: z.string(),
+      /** All hard constraints satisfied (capacity, health, scheduling, free allocation). */
+      fits: z.boolean(),
+      /** Human-readable reasons: failed hard constraints and soft preferences. */
+      reasons: z.array(z.string()),
+      /** Higher is better; only meaningful among fitting candidates. */
+      score: z.number(),
+      /** Number of unassigned allocations on the node. */
+      freeAllocations: z.number().int().nonnegative(),
+    }),
+  ),
+});
+export type PlacementPreviewResponse = z.infer<typeof PlacementPreviewResponse>;
+
+/**
+ * Subuser permission updates are relative to the granter: permissions the granter does not hold are
+ * left as they are (they may be kept or removed only by someone holding them); requesting a new
+ * permission the granter does not hold → 403. Effective = (old ∖ granterHeld) ∪ (requested ∩ granterHeld).
+ */
 export const ServerSubuser = z.object({
   id: Id,
   serverId: Id,

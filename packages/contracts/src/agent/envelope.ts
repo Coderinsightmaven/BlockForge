@@ -217,6 +217,9 @@ export const SftpActivityEvent = z.object({
  * Username format `<username>.<serverShortId>`. Password auth is refused for users with MFA enabled
  * (SSH keys only). The control plane rate-limits per (clientIp, username) and per node.
  */
+/** `<username>.<serverShortId>` — checked by the agent before calling the control plane. */
+export const SFTP_USERNAME_PATTERN = /^[a-z0-9][a-z0-9_-]{2,31}\.[0-9a-f]{8}$/;
+
 export const SftpAuthRequest = z.discriminatedUnion("method", [
   z.object({
     method: z.literal("password"),

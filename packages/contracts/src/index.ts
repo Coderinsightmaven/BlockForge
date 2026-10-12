@@ -3,6 +3,7 @@ export * from "./permissions.js";
 export * from "./lifecycle.js";
 export * from "./events.js";
 export * from "./realtime.js";
+export * from "./denylist.js";
 
 export * from "./agent/facts.js";
 export * from "./agent/metrics.js";

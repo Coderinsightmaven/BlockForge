@@ -142,7 +142,9 @@ approves a pending node: `approved` flips to `true`). Agents must apply the new 
 * `WorkloadStatus.state` is `restarting` while an agent-side restart (restart policy back-off) is pending.
 * `containerId` is Docker's 12-character short id.
 * `node.probe` returns `reachable: true` with `error` set when TCP connects but the Minecraft SLP exchange fails.
-* `agent.warning` events use codes such as `WORKLOAD_RESTART_LIMIT` (restart policy exhausted).
+* `agent.warning` event codes: `WORKLOAD_RESTART_LIMIT` (restart policy exhausted), `CLOCK_SKEW` (agent clock
+  > 15 s off the control plane), `SFTP_UNAVAILABLE` (SFTP listener could not start), `INSTALL_OWNERSHIP` (ownership
+  restore after a killed install failed).
 * `fs.transfer.pull` verifies an optional `X-BlockForge-Sha256` response header from the control plane.
 * `workload.state` events are re-sent after every (re)connect/resync — consumers must be idempotent.
 * After an agent restart, a replayed command id found in the journal is rejected as `COMMAND_REJECTED`
@@ -229,25 +231,38 @@ audit details) or logged.
 **Egg runtime (`entrypoint: "image"`).** The agent keeps the image's ENTRYPOINT/CMD, mounts the data dir at
 `dataMountPath` (`/home/container` for eggs), sets `WorkingDir` and `HOME` to it, and passes `env` (incl.
 `STARTUP`, `SERVER_MEMORY` in MiB, `SERVER_IP`, `SERVER_PORT`, `P_SERVER_UUID`, `TZ`). `readOnlyRootfs: false`
-is allowed for images that need it. `stop` is either a console command or a signal; `null` = SIGTERM.
+is allowed for images that need it. Image-entrypoint workloads run with Docker's init (tini) as PID 1 so
+signals reach the game process; signal-stopped processes exit with 128 + signal.
+
+**Stop escalation (all workloads).** Deliver `stop` (console command, or signal), wait `stopTimeoutMs`,
+then SIGTERM, then SIGKILL after 15 s. A `SIGKILL` stop is immediate. If the stop action cannot be
+delivered (e.g. stdin detached), SIGTERM is sent with the full timeout. `null` = SIGTERM then SIGKILL.
 
 **Install containers (`workload.install`).** Image from the allowlist; script written to a read-only
 `/mnt/install/install.sh`; data dir at `/mnt/server`; runs as root with caps `CHOWN, DAC_OVERRIDE, FOWNER,
 SETUID, SETGID` only, `no-new-privileges`, memory/CPU/pids limits, bridge network (outbound), no Docker
 socket, not privileged. A wrapper runs the script and then `chown -R <uid>:<gid> /mnt/server` (also on
-failure). Output streams as `logs` frames with `source: "install"`; result carries exit code and log tail.
-Timeout kills the container. The workload must be stopped (otherwise `BUSY`).
+failure). The install container's image filesystem is writable (install scripts `apt`/`apk` packages) and it
+uses the default bridge network. Output streams as `logs` frames with `source: "install"`; result carries
+exit code and log tail. A timeout or OOM kill skips the wrapper, so the agent runs a short follow-up
+container to restore ownership (`agent.warning` `INSTALL_OWNERSHIP` if that fails). The workload must be
+stopped (otherwise `BUSY`); start/remove are `BUSY` during an install. Install containers are labelled with
+the node id; agent start-up only cleans up its own.
 
 **Artifact cache.** `artifact.fetch` with a checksum and `cache: true` stores files under
-`<dataRoot>/cache/artifacts/<algorithm>/<value>` (verified once) and hard-links (or copies across
-filesystems) into the sandbox. LRU eviction above a configurable size (default 10 GiB).
+`<dataRoot>/cache/artifacts/<algorithm>/<value>` (re-verified on every hit) and **copies** it into the
+sandbox. Hard links are deliberately not used: egg install scripts commonly overwrite files in place
+(`curl -o server.jar`), which would corrupt the shared cache entry for every server. LRU eviction above a
+configurable size (default 10 GiB); concurrent fetches of the same artifact share one download.
 
 **SFTP service.** The agent serves SFTP on a configurable port (default 2022) with an Ed25519 host key
 generated on first start (fingerprint reported in `NodeFacts.sftp`). Login: username
 `<username>.<serverShortId>` + password or public key, verified by `POST /agent/v1/sftp/auth` (no
 local credential store). Sessions are chrooted to the workload data dir through the same `os.Root`
-sandbox as `fs.*`, enforce `permissions` (`read`/`write`) and `denylist`, refuse symlink creation, and
-re-authenticate after `expiresAt`. Mutations are reported as `sftp.activity` events (batched ≤ 1 s).
+sandbox as `fs.*`, enforce `permissions` (`read`/`write`) and `denylist` (semantics: `packages/contracts/src/denylist.ts`,
+shared fixture `fixtures/denylist.json`), refuse symlink/hardlink creation, owner and size changes, shell/exec/port
+forwarding (setstat may change permission bits and timestamps — clients such as WinSCP/FileZilla set mtimes after
+uploads), and re-authenticate after `expiresAt`. Usernames must match `SFTP_USERNAME_PATTERN`. Mutations are reported as `sftp.activity` events (batched ≤ 1 s).
 Limits: 10 concurrent sessions per user per server, 3 failed logins per IP per minute, idle timeout 10 min.
 
 Container hardening applied by the agent regardless of spec: run as UID/GID 1000 (or the

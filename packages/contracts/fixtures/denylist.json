@@ -1,0 +1,64 @@
+{
+  "_comment": "Shared fileDenylist fixtures: packages/contracts/src/denylist.ts and services/node-agent/internal/sftpd/denylist.go must both pass every set.",
+  "sets": [
+    {
+      "patterns": ["# comment", "", "*.secret", "/config/private/", "plugins/**/token.yml", "logs", "!logs/keep.log", "\\windows\\style"],
+      "cases": {
+        "forwarding.secret": true,
+        "a/b/c.secret": true,
+        "secret": false,
+        "config/private": true,
+        "config/private/x/y": true,
+        "other/config/private": false,
+        "plugins/a/token.yml": true,
+        "plugins/a/b/token.yml": true,
+        "plugins/token.yml": true,
+        "token.yml": false,
+        "logs": true,
+        "logs/latest.log": true,
+        "world/logs/x": true,
+        "logs/keep.log": false,
+        "windows/style": true,
+        "server.properties": false,
+        ".": false,
+        "": false,
+        "config": false,
+        "plugins/a/token.yml.bak": false,
+        "plugins/x.secret/inner.txt": true
+      }
+    },
+    {
+      "patterns": ["server-?.jar", "[a-c]*.key", "[^x]y.dat", "/root\\*star", "/../escape/../kept"],
+      "cases": {
+        "server-1.jar": true,
+        "server-12.jar": false,
+        "dir/server-a.jar": true,
+        "alpha.key": true,
+        "delta.key": false,
+        "ay.dat": true,
+        "xy.dat": false,
+        "root*star": false,
+        "root/backslash-is-a-separator-star": true,
+        "rootXstar": false,
+        "kept": true,
+        "escape": false
+      }
+    },
+    {
+      "patterns": ["[invalid", "bad\\", "[]x]", "[a-]", "**"],
+      "cases": {
+        "[invalid": true,
+        "anything/at/all": true
+      }
+    },
+    {
+      "patterns": ["[invalid", "bad\\", "[]x]", "[a-]"],
+      "cases": {
+        "[invalid": false,
+        "bad\\": false,
+        "x": false,
+        "a": false
+      }
+    }
+  ]
+}

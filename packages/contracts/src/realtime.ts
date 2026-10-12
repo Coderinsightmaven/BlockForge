@@ -74,7 +74,8 @@ export const REALTIME_EVENT_PAYLOADS = {
   "overview.updated": OverviewSummary,
   "node.updated": Node,
   "node.metrics": z.object({ nodeId: z.uuid(), sample: NodeMetricSample }),
-  "server.updated": Server,
+  /** Per-user fields (`myPermissions`, `sftp`) are not broadcast; clients keep their REST values. */
+  "server.updated": Server.omit({ myPermissions: true, sftp: true }),
   "server.metrics": z.object({ serverId: z.uuid(), sample: WorkloadMetricSample }),
   "console.lines": ConsoleLinesEvent,
   "job.updated": Job,

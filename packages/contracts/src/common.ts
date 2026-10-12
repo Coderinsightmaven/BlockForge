@@ -34,6 +34,10 @@ export const ApiErrorCode = z.enum([
   "SETUP_REQUIRED",
   "SETUP_ALREADY_COMPLETED",
   "ENROLLMENT_TOKEN_INVALID",
+  /** File manager: path matches the template's fileDenylist (non-administrators). */
+  "PATH_DENIED",
+  /** File manager: the file was served redacted and cannot be saved back. */
+  "REDACTED_CONTENT",
   "NODE_UNAVAILABLE",
   "CAPACITY_EXCEEDED",
   "INVALID_STATE",

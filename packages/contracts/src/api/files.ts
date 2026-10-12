@@ -49,6 +49,16 @@ export const FileChmodRequest = z.object({
     .min(1)
     .max(100),
 });
+/**
+ * Responses: rename/delete/mkdir/chmod → 204; copy → `FileCopyResponse`; compress/decompress →
+ * `FileArchiveResponse` (synchronous) or 202 `{ jobId }` when the control plane runs them as jobs.
+ * Errors: `PATH_DENIED` (fileDenylist), `REDACTED_CONTENT` (saving a redacted file),
+ * `CONFLICT` (baseSha256 mismatch on write).
+ */
+export const FileCopyResponse = z.object({ path: z.string() });
+export const FileArchiveResponse = z.object({ path: z.string(), size: Bytes, entries: z.number().int() });
+export const FileJobResponse = z.object({ jobId: z.uuid() });
+
 export const FileSearchQuery = z.object({
   path: RelativePath.default(""),
   q: z.string().min(1).max(64),
@@ -59,6 +69,8 @@ export const FileSearchResponse = z.object({ matches: z.array(FileEntry), trunca
 /**
  * Uploads and downloads stream through the control plane without buffering: the browser asks for a
  * short-lived single-use URL (`/api/v1/transfers/:token`, valid 5 min), then PUTs or GETs the body.
+ * The unguessable single-use token bound to the session is the authorisation; the CSRF header is
+ * accepted but not required on `PUT /transfers/:token`.
  */
 export const UploadUrlRequest = z.object({
   directory: RelativePath.default(""),
