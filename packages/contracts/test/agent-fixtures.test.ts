@@ -67,6 +67,8 @@ describe("agent protocol fixtures", () => {
     ["cmd-reject-root-delete.json", "invalid-payload"],
     ["cmd-reject-reversed-timestamps.json", "lifetime"],
     ["cmd-credentials-rotate.json", "ok"],
+    ["cmd-workload-ensure-egg.json", "ok"],
+    ["cmd-workload-install.json", "ok"],
   ])("%s → %s", (file, expected) => {
     expect(verifyCommand(load(file), keys.now)).toBe(expected);
   });

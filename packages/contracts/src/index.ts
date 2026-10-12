@@ -14,3 +14,6 @@ export * from "./api/identity.js";
 export * from "./api/nodes.js";
 export * from "./api/servers.js";
 export * from "./api/operations.js";
+export * from "./api/templates.js";
+export * from "./api/allocations.js";
+export * from "./api/files.js";

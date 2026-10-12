@@ -36,6 +36,13 @@ export const JavaRuntimeFact = z.object({
   ref: z.string(),
 });
 
+export const SftpFact = z.object({
+  /** Listening port of the agent's built-in SFTP server. */
+  port: z.number().int().min(1).max(65535),
+  /** OpenSSH-style `SHA256:<base64>` fingerprint of the host key. */
+  hostKeyFingerprint: z.string(),
+});
+
 export const NodeFacts = z.object({
   hostname: z.string(),
   os: z.string(),
@@ -55,5 +62,7 @@ export const NodeFacts = z.object({
   filesystems: z.array(FilesystemFact),
   containerRuntime: ContainerRuntimeFact.nullable(),
   javaRuntimes: z.array(JavaRuntimeFact).default([]),
+  /** null when the SFTP service is disabled on this node. */
+  sftp: SftpFact.nullable().default(null),
 });
 export type NodeFacts = z.infer<typeof NodeFacts>;

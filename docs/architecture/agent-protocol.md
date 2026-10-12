@@ -192,6 +192,9 @@ paths, NUL bytes, Windows drive letters and device names) and refuses anything o
 | `backup.create` | Phase 6 | |
 | `backup.restore` | Phase 6 | |
 | `credentials.rotate` | `{}` — staged rotation, see §3.1 | `{publicKey, proof}` |
+| `workload.install` | install container, see above | `{exitCode, durationMs, timedOut, logTail}` |
+| `node.ports` | `{}` | `{tcp: number[], udp: number[]}` listening on the host |
+| `fs.copy` · `fs.compress` · `fs.chmod` · `fs.find` | see `commands.ts` | |
 
 `WorkloadSpec` (see `packages/contracts/src/agent/workload.ts`):
 
@@ -209,7 +212,10 @@ paths, NUL bytes, Windows drive letters and device names) and refuses anything o
 ```
 
 **Image authorisation** is enforced by the agent, never by schema validation: the image must
-match an entry of the agent's own `imageAllowlist` (config file, default `eclipse-temurin:*`).
+match an entry of the agent's own `imageAllowlist` (config file). Defaults: `eclipse-temurin:*`,
+`ghcr.io/pterodactyl/yolks:*`, `ghcr.io/pterodactyl/installers:*`, `ghcr.io/parkervcp/yolks:*`,
+`ghcr.io/parkervcp/installers:*` (the images community eggs use). Operators add more entries by editing
+the agent config; the control plane cannot change the allowlist.
 Matching: an entry `repo:*` matches any tag (not digest) of exactly `repo`; an entry without
 `*` must match the full reference exactly; Docker Hub short names are normalised
 (`eclipse-temurin` ≡ `docker.io/library/eclipse-temurin`). Registries with ports are not
@@ -219,6 +225,30 @@ supported in v1.
 secrets (`fs.write.content`, `workload.ensure.env`, `artifact.fetch.url` query/fragment).
 `redactCommandPayload()` is applied before anything is persisted (`agent_commands`, job input,
 audit details) or logged.
+
+**Egg runtime (`entrypoint: "image"`).** The agent keeps the image's ENTRYPOINT/CMD, mounts the data dir at
+`dataMountPath` (`/home/container` for eggs), sets `WorkingDir` and `HOME` to it, and passes `env` (incl.
+`STARTUP`, `SERVER_MEMORY` in MiB, `SERVER_IP`, `SERVER_PORT`, `P_SERVER_UUID`, `TZ`). `readOnlyRootfs: false`
+is allowed for images that need it. `stop` is either a console command or a signal; `null` = SIGTERM.
+
+**Install containers (`workload.install`).** Image from the allowlist; script written to a read-only
+`/mnt/install/install.sh`; data dir at `/mnt/server`; runs as root with caps `CHOWN, DAC_OVERRIDE, FOWNER,
+SETUID, SETGID` only, `no-new-privileges`, memory/CPU/pids limits, bridge network (outbound), no Docker
+socket, not privileged. A wrapper runs the script and then `chown -R <uid>:<gid> /mnt/server` (also on
+failure). Output streams as `logs` frames with `source: "install"`; result carries exit code and log tail.
+Timeout kills the container. The workload must be stopped (otherwise `BUSY`).
+
+**Artifact cache.** `artifact.fetch` with a checksum and `cache: true` stores files under
+`<dataRoot>/cache/artifacts/<algorithm>/<value>` (verified once) and hard-links (or copies across
+filesystems) into the sandbox. LRU eviction above a configurable size (default 10 GiB).
+
+**SFTP service.** The agent serves SFTP on a configurable port (default 2022) with an Ed25519 host key
+generated on first start (fingerprint reported in `NodeFacts.sftp`). Login: username
+`<username>.<serverShortId>` + password or public key, verified by `POST /agent/v1/sftp/auth` (no
+local credential store). Sessions are chrooted to the workload data dir through the same `os.Root`
+sandbox as `fs.*`, enforce `permissions` (`read`/`write`) and `denylist`, refuse symlink creation, and
+re-authenticate after `expiresAt`. Mutations are reported as `sftp.activity` events (batched ≤ 1 s).
+Limits: 10 concurrent sessions per user per server, 3 failed logins per IP per minute, idle timeout 10 min.
 
 Container hardening applied by the agent regardless of spec: run as UID/GID 1000 (or the
 configured unprivileged ID), `no-new-privileges`, drop all capabilities, read-only image

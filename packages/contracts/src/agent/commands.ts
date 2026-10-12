@@ -31,6 +31,11 @@ export type Checksum = z.infer<typeof Checksum>;
 /** The complete command catalogue: payload and result schema per command type. */
 export const AGENT_COMMANDS = {
   "node.facts": { payload: Empty, result: NodeFacts },
+  /** Ports currently listening on the host (best effort; used to warn about allocation conflicts). */
+  "node.ports": {
+    payload: Empty,
+    result: z.object({ tcp: z.array(Port), udp: z.array(Port) }),
+  },
   "node.probe": {
     payload: z.object({
       host: z.string().min(1).max(253),
@@ -48,6 +53,31 @@ export const AGENT_COMMANDS = {
   "workload.ensure": {
     payload: WorkloadSpec,
     result: z.object({ created: z.boolean(), changed: z.boolean(), status: WorkloadStatus }),
+  },
+  /**
+   * One-shot install container (egg install scripts). Runs `<entrypoint> /mnt/install/install.sh` with the
+   * workload data dir at `/mnt/server`, as root with a minimal capability set (CHOWN, DAC_OVERRIDE, FOWNER,
+   * SETUID, SETGID), no-new-privileges, resource limits and outbound network. Afterwards the agent chowns
+   * `/mnt/server` to the workload UID/GID. Output streams as `logs` frames with `source: "install"`.
+   * Only one install or workload container per workload at a time (`BUSY`).
+   */
+  "workload.install": {
+    payload: WorkloadRef.extend({
+      image: z.string().min(1).max(255),
+      entrypoint: z.enum(["bash", "ash", "sh"]),
+      script: z.string().max(64 * 1024),
+      env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(16 * 1024)).default({}),
+      memoryLimitBytes: Bytes.min(128 * 1024 * 1024),
+      cpuLimitMillicores: z.number().int().min(100).nullable(),
+      timeoutMs: z.number().int().min(60_000).max(3 * 3600_000).default(30 * 60_000),
+    }),
+    result: z.object({
+      exitCode: z.number().int(),
+      durationMs: z.number().int().nonnegative(),
+      timedOut: z.boolean(),
+      /** Last ≤ 200 output lines (untrusted). */
+      logTail: z.array(z.string()),
+    }),
   },
   "workload.start": { payload: WorkloadRef, result: WorkloadStatus },
   "workload.stop": {
@@ -103,6 +133,36 @@ export const AGENT_COMMANDS = {
   "fs.mkdir": { payload: WorkloadRef.extend({ path: MutableRelativePath }), result: Empty },
   "fs.rename": { payload: WorkloadRef.extend({ from: MutableRelativePath, to: MutableRelativePath }), result: Empty },
   "fs.delete": { payload: WorkloadRef.extend({ path: MutableRelativePath, recursive: z.boolean() }), result: Empty },
+  /** Copies a file or directory next to itself ("name copy.ext", "name copy 2.ext", …). */
+  "fs.copy": {
+    payload: WorkloadRef.extend({ path: MutableRelativePath }),
+    result: z.object({ path: z.string() }),
+  },
+  "fs.compress": {
+    payload: WorkloadRef.extend({
+      root: RelativePath,
+      paths: z.array(MutableRelativePath).min(1).max(1000),
+      format: z.enum(["tar.gz", "zip"]),
+      /** Archive path; default = `<root>/archive-<UTC timestamp>.<ext>`. Must not exist. */
+      destPath: MutableRelativePath.optional(),
+      maxTotalBytes: Bytes.max(64 * 1024 ** 3),
+    }),
+    result: z.object({ path: z.string(), size: Bytes, entries: z.number().int() }),
+  },
+  /** Permission bits only (0–0777); setuid/setgid/sticky are never set. Symlinks are refused. */
+  "fs.chmod": {
+    payload: WorkloadRef.extend({ path: MutableRelativePath, mode: z.number().int().min(0).max(0o777) }),
+    result: Empty,
+  },
+  /** Case-insensitive substring match on file/dir names below `path` (no regex), bounded walk. */
+  "fs.find": {
+    payload: WorkloadRef.extend({
+      path: RelativePath,
+      query: z.string().min(1).max(64),
+      maxResults: z.number().int().min(1).max(500).default(100),
+    }),
+    result: z.object({ matches: z.array(FileEntry), truncated: z.boolean() }),
+  },
   "fs.du": {
     payload: WorkloadRef.extend({
       path: RelativePath,
@@ -138,8 +198,13 @@ export const AGENT_COMMANDS = {
       destPath: MutableRelativePath,
       checksum: Checksum.nullable(),
       maxBytes: Bytes.max(2 * 1024 ** 3),
+      /**
+       * Use/populate the node's content-addressed artifact cache (`<dataRoot>/cache/artifacts`). Only
+       * applies when `checksum` is set; the file is hard-linked (or copied) into the sandbox.
+       */
+      cache: z.boolean().default(true),
     }),
-    result: z.object({ bytes: Bytes, sha256: z.string() }),
+    result: z.object({ bytes: Bytes, sha256: z.string(), cached: z.boolean().default(false) }),
   },
   /**
    * Staged rotation: the agent keeps its current key, generates a next key, and proves possession by
@@ -168,6 +233,7 @@ export const ROTATION_PROOF_PREFIX = "blockforge-rotate:";
 export const COMMAND_REDACTIONS: Partial<Record<AgentCommandType, readonly string[]>> = {
   "fs.write": ["content"],
   "workload.ensure": ["env"],
+  "workload.install": ["env", "script"],
   "artifact.fetch": ["url"],
 };
 export const SENSITIVE_COMMANDS = Object.keys(COMMAND_REDACTIONS) as AgentCommandType[];

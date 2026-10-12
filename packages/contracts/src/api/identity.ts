@@ -6,11 +6,18 @@ export const Email = z.email().max(254).transform((e) => e.toLowerCase());
 /** Password policy: length over composition rules (NIST 800-63B). */
 export const Password = z.string().min(12, "Use at least 12 characters").max(256);
 export const TotpCode = z.string().regex(/^\d{6}$/);
+/** Login-independent handle used in SFTP usernames (`<username>.<serverShortId>`) and subuser lookup. */
+export const Username = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{2,31}$/, "3–32 lowercase letters, digits, '-' or '_'")
+  .transform((u) => u.toLowerCase());
 
 export const SetupStatus = z.object({ setupRequired: z.boolean() });
 export const SetupRequest = z.object({
   setupToken: z.string().min(16).max(128),
   email: Email,
+  /** Derived from the email's local part when omitted. */
+  username: Username.optional(),
   displayName: DisplayName,
   password: Password,
 });
@@ -31,6 +38,7 @@ export type RoleBinding = z.infer<typeof RoleBinding>;
 export const User = z.object({
   id: Id,
   email: z.string(),
+  username: z.string(),
   displayName: z.string(),
   status: z.enum(["active", "disabled"]),
   mfaEnabled: z.boolean(),
@@ -62,17 +70,35 @@ export const MfaEnrollConfirm = z.object({ code: TotpCode });
 
 export const CreateUserRequest = z.object({
   email: Email,
+  username: Username,
   displayName: DisplayName,
   password: Password,
   roles: z.array(z.object({ roleKey: z.string(), scopeType: ScopeType, scopeId: Id.nullable() })).default([]),
 });
 export const UpdateUserRequest = z.object({
   displayName: DisplayName.optional(),
+  username: Username.optional(),
   status: z.enum(["active", "disabled"]).optional(),
 });
 export const ResetPasswordRequest = z.object({ password: Password });
 export const ChangePasswordRequest = z.object({ currentPassword: z.string().min(1).max(256), newPassword: Password });
 export const AddRoleBindingRequest = z.object({ roleKey: z.string(), scopeType: ScopeType, scopeId: Id.nullable() });
+
+/** SSH public keys for SFTP (`/account/ssh-keys`). Only ed25519, ecdsa-sha2-nistp256/384/521 and rsa ≥ 3072 bits. */
+export const SshKey = z.object({
+  id: Id,
+  name: z.string(),
+  keyType: z.string(),
+  /** OpenSSH-style `SHA256:<base64>` fingerprint. */
+  fingerprint: z.string(),
+  createdAt: EpochMs,
+  lastUsedAt: EpochMs.nullable(),
+});
+export type SshKey = z.infer<typeof SshKey>;
+export const CreateSshKeyRequest = z.object({
+  name: z.string().trim().min(1).max(80),
+  publicKey: z.string().min(16).max(16 * 1024),
+});
 
 export const Role = z.object({
   id: Id,

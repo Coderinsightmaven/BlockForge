@@ -7,6 +7,10 @@ that implements/tests a requirement. Status keys:
 
 **Resume point:** see "Current focus" at the bottom.
 
+**Product direction (2026-10-12):** fast, modern Pterodactyl replacement — Minecraft-first, generic games via
+imported eggs, no panel migration, panel parity before Velocity networks. See `docs/product/pterodactyl-parity.md`
+(concept map + performance budgets). Phases 3–6 below were re-ordered accordingly.
+
 ## Phase 0 — Assessment & architecture
 - [x] Repository assessment (`docs/architecture/overview.md` §1)
 - [x] Architecture & module boundaries (`overview.md`)
@@ -17,8 +21,8 @@ that implements/tests a requirement. Status keys:
 - [x] Testing & review policy (`docs/development/workflow.md`)
 
 ## Phase 1 — Foundation
-- [ ] pnpm/turbo monorepo, TS strict, lint/format, vitest
-- [ ] docker compose: Postgres 17, VictoriaMetrics
+- [x] pnpm/turbo monorepo, TS strict, lint/format, vitest
+- [x] docker compose: Postgres 17, VictoriaMetrics — `infra/compose/docker-compose.dev.yml` (127.0.0.1:55432 / :58428)
 - [x] Control plane skeleton: config, pino logging w/ redaction, request IDs, error format, health endpoints, graceful shutdown — `apps/control-plane` (`buildApp` factory + `main.ts`); booted via `dev` and from `dist/`, `/healthz` + `/readyz` (DB, migrations, VictoriaMetrics) verified; shutdown closes agents with 1012 (integration test). SIGTERM handling itself only exercised through `app.close()` (Windows host).
 - [x] Drizzle schema + migrations (identity, nodes, servers, networks, jobs, audit, secrets, events) — all data-model.md tables incl. alerts/notifications, `agent_auth_jti`, `idempotency_keys`, `network_try_servers`/`forced_host_targets`; text+CHECK enums from contracts; advisory-locked migrator. `backups`/`backup_policies`/`schedules`/`schedule_runs` deferred to Phases 4/6 (no columns specified yet).
 - [x] First-run owner setup (one-time setup token)
@@ -29,8 +33,8 @@ that implements/tests a requirement. Status keys:
 - [x] Hash-chained audit log + API — advisory-locked single writer, redacted details, cursor pagination, `/audit/verify` with tamper detection; authz denials audited.
 - [x] Secrets encryption service — AES-256-GCM, HKDF subkeys, AAD per row, key versions.
 - [~] Web shell: layout, 15-section nav, theme (dark/light), global search, notifications, node-health indicator, quick actions, responsive — implemented (`apps/web/src/components/shell`); unit-tested: nav phase/permission gating, node-health summary, status mappings. Not yet exercised in a browser against a live control plane (responsive/keyboard behaviour unverified).
-- [~] Web: login/setup/MFA flows, typed API client, realtime client — API client (CSRF, request ids, idempotency key, ApiError, 401/MFA/setup redirects, CSRF retry), realtime client (ref-counted topics, backoff+jitter, resubscribe, heartbeat, invalidate-on-reconnect) and route guards (incl. router-level redirect test) are tested; setup/login/MFA forms implemented but not run against the real auth API yet.
-- [ ] CI workflow (lint, typecheck, test, build; Go vet/test)
+- [x] Web: login/setup/MFA flows, typed API client, realtime client — login + live realtime verified in a real browser against the running control plane (2026-10-12); MFA flow not yet exercised live. Unit-tested: API client (CSRF, request ids, idempotency key, ApiError, 401/MFA/setup redirects, CSRF retry), realtime client (ref-counted topics, backoff+jitter, resubscribe, heartbeat, invalidate-on-reconnect) and route guards (incl. router-level redirect test) are tested; setup/login/MFA forms implemented but not run against the real auth API yet.
+- [~] CI workflow (lint, typecheck, test, build; Go vet/test) — `.github/workflows/ci.yml` written; not yet run on GitHub (no remote).
 
 ## Phase 2 — Node agent & monitoring
 - [x] Agent: config, CLI (`enroll`, `run`, `version`), keypair, enrollment — `services/node-agent`; agent.json/agent.key 0600, insecure-http loopback-only rule, CA pinning, `init-dirs` helper. Verified against an in-process fake control plane implementing agent-protocol §3/§3.1 (`internal/agent`); interop with the real control plane not yet exercised.
@@ -45,37 +49,52 @@ that implements/tests a requirement. Status keys:
 - [x] Node connection state machine (online/degraded/unreachable/offline)
 - [x] Metrics ingest → VictoriaMetrics; latest cache; range query API with whitelisted series — verified against the real VictoriaMetrics (null-filled step grid, scoped `global.*`).
 - [x] Realtime gateway for UI (topics, authz, backpressure) — payloads validated against `REALTIME_EVENT_PAYLOADS` in tests; slow consumer → 4008.
-- [~] Web: Overview dashboard (global metrics, allocated vs actual, charts w/ time ranges incl. custom, gaps for missing data) — implemented; tested: allocated-vs-used rendering, null → "Not configured/tracked yet"/"No data", empty-nodes CTA, chart null→gap transform, time ranges. uPlot rendering and `overview`/`metrics/range` integration unverified until the API runs.
-- [~] Web: Nodes list/detail (facts, per-core CPU, memory, disks, IO, network, workloads) — list/detail/live tiles/history/settings/actions implemented; helpers tested (data-root filesystem, settings PATCH diff, tags, realtime payload parsing). Workloads per node wait for the servers API (Phase 3); not verified against a live agent.
+- [x] Web: Overview dashboard (global metrics, allocated vs actual, charts w/ time ranges incl. custom, gaps for missing data) — verified in a browser with real telemetry from the test node (2026-10-12). implemented; tested: allocated-vs-used rendering, null → "Not configured/tracked yet"/"No data", empty-nodes CTA, chart null→gap transform, time ranges. uPlot rendering and `overview`/`metrics/range` integration unverified until the API runs.
+- [x] Web: Nodes list/detail (facts, per-core CPU, memory, disks, IO, network, workloads) — verified in a browser with live metrics from the test node (2026-10-12); workloads list arrives with servers. list/detail/live tiles/history/settings/actions implemented; helpers tested (data-root filesystem, settings PATCH diff, tags, realtime payload parsing). Workloads per node wait for the servers API (Phase 3); not verified against a live agent.
 - [~] Web: node enrollment UI — token dialog (secret + install command shown once, copy, explicit close) and token list/revoke implemented; token-state logic tested; not exercised against the enrollment API yet.
 - [x] Basic alerts: node unreachable, CPU/memory/disk thresholds w/ duration, dedup/cooldown, ack/resolve — thresholds per `ALERT_RULE_KINDS` (disk = free % below), defaults seeded, job.failed alerts. `server.memory.high`/`server.heap.high`/`server.crashed` evaluation implemented but untested (needs Phase 3 servers/crash events).
 - [~] Notification adapters: Discord webhook, email (SMTP), generic webhook (SSRF-safe) — channel CRUD (URL stored as secret, never returned), SSRF guard and delivery/retry recording tested with an injected transport; the pinned HTTPS transport has not been run against a real endpoint, and email (nodemailer) is untested (no SMTP server in the dev stack).
 
-## Phase 3 — Server provisioning
+## Integration milestones
+- [x] Real Go agent ↔ real control plane: enrollment, signed commands, heartbeats, facts, metrics → VictoriaMetrics, overview/audit — on the user's test node `10.10.10.240` via SSH reverse tunnel (2026-10-12; `docs/development/test-node.md`).
+
+## Phase 3 — Panel core (Pterodactyl parity) + provisioning
+Contracts: `api/templates.ts`, `api/allocations.ts`, `api/servers.ts` (owner, subusers, startup, build), `api/files.ts`,
+agent `workload.install`, `fs.copy|compress|chmod|find`, `node.ports`, egg-style `WorkloadSpec`, SFTP auth (envelope.ts).
+- [ ] Templates: built-in `minecraft` + `velocity`; egg import (PTDL_v1/v2, PLCN_v1) with preview/issues, variable rules subset, config-file parsers, export
+- [ ] Allocations: node pools (ranges, alias, notes), port-in-use warnings (`node.ports`), primary + additional per server with limits
+- [ ] Server ownership + subusers (granular server permissions, no-escalation), client "my servers" dashboard
+- [ ] Usernames + SSH keys (account), SFTP server in agent with control-plane auth, MFA → keys only, activity events
+- [ ] Startup page: user-editable variables (rules), Docker image switch, resolved startup preview
 - [x] `packages/minecraft`: catalogue adapters — Vanilla (piston-meta), Paper/Folia/Velocity (Fill API v3), Purpur, Fabric, Forge, NeoForge; Java mapping; checksums; restrictions — fixture tests + live smoke test (all 8 adapters, 2026-10-12); Forge/NeoForge/Fabric/Paper install+launch argv run in containers up to the EULA gate. Purpur publishes MD5 only and the Fabric launcher no checksum (contract change requested); Spigot deliberately unsupported (BuildTools only).
 - [x] server.properties editor (preserve unknown keys/comments) + schema with descriptions/validation per version — byte-for-byte round-trip on files written by the real 26.3/1.21.8/1.20.3 jars; schema from 1.14→26.3 jars incl. the 1.21.9 move of pvp/allow-nether/enable-command-block to game rules (`packages/minecraft`).
 - [ ] Placement scheduler (capacity, health, maintenance, tags/affinity, hard vs soft) + override audit
 - [ ] Resource reservations
-- [ ] Provision job (17 stages) idempotent, resumable, observable
+- [ ] Provision job (17 stages) idempotent, resumable, observable — Minecraft (catalogue artifact + launch builder) and eggs (install container + config files + done string); reinstall
 - [x] Agent: workload.ensure/start/stop/kill/remove/status, hardened containers, restart policy, artifact.fetch w/ checksum + allowlist — Docker integration tests (hardening inspected on the engine, crash restart, limit, deliberate stop/kill, OOM, SIGTERM path, pull progress, re-attach, desired-state recovery, unmanaged-container safety) + Paper end-to-end through signed commands. Control-plane side (jobs/reconciler) not covered here.
 - [ ] Lifecycle state machine + operation locks + reconciler from agent workload events
 - [~] Readiness (log `Done (` + SLP) and crash detection — log parsers (readiness, crash/OOM/watchdog, Java class-version mismatch, port bind, EULA) done and tested in `packages/minecraft`; SLP + control-plane wiring pending.
 - [~] Console: live stream, send commands, search/filter, colours, pause/follow, reconnect, download — agent side done and tested (rate-limited `logs` frames, ring buffer + Docker fallback for `workload.logs.tail`, persistent stdin attach for `workload.console`); UI/control plane pending.
-- [ ] Server creation wizard (6 steps, simple/advanced)
-- [ ] Server management page (overview, controls, state, metrics, alerts)
+- [ ] Server creation wizard (template → placement/allocation → resources → variables/gameplay → review incl. artifact plan)
+- [ ] Server management page (overview, controls, state, metrics, alerts) + settings (rename, reinstall, SFTP details, suspend/build for admins)
 - [ ] Config editing w/ revisions, diff, rollback
+- [ ] Agent: egg runtime (image entrypoint + STARTUP, /home/container, signal stop), artifact cache, image allowlist defaults for yolks
+- [~] File manager (list/upload/download streaming/mkdir/rename/delete/edit/search/extract) w/ sandbox + redaction — agent side done and tested (`os.Root` sandbox, atomic `fs.write` + ifMatchSha256, extract with zip-slip/link/bomb defences, `fs.transfer.push/pull`); control plane/UI and redaction pending. Phase 3 adds copy/compress/chmod/find + streamed browser upload/download.
 
-## Phase 4 — Advanced server management
-- [~] File manager (list/upload/download streaming/mkdir/rename/delete/edit/search/extract) w/ sandbox + redaction — agent side done and tested (`os.Root` sandbox, atomic `fs.write` + ifMatchSha256, extract with zip-slip/link/bomb defences, `fs.transfer.push/pull`); control plane/UI and redaction pending.
+## Phase 4 — Automation, backups, API & Minecraft depth
+- [ ] Schedules (cron + sequential tasks: command/power/backup, offsets, only-when-online), execution history, retries
+- [ ] Backups: manual/scheduled, Minecraft-consistent (save-off/save-all), local + S3, locked backups, limits, restore with startup validation
+- [ ] API keys (user-scoped, permission subset, IP allowlist, Bearer auth, rate limits)
 - [ ] Worlds (create/upload/import/replace/export, sizes, seeds) w/ safe shutdown
 - [ ] Plugins/mods: Modrinth adapter, search/filter, install/update/remove/enable/disable, upload w/ policy, deps, history, rollback
 - [ ] Players: online list, join/leave events, whitelist/ban/kick/op, history, lookup, counts over time
-- [ ] Schedules: restarts/backups/updates/commands, cron + human readable, TZ, history, retries, concurrency, maintenance windows
-- [ ] Server templates/profiles
 - [ ] Software updates w/ rollback
 - [~] Java runtime management (images per major, per-server selection, JVM args presets, incompatibility diagnostics) — library done and tested (`packages/minecraft`: Temurin JRE image per major, override validation, default/aikar/none presets, forbidden JVM flags, UnsupportedClassVersionError detection); UI/control plane pending.
 
-## Phase 5 — Velocity & networks
+## Phase 5 — Databases & remaining parity
+- [ ] MySQL/MariaDB database hosts: create/rotate/delete per-server databases (Pterodactyl "Databases")
+
+## Phase 6 — Velocity & networks
 - [x] `packages/velocity`: velocity.toml targeted editor, servers/try/forced-hosts generation, forwarding compatibility matrix, backend forwarding config writers — tested on the real Velocity 4.2.0 default config; plus redaction, network validator, plan/diff/rollout order, secret generation. YAML fixtures are representative (Paper writes its configs only after EULA acceptance).
 - [ ] Network creation wizard (15 steps)
 - [ ] Proxy provisioning (Velocity builds via Fill API)
@@ -87,10 +106,8 @@ that implements/tests a requirement. Status keys:
 - [ ] Network ops: rolling restart, maintenance mode, drain, cross-server player counts
 - [ ] Real routing test with a headless client through Velocity (forced host → backend)
 
-## Phase 6 — Backups & DR
-- [ ] Backup jobs (world/full/config/extensions), consistency (save-off/save-all/flush or stop)
-- [ ] Local + S3-compatible destinations, compression, retention, verification
-- [ ] Restore with preview, integrity check, pre-restore recovery point, startup validation
+## Phase 6b — Disaster recovery
+- [ ] Backup verification, retention policies, pre-restore recovery point
 - [ ] Coordinated network backups
 - [ ] DR documentation with realistic RTO/RPO
 
@@ -107,7 +124,7 @@ that implements/tests a requirement. Status keys:
 - [~] Security test suite (traversal, zip-slip, injection, forged/replayed commands, secret leakage, cross-scope access) — agent side covered (traversal, symlink escape incl. symlinked parent, zip-slip, tar links/devices, zip/gzip bombs, FIFO, forged/expired/replayed/restart-replayed commands, root-path mutations, console line validation); control-plane parts pending.
 
 ## Phase 9 — Performance & production readiness
-- [ ] Load tests (API latency, telemetry ingest, WS fan-out, log streaming, job throughput)
+- [ ] Load tests (API latency, telemetry ingest, WS fan-out, log streaming, job throughput) against the budgets in `docs/product/pterodactyl-parity.md`
 - [ ] Control-plane restart / agent disconnect / interrupted job recovery tests
 - [ ] Multi-replica control plane (agent command routing via LISTEN/NOTIFY)
 - [ ] Deployment automation, upgrade/rollback docs
@@ -117,9 +134,14 @@ that implements/tests a requirement. Status keys:
 - [ ] Final docs set & known limitations
 
 ## Known limitations (kept honest)
+- Egg install scripts run as root *inside* a capability-reduced install container (Pterodactyl compatibility); templates are admin-only.
+- Egg startup strings are evaluated by the image's shell inside the container; user-editable variables are therefore operator-equivalent *within that server* (as in Pterodactyl).
 - Per-server storage quotas are soft (monitored + enforced by stopping/refusing writes) unless the node's filesystem supports XFS project quotas.
 - Tick performance (TPS/MSPT) requires Paper-family servers; reported via console sampling or a companion plugin (Phase 4).
 - Live migration is not offered; migration is offline (stop → transfer → start → reroute).
 
 ## Current focus
-Phase 1 foundation + Phase 2 agent, executed in parallel work areas (see `docs/development/workflow.md`).
+Phase 3 (panel core) in parallel work areas: control plane (templates, allocations, ownership/subusers, provisioning,
+lifecycle, console, files, SFTP auth), web (servers UI, wizard, client dashboard, file manager, admin templates/allocations),
+agent (egg runtime, install containers, SFTP, artifact cache, new fs ops), libraries (`packages/eggs`). Pending reviews:
+control plane (Grok), Minecraft/Velocity libraries (Codex).

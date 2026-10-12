@@ -29,8 +29,8 @@ export const SERVER_TRANSITIONS: Record<ServerState, readonly ServerState[]> = {
   running: ["stopping", "degraded", "crashed", "backing_up", "updating", "unreachable", "stopped"],
   degraded: ["running", "stopping", "crashed", "backing_up", "unreachable", "stopped"],
   stopping: ["stopped", "crashed", "unreachable"],
-  stopped: ["starting", "updating", "backing_up", "restoring", "migrating", "deleting", "unreachable", "running"],
-  crashed: ["starting", "stopped", "updating", "backing_up", "restoring", "migrating", "deleting", "unreachable"],
+  stopped: ["starting", "updating", "backing_up", "restoring", "migrating", "deleting", "unreachable", "running", "provisioning"],
+  crashed: ["starting", "stopped", "updating", "backing_up", "restoring", "migrating", "deleting", "unreachable", "provisioning"],
   updating: ["stopped", "starting", "crashed", "unreachable"],
   backing_up: ["running", "degraded", "stopped", "crashed", "unreachable"],
   restoring: ["stopped", "starting", "crashed", "unreachable"],
@@ -57,6 +57,7 @@ export const TRANSITIONAL_STATES: readonly ServerState[] = [
 
 export const ServerOperation = z.enum([
   "provision",
+  "reinstall",
   "start",
   "stop",
   "restart",
@@ -72,6 +73,8 @@ export type ServerOperation = z.infer<typeof ServerOperation>;
 /** Source states from which a user-initiated operation may begin. */
 export const OPERATION_ALLOWED_FROM: Record<ServerOperation, readonly ServerState[]> = {
   provision: ["provision_failed"],
+  /** Re-runs the install step (egg install script / artifact download) and config generation. */
+  reinstall: ["stopped", "crashed", "provision_failed"],
   start: ["stopped", "crashed"],
   stop: ["starting", "running", "degraded"],
   restart: ["running", "degraded", "crashed"],

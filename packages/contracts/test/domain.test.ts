@@ -1,7 +1,14 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   AGENT_COMMANDS,
   CreateServerRequest,
+  expandPortList,
+  isValidWorkloadSpec,
+  PortList,
+  SERVER_OWNER_PERMISSIONS,
+  SERVER_SCOPED_PERMISSIONS,
   MutableRelativePath,
   NodeMetricSample,
   redactCommandPayload,
@@ -102,23 +109,51 @@ describe("CreateServerRequest", () => {
   const base = {
     name: "Lobby",
     slug: "lobby",
+    templateId: "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c",
     placement: { mode: "auto" },
-    software: "paper",
-    minecraftVersion: "1.21.8",
     memoryLimitBytes: 4 * 1024 ** 3,
-    acceptEula: true,
   } as const;
-  it("accepts a consistent game server", () => {
-    expect(CreateServerRequest.safeParse(base).success).toBe(true);
+  const mc = { software: "paper", version: "1.21.8", acceptEula: true } as const;
+  it("accepts a Minecraft server and an egg server", () => {
+    expect(CreateServerRequest.safeParse({ ...base, minecraft: mc }).success).toBe(true);
+    expect(CreateServerRequest.safeParse({ ...base, egg: { variables: { SAVE_NAME: "world" } } }).success).toBe(true);
   });
-  it("rejects kind/software mismatches and heap ≥ limit", () => {
-    expect(CreateServerRequest.safeParse({ ...base, kind: "proxy" }).success).toBe(false);
-    expect(CreateServerRequest.safeParse({ ...base, software: "velocity" }).success).toBe(false);
-    expect(CreateServerRequest.safeParse({ ...base, software: "velocity", kind: "proxy" }).success).toBe(true);
-    expect(CreateServerRequest.safeParse({ ...base, heapMaxBytes: 4 * 1024 ** 3 }).success).toBe(false);
+  it("requires exactly one of minecraft/egg", () => {
+    expect(CreateServerRequest.safeParse(base).success).toBe(false);
+    expect(CreateServerRequest.safeParse({ ...base, minecraft: mc, egg: {} }).success).toBe(false);
+  });
+  it("requires EULA for game servers but not Velocity, and heap < limit", () => {
+    expect(CreateServerRequest.safeParse({ ...base, minecraft: { ...mc, acceptEula: false } }).success).toBe(false);
+    expect(CreateServerRequest.safeParse({ ...base, minecraft: { software: "velocity", version: "3.4.0" } }).success).toBe(true);
+    expect(CreateServerRequest.safeParse({ ...base, minecraft: { ...mc, heapMaxBytes: 4 * 1024 ** 3 } }).success).toBe(false);
   });
   it("moderators cannot send raw console commands", () => {
     expect(BUILTIN_ROLES.moderator.permissions as readonly string[]).not.toContain("servers.console.send");
+  });
+});
+
+describe("server ownership permissions", () => {
+  it("owners get server-scoped permissions but not delete/admin/secrets", () => {
+    for (const p of SERVER_OWNER_PERMISSIONS) expect(SERVER_SCOPED_PERMISSIONS).toContain(p);
+    for (const p of ["servers.delete", "servers.admin", "secrets.read", "templates.manage"]) {
+      expect(SERVER_OWNER_PERMISSIONS as readonly string[]).not.toContain(p);
+    }
+    expect(SERVER_OWNER_PERMISSIONS).toContain("servers.files.sftp");
+  });
+});
+
+describe("egg workloads and allocations", () => {
+  it("image-entrypoint workloads may have an empty command; argv workloads may not", () => {
+    const spec = AGENT_COMMANDS["workload.ensure"].payload.parse(
+      JSON.parse(JSON.parse(readFileSync(join(import.meta.dirname, "..", "fixtures", "agent", "cmd-workload-ensure-egg.json"), "utf8")).body).payload,
+    );
+    expect(isValidWorkloadSpec(spec)).toBe(true);
+    expect(isValidWorkloadSpec({ ...spec, entrypoint: "argv" })).toBe(false);
+  });
+  it("expands port lists", () => {
+    expect(expandPortList("25570-25572, 25580")).toEqual([25570, 25571, 25572, 25580]);
+    expect(() => expandPortList("1-2000")).toThrow();
+    expect(PortList.safeParse("25565;rm").success).toBe(false);
   });
 });
 

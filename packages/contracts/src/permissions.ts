@@ -23,6 +23,13 @@ export const PERMISSIONS = {
   "nodes.view": ["global", "node"],
   "nodes.manage": ["global", "node"],
   "nodes.enroll": ["global"],
+  /** Create/delete/alias the IP:port allocation pools of nodes. */
+  "allocations.manage": ["global", "node"],
+
+  /** Server templates (built-in Minecraft templates and imported eggs). */
+  "templates.view": ["global"],
+  /** Import/edit/delete templates. Install scripts run as root inside install containers: admin-only. */
+  "templates.manage": ["global"],
 
   "networks.view": ["global", "network"],
   "networks.create": ["global"],
@@ -30,6 +37,8 @@ export const PERMISSIONS = {
 
   "servers.view": ["global", "node", "network", "server"],
   "servers.create": ["global", "node", "network"],
+  /** Administrative server settings: resource limits, owner, suspension, template change. */
+  "servers.admin": ["global", "node", "network"],
   "servers.delete": ["global", "node", "network", "server"],
   "servers.control": ["global", "node", "network", "server"],
   "servers.console.view": ["global", "node", "network", "server"],
@@ -45,6 +54,23 @@ export const PERMISSIONS = {
   "servers.backups.view": ["global", "node", "network", "server"],
   "servers.backups.create": ["global", "node", "network", "server"],
   "servers.backups.restore": ["global", "node", "network", "server"],
+  "servers.backups.delete": ["global", "node", "network", "server"],
+  "servers.backups.download": ["global", "node", "network", "server"],
+  /** Log in to the server's files over SFTP (read access additionally needs files.read, writes files.write). */
+  "servers.files.sftp": ["global", "node", "network", "server"],
+  "servers.startup.view": ["global", "node", "network", "server"],
+  /** Edit user-editable startup variables (values reach the container's startup shell — operator-equivalent inside the container). */
+  "servers.startup.edit": ["global", "node", "network", "server"],
+  /** Switch between the Docker images the template offers. */
+  "servers.startup.image": ["global", "node", "network", "server"],
+  "servers.allocations.view": ["global", "node", "network", "server"],
+  "servers.allocations.manage": ["global", "node", "network", "server"],
+  "servers.subusers.view": ["global", "node", "network", "server"],
+  "servers.subusers.manage": ["global", "node", "network", "server"],
+  "servers.settings.edit": ["global", "node", "network", "server"],
+  "servers.reinstall": ["global", "node", "network", "server"],
+  "servers.activity.view": ["global", "node", "network", "server"],
+  "schedules.view": ["global", "node", "network", "server"],
   "schedules.manage": ["global", "node", "network", "server"],
 } as const satisfies Record<string, readonly ScopeType[]>;
 
@@ -72,6 +98,7 @@ export const BUILTIN_ROLES = {
       ...viewPermissions,
       "nodes.manage",
       "nodes.enroll",
+      "allocations.manage",
       "alerts.manage",
       "servers.control",
       "servers.console.view",
@@ -95,6 +122,15 @@ export const BUILTIN_ROLES = {
       "servers.players.manage",
       "servers.backups.create",
       "servers.backups.restore",
+      "servers.backups.delete",
+      "servers.backups.download",
+      "servers.files.sftp",
+      "servers.startup.edit",
+      "servers.startup.image",
+      "servers.allocations.manage",
+      "servers.subusers.manage",
+      "servers.settings.edit",
+      "servers.reinstall",
       "schedules.manage",
       "alerts.manage",
     ],
@@ -121,6 +157,20 @@ export const BUILTIN_ROLES = {
       "servers.backups.view",
       "servers.backups.create",
       "servers.backups.restore",
+      "servers.backups.delete",
+      "servers.backups.download",
+      "servers.files.sftp",
+      "servers.startup.view",
+      "servers.startup.edit",
+      "servers.startup.image",
+      "servers.allocations.view",
+      "servers.allocations.manage",
+      "servers.subusers.view",
+      "servers.subusers.manage",
+      "servers.settings.edit",
+      "servers.reinstall",
+      "servers.activity.view",
+      "schedules.view",
       "schedules.manage",
     ],
   },
@@ -146,6 +196,25 @@ export const BUILTIN_ROLES = {
 export type BuiltinRoleKey = keyof typeof BUILTIN_ROLES;
 /** Roles only an Owner may grant or revoke. */
 export const PRIVILEGED_ROLES: readonly BuiltinRoleKey[] = ["owner", "admin"];
+
+/** Permissions that can be held on a single server (owner/subuser/server-scoped role bindings). */
+export const SERVER_SCOPED_PERMISSIONS = ALL_PERMISSIONS.filter((p) =>
+  (PERMISSIONS[p] as readonly ScopeType[]).includes("server"),
+);
+
+/**
+ * What a server's owner holds on that server (Pterodactyl-style ownership). Deleting a server, changing
+ * its limits/owner/suspension and reading platform secrets stay with administrators.
+ */
+export const SERVER_OWNER_PERMISSIONS: readonly Permission[] = SERVER_SCOPED_PERMISSIONS.filter(
+  (p) => !["servers.delete", "secrets.read", "secrets.manage", "alerts.manage"].includes(p),
+);
+
+/**
+ * Permissions an owner (or a subuser holding `servers.subusers.manage`) may grant to a subuser. A granter
+ * can only grant permissions it holds itself on that server (enforced by the control plane).
+ */
+export const SUBUSER_ASSIGNABLE_PERMISSIONS: readonly Permission[] = SERVER_OWNER_PERMISSIONS;
 
 /** True if a permission may be granted at the given scope type. */
 export function permissionAllowsScope(permission: Permission, scope: ScopeType): boolean {

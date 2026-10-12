@@ -100,29 +100,89 @@ fresh key per user action and reuses it on automatic retries.
 | GET | `/jobs/:id/logs` | `?afterId=` → `JobLogLine[]` | jobs.view on target |
 | POST | `/jobs/:id/cancel` | → `Job` | same as the permission that started it |
 
+## Authorisation on servers (Phase 3)
+Effective permissions of a user on a server = union of (a) role bindings at global / the server's node /
+its network / the server itself, (b) `SERVER_OWNER_PERMISSIONS` if the user owns it, (c) the subuser
+permission set if they are a subuser. Suspended servers: only holders of `servers.admin` may act on them
+(view stays allowed). `Server.myPermissions` reports the effective set.
+
+## Templates & catalogue (Phase 3)
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/templates` | → `TemplateSummary[]` | templates.view, or servers.create at any scope |
+| GET | `/templates/:id` | → `Template` | templates.view |
+| POST | `/templates/import/preview` | `ImportTemplateRequest` → `TemplateImportPreview` | templates.manage |
+| POST | `/templates/import` | `ImportTemplateRequest` → `{template: Template, issues}` (201) | templates.manage |
+| PATCH | `/templates/:id` | `UpdateTemplateRequest` → `Template` (built-ins: only name/description/category) | templates.manage |
+| DELETE | `/templates/:id` | → 204 (only imported templates with no servers) | templates.manage |
+| GET | `/templates/:id/export` | → egg JSON (PTDL_v2) | templates.manage |
+| GET | `/catalog/software` | → `SoftwareInfo[]` | servers.create (any scope) or servers.view |
+| GET | `/catalog/software/:software/versions` | → `SoftwareVersion[]` | same |
+| GET | `/catalog/software/:software/versions/:version/builds` | → `SoftwareBuild[]` | same |
+| GET | `/catalog/software/:software/versions/:version/builds/:build/plan` | `build` may be `latest` → `ArtifactPlan` | same |
+
+## Allocations (Phase 3)
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/nodes/:id/allocations` | `AllocationListQuery` → `Page<Allocation>` | nodes.view |
+| POST | `/nodes/:id/allocations` | `CreateAllocationsRequest` → `CreateAllocationsResponse` | allocations.manage |
+| PATCH | `/allocations/:id` | `UpdateAllocationRequest` → `Allocation` | allocations.manage |
+| DELETE | `/allocations/:id` | → 204 (unassigned only) | allocations.manage |
+| GET | `/servers/:id/allocations` | → `Allocation[]` | servers.allocations.view |
+| POST | `/servers/:id/allocations` | → `ServerAllocationChangeResponse` (assigns a free allocation on the server's node, ≤ allocationLimit) | servers.allocations.manage |
+| PATCH | `/servers/:id/allocations/:allocationId` | `UpdateServerAllocationRequest` → `ServerAllocationChangeResponse` | servers.allocations.manage |
+| DELETE | `/servers/:id/allocations/:allocationId` | → `{restartRequired}` (not the primary) | servers.allocations.manage |
+
 ## Servers (Phase 3)
 | Method | Path | Body → Response | Permission |
 |--------|------|-----------------|------------|
-| GET | `/catalog/software` | → `SoftwareInfo[]` | servers.view |
-| GET | `/catalog/software/:software/versions` | → `SoftwareVersion[]` | servers.view |
-| GET | `/catalog/software/:software/versions/:version/builds` | → `SoftwareBuild[]` | servers.view |
-| GET | `/servers` | `ServerListQuery` → `Page<Server>` | servers.view (filtered) |
-| POST | `/servers/placement-preview` | `CreateServerRequest` (partial) → `{candidates:[{nodeId, nodeName, fits, reasons[], score}]}` | servers.create |
-| POST | `/servers` | `CreateServerRequest` → `{server: Server, jobId}` (202) | servers.create on node/network |
+| GET | `/servers` | `ServerListQuery` → `Page<Server>` (`filter=mine` = owned + subuser) | servers.view (filtered per server) |
+| POST | `/servers/placement-preview` | `CreateServerBase` (partial) → `{candidates:[{nodeId, nodeName, fits, reasons[], score, freeAllocations}]}` | servers.create |
+| POST | `/servers` | `CreateServerRequest` → `{server: Server, jobId}` (202, idempotent) | servers.create on node/network (+ servers.admin for another owner) |
 | GET | `/servers/:id` | → `Server` | servers.view |
-| PATCH | `/servers/:id` | limits/startup/restart policy → `Server` | servers.config.edit |
+| PATCH | `/servers/:id` | `UpdateServerSettingsRequest` → `Server` | servers.settings.edit |
+| PATCH | `/servers/:id/build` | `UpdateServerBuildRequest` → `{server, restartRequired}` | servers.admin |
+| POST | `/servers/:id/suspend` · `/unsuspend` | → `Server` (suspend stops the server) | servers.admin |
+| POST | `/servers/:id/reinstall` | → `{jobId}` (idempotent; stopped/crashed/provision_failed only) | servers.reinstall |
 | DELETE | `/servers/:id` | `?deleteData=true` → `{jobId}` | servers.delete |
 | POST | `/servers/:id/actions` | `ServerActionRequest` → `{jobId}` | servers.control |
 | POST | `/servers/:id/console` | `ConsoleCommandRequest` → 204 | servers.console.send |
 | GET | `/servers/:id/console/history` | `?lines=` → `ConsoleLinesEvent` | servers.console.view |
+| GET | `/servers/:id/startup` | → `ServerStartup` | servers.startup.view |
+| PUT | `/servers/:id/startup/variables` | `UpdateStartupVariableRequest` → `ServerStartup` (editable vars only, rules enforced) | servers.startup.edit |
+| PUT | `/servers/:id/startup/image` | `UpdateDockerImageRequest` → `ServerStartup` (template images only) | servers.startup.image |
+| GET | `/servers/:id/subusers` | → `ServerSubuser[]` | servers.subusers.view |
+| POST | `/servers/:id/subusers` | `AddSubuserRequest` → `ServerSubuser` | servers.subusers.manage (grants ⊆ own) |
+| PUT | `/servers/:id/subusers/:subuserId` | `UpdateSubuserRequest` → `ServerSubuser` | servers.subusers.manage (grants ⊆ own) |
+| DELETE | `/servers/:id/subusers/:subuserId` | → 204 | servers.subusers.manage |
+| GET | `/servers/:id/activity` | `AuditQuery` → `Page<AuditEvent>` (this server only) | servers.activity.view |
 | GET | `/servers/:id/config/:file` | `file ∈ {server.properties, …}` → `{content, sha256, revisionId}` | servers.config.view |
 | PUT | `/servers/:id/config/:file` | `{content, baseSha256}` → `{revisionId, sha256, restartRequired}` | servers.config.edit |
 | GET | `/servers/:id/config/:file/revisions` | → revisions | servers.config.view |
 | POST | `/servers/:id/config/:file/revisions/:rev/rollback` | → `{revisionId}` | servers.config.edit |
 
+## Files (Phase 3) — see `api/files.ts`
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/servers/:id/files/list` | `FileListQuery` → `FileListResponse` | servers.files.read |
+| GET | `/servers/:id/files/contents` | `FileContentQuery` → `FileContentResponse` | servers.files.read |
+| PUT | `/servers/:id/files/contents` | `FileWriteRequest` → `{sha256, size}` | servers.files.write |
+| POST | `/servers/:id/files/rename` · `/delete` · `/copy` · `/mkdir` · `/compress` · `/decompress` · `/chmod` | see schemas | servers.files.write |
+| GET | `/servers/:id/files/search` | `FileSearchQuery` → `FileSearchResponse` | servers.files.read |
+| POST | `/servers/:id/files/upload-url` | `UploadUrlRequest` → `TransferUrlResponse` | servers.files.write |
+| GET | `/servers/:id/files/download-url` | `DownloadUrlQuery` → `TransferUrlResponse` | servers.files.read |
+| PUT · GET | `/transfers/:token` | raw body stream / file stream (single use, 5 min, session-bound) | token |
+
+## Account (Phase 3)
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/account/ssh-keys` | → `SshKey[]` | session |
+| POST | `/account/ssh-keys` | `CreateSshKeyRequest` → `SshKey` | session |
+| DELETE | `/account/ssh-keys/:id` | → 204 | session |
+
 ## Agent endpoints (agent auth, not cookie auth)
-`POST /agent/v1/enroll`, `GET /agent/v1/connect` (WS), `POST|GET /agent/v1/transfers/:id`
-— see `agent-protocol.md`.
+`POST /agent/v1/enroll`, `GET /agent/v1/connect` (WS), `POST|GET /agent/v1/transfers/:id`,
+`POST /agent/v1/sftp/auth` (`SftpAuthRequest` → `SftpAuthResponse` | 401) — see `agent-protocol.md`.
 
 ## Realtime
 `GET /api/v1/realtime` → WebSocket. Cookie-authenticated; `Origin` must match the configured

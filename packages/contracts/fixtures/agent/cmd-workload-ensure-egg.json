@@ -1,0 +1,5 @@
+{
+  "t": "cmd",
+  "body": "{\"id\":\"00000000-0000-4000-8000-00000000000c\",\"nodeId\":\"6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c\",\"type\":\"workload.ensure\",\"issuedAt\":1760000000000,\"expiresAt\":1760000300000,\"payload\":{\"workloadId\":\"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\",\"kind\":\"generic\",\"image\":\"ghcr.io/pterodactyl/yolks:debian\",\"entrypoint\":\"image\",\"command\":[],\"env\":{\"STARTUP\":\"./bin/x64/factorio --start-server {{SAVE_NAME}}.zip\",\"SAVE_NAME\":\"gamesave\",\"SERVER_PORT\":\"34197\",\"TZ\":\"UTC\"},\"memoryLimitBytes\":2147483648,\"cpuLimitMillicores\":null,\"pidsLimit\":4096,\"ports\":[{\"containerPort\":34197,\"hostPort\":34197,\"hostIp\":\"0.0.0.0\",\"protocol\":\"tcp\"},{\"containerPort\":34197,\"hostPort\":34197,\"hostIp\":\"0.0.0.0\",\"protocol\":\"udp\"}],\"networks\":[],\"dataMountPath\":\"/home/container\",\"readOnlyRootfs\":true,\"stop\":{\"type\":\"signal\",\"signal\":\"SIGINT\"},\"stopTimeoutMs\":60000,\"restartPolicy\":{\"mode\":\"on-failure\",\"maxRetries\":3,\"backoffMs\":10000},\"jvmProbe\":false,\"labels\":{}}}",
+  "sig": "6iXLXXsDz554YteJOplLELDrRdMzwoWq57WLYD_uvSCiZqrRIVo-U9TH-AuVeysaxSLZ4ExSAdhGPZMYcicwBQ"
+}

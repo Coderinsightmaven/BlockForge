@@ -144,7 +144,7 @@ export const MetricsFrame = z.object({
   node: NodeMetricSample,
   workloads: z.array(WorkloadMetricSample),
 });
-export const AgentEventName = z.enum(["workload.state", "workload.oom", "agent.warning"]);
+export const AgentEventName = z.enum(["workload.state", "workload.oom", "agent.warning", "sftp.activity"]);
 export const EventFrame = z.object({
   t: z.literal("event"),
   ts: EpochMs,
@@ -154,6 +154,8 @@ export const EventFrame = z.object({
 export const LogsFrame = z.object({
   t: z.literal("logs"),
   workloadId: z.uuid(),
+  /** `install`: output of a `workload.install` container. */
+  source: z.enum(["workload", "install"]).default("workload"),
   lines: z.array(LogLine).max(5000),
   dropped: z.number().int().nonnegative().optional(),
 });
@@ -179,3 +181,59 @@ export type EventFrame = z.infer<typeof EventFrame>;
 export const WorkloadStateEvent = WorkloadStatus;
 export const WorkloadOomEvent = z.object({ workloadId: z.uuid() });
 export const AgentWarningEvent = z.object({ code: z.string(), message: z.string() });
+
+/** Batched SFTP mutations for the server activity log (reads are not reported). */
+export const SftpActivityEvent = z.object({
+  workloadId: z.uuid(),
+  userId: z.uuid(),
+  sessionId: z.string().max(64),
+  clientIp: z.string().max(64),
+  actions: z
+    .array(
+      z.object({
+        action: z.enum(["upload", "write", "delete", "rename", "mkdir", "chmod"]),
+        path: z.string().max(1024),
+        to: z.string().max(1024).optional(),
+        ts: EpochMs,
+      }),
+    )
+    .min(1)
+    .max(100),
+});
+
+// ---------------------------------------------------------------------------
+// SFTP login (agent → control plane, `POST /agent/v1/sftp/auth`, agent-authenticated)
+
+/**
+ * Username format `<username>.<serverShortId>`. Password auth is refused for users with MFA enabled
+ * (SSH keys only). The control plane rate-limits per (clientIp, username) and per node.
+ */
+export const SftpAuthRequest = z.discriminatedUnion("method", [
+  z.object({
+    method: z.literal("password"),
+    username: z.string().min(3).max(128),
+    password: z.string().min(1).max(1024),
+    clientIp: z.string().max(64),
+    sessionId: z.string().max(64),
+  }),
+  z.object({
+    method: z.literal("publickey"),
+    username: z.string().min(3).max(128),
+    /** authorized_keys-format line ("ssh-ed25519 AAAA…"). */
+    publicKey: z.string().min(16).max(16 * 1024),
+    clientIp: z.string().max(64),
+    sessionId: z.string().max(64),
+  }),
+]);
+export type SftpAuthRequest = z.infer<typeof SftpAuthRequest>;
+export const SftpAuthResponse = z.object({
+  workloadId: z.uuid(),
+  userId: z.uuid(),
+  /** `read` ← servers.files.read, `write` ← servers.files.write (create/modify/delete/rename). */
+  permissions: z.array(z.enum(["read", "write"])),
+  /** Paths (template `fileDenylist`) the session may not read or modify. */
+  denylist: z.array(z.string()),
+  /** The agent re-validates after this time by re-authenticating long sessions. */
+  expiresAt: EpochMs,
+});
+export type SftpAuthResponse = z.infer<typeof SftpAuthResponse>;

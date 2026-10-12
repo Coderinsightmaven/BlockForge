@@ -3,6 +3,8 @@ import { Bytes, DisplayName, EpochMs, Id, Port, Slug } from "../common.js";
 import { WorkloadMetricSample } from "../agent/metrics.js";
 import { RestartPolicy } from "../agent/workload.js";
 import { DesiredState, ServerOperation, ServerState } from "../lifecycle.js";
+import { PermissionSchema } from "../permissions.js";
+import { EnvVarName, TemplateGame, TemplateKind } from "./templates.js";
 
 export const ServerSoftware = z.enum([
   "vanilla",
@@ -20,28 +22,52 @@ export type ServerSoftware = z.infer<typeof ServerSoftware>;
 export const ServerKind = z.enum(["game", "proxy"]);
 export type ServerKind = z.infer<typeof ServerKind>;
 
+export const ServerAllocationRef = z.object({
+  id: Id,
+  ip: z.string(),
+  port: Port,
+  alias: z.string().nullable(),
+  primary: z.boolean(),
+});
+
 export const Server = z.object({
   id: Id,
+  /** First 8 hex chars of `id`; used in SFTP usernames (`<username>.<shortId>`). */
+  shortId: z.string().regex(/^[0-9a-f]{8}$/),
   name: z.string(),
   slug: z.string(),
+  description: z.string(),
   kind: ServerKind,
+  ownerId: Id,
+  ownerName: z.string(),
+  templateId: Id,
+  templateName: z.string(),
+  templateKind: TemplateKind,
+  game: TemplateGame,
   nodeId: Id,
   nodeName: z.string(),
   networkId: Id.nullable(),
-  software: ServerSoftware,
-  minecraftVersion: z.string(),
+  /** Minecraft fields: null for egg-based servers. */
+  software: ServerSoftware.nullable(),
+  minecraftVersion: z.string().nullable(),
   build: z.string().nullable(),
   javaMajor: z.number().int().nullable(),
+  heapMaxBytes: Bytes.nullable(),
+  dockerImage: z.string(),
   state: ServerState,
   desiredState: DesiredState,
   activeOperation: ServerOperation.nullable(),
   activeJobId: Id.nullable(),
+  /** Suspended servers cannot be started or accessed by non-administrators. */
+  suspended: z.boolean(),
   memoryLimitBytes: Bytes,
-  heapMaxBytes: Bytes,
   cpuLimitMillicores: z.number().int().nullable(),
   storageQuotaBytes: Bytes.nullable(),
-  port: Port,
-  hostIp: z.string(),
+  /** Max additional allocations (besides the primary) the server's users may assign. */
+  allocationLimit: z.number().int().nonnegative(),
+  backupLimit: z.number().int().nonnegative(),
+  allocations: z.array(ServerAllocationRef),
+  /** Connection address for players: primary allocation alias (or node public address, or ip) + port. */
   address: z.string().nullable(),
   startup: z.enum(["manual", "auto"]),
   restartPolicy: RestartPolicy,
@@ -52,6 +78,18 @@ export const Server = z.object({
   lastExitCode: z.number().int().nullable(),
   createdAt: EpochMs,
   latest: WorkloadMetricSample.nullable(),
+  /** The requesting user's effective permissions on this server (UI gating; the API enforces anyway). */
+  myPermissions: z.array(PermissionSchema),
+  /** Present when the requesting user holds `servers.files.sftp` and the node runs the SFTP service. */
+  sftp: z
+    .object({
+      host: z.string(),
+      port: Port,
+      username: z.string(),
+      /** OpenSSH-style `SHA256:…` fingerprint of the node's SFTP host key. */
+      hostKeyFingerprint: z.string(),
+    })
+    .nullable(),
 });
 export type Server = z.infer<typeof Server>;
 
@@ -61,6 +99,10 @@ export const ServerListQuery = z.object({
   nodeId: Id.optional(),
   networkId: Id.optional(),
   state: ServerState.optional(),
+  ownerId: Id.optional(),
+  templateId: Id.optional(),
+  /** `mine` = servers the user owns or is a subuser of (the client dashboard). */
+  filter: z.enum(["all", "mine"]).default("all"),
   q: z.string().max(80).optional(),
 });
 
@@ -94,37 +136,20 @@ export const PROXY_SOFTWARE: readonly ServerSoftware[] = ["velocity"];
 export const softwareKind = (software: ServerSoftware): ServerKind =>
   PROXY_SOFTWARE.includes(software) ? "proxy" : "game";
 
-/** Unrefined shape (use for `.partial()`/`.pick()`); validate requests with `CreateServerRequest`. */
-export const CreateServerBase = z.object({
-  name: DisplayName,
-  slug: Slug,
-  kind: ServerKind.default("game"),
-  placement: z.discriminatedUnion("mode", [
-    z.object({ mode: z.literal("node"), nodeId: Id }),
-    z.object({ mode: z.literal("auto"), preferTags: z.array(z.string()).default([]), location: z.string().optional() }),
-  ]),
-  /** Admin override of capacity policy (requires nodes.manage on the target node; audited). */
-  overrideCapacity: z.boolean().default(false),
-  networkId: Id.nullable().default(null),
+/** Options for built-in `minecraft` / `velocity` templates. */
+export const MinecraftOptions = z.object({
   software: ServerSoftware,
-  minecraftVersion: z.string().min(1).max(32),
+  /** Minecraft version (Velocity: the proxy version). */
+  version: z.string().min(1).max(32),
   /** Build identifier from the catalogue; null = latest stable. */
   build: z.string().max(64).nullable().default(null),
-  memoryLimitBytes: Bytes.min(512 * 1024 * 1024),
+  javaMajor: z.number().int().min(8).max(40).nullable().default(null),
   /** Heap max; defaults to ~80% of the container limit. */
   heapMaxBytes: Bytes.optional(),
-  cpuLimitMillicores: z.number().int().min(250).nullable().default(null),
-  storageQuotaBytes: Bytes.nullable().default(null),
-  port: Port.nullable().default(null),
-  hostIp: z.string().default("0.0.0.0"),
-  javaMajor: z.number().int().min(8).max(40).nullable().default(null),
   jvmArgs: z.array(z.string().max(512).regex(/^-[^\0\r\n]*$/)).max(64).default([]),
   jvmPreset: z.enum(["default", "aikar", "none"]).default("default"),
-  startup: z.enum(["manual", "auto"]).default("auto"),
-  restartPolicy: RestartPolicy.default({ mode: "on-failure", maxRetries: 3, backoffMs: 10_000 }),
-  timezone: z.string().max(64).default("UTC"),
-  location: z.string().max(80).nullable().default(null),
-  acceptEula: z.literal(true),
+  /** Required for game servers (Mojang EULA); ignored for Velocity. */
+  acceptEula: z.boolean().default(false),
   gameplay: GameplaySettings.default({}),
   world: z
     .discriminatedUnion("mode", [
@@ -133,15 +158,127 @@ export const CreateServerBase = z.object({
     ])
     .default({ mode: "generate" }),
 });
+export type MinecraftOptions = z.infer<typeof MinecraftOptions>;
+
+/** Options for `egg` templates. */
+export const EggOptions = z.object({
+  /** One of the template's images; default = the template's first image. */
+  dockerImage: z.string().max(255).optional(),
+  /** envName → value; omitted variables use the template default. Validated with the variable's rules. */
+  variables: z.record(EnvVarName, z.string().max(8192)).default({}),
+});
+export type EggOptions = z.infer<typeof EggOptions>;
+
+/** Unrefined shape (use for `.partial()`/`.pick()`); validate requests with `CreateServerRequest`. */
+export const CreateServerBase = z.object({
+  name: DisplayName,
+  slug: Slug,
+  description: z.string().max(1024).default(""),
+  /** Defaults to the requester. Creating a server for someone else requires `servers.admin`. */
+  ownerId: Id.optional(),
+  templateId: Id,
+  placement: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("node"), nodeId: Id }),
+    z.object({ mode: z.literal("auto"), preferTags: z.array(z.string()).default([]), location: z.string().optional() }),
+  ]),
+  /** Admin override of capacity policy (requires nodes.manage on the target node; audited). */
+  overrideCapacity: z.boolean().default(false),
+  networkId: Id.nullable().default(null),
+  /** Primary allocation: a specific free allocation on the target node, or the first free one. */
+  allocation: z
+    .discriminatedUnion("mode", [z.object({ mode: z.literal("auto") }), z.object({ mode: z.literal("specific"), allocationId: Id })])
+    .default({ mode: "auto" }),
+  memoryLimitBytes: Bytes.min(256 * 1024 * 1024),
+  cpuLimitMillicores: z.number().int().min(250).nullable().default(null),
+  storageQuotaBytes: Bytes.nullable().default(null),
+  allocationLimit: z.number().int().min(0).max(50).default(0),
+  backupLimit: z.number().int().min(0).max(100).default(3),
+  startup: z.enum(["manual", "auto"]).default("auto"),
+  restartPolicy: RestartPolicy.default({ mode: "on-failure", maxRetries: 3, backoffMs: 10_000 }),
+  timezone: z.string().max(64).default("UTC"),
+  location: z.string().max(80).nullable().default(null),
+  /** Exactly one of `minecraft` (built-in templates) or `egg` (imported templates) must be set. */
+  minecraft: MinecraftOptions.optional(),
+  egg: EggOptions.optional(),
+});
 export const CreateServerRequest = CreateServerBase.superRefine((req, ctx) => {
-  if (softwareKind(req.software) !== req.kind) {
-    ctx.addIssue({ code: "custom", path: ["kind"], message: `${req.software} requires kind "${softwareKind(req.software)}"` });
+  if ((req.minecraft === undefined) === (req.egg === undefined)) {
+    ctx.addIssue({ code: "custom", path: ["minecraft"], message: "set exactly one of `minecraft` or `egg`" });
   }
-  if (req.heapMaxBytes !== undefined && req.heapMaxBytes >= req.memoryLimitBytes) {
-    ctx.addIssue({ code: "custom", path: ["heapMaxBytes"], message: "heap must be smaller than the memory limit" });
+  const mc = req.minecraft;
+  if (mc?.heapMaxBytes !== undefined && mc.heapMaxBytes >= req.memoryLimitBytes) {
+    ctx.addIssue({ code: "custom", path: ["minecraft", "heapMaxBytes"], message: "heap must be smaller than the memory limit" });
+  }
+  if (mc && softwareKind(mc.software) === "game" && !mc.acceptEula) {
+    ctx.addIssue({ code: "custom", path: ["minecraft", "acceptEula"], message: "the Minecraft EULA must be accepted" });
   }
 });
 export type CreateServerRequest = z.infer<typeof CreateServerRequest>;
+
+// ---------------------------------------------------------------------------
+// Subusers, startup, settings
+
+export const ServerSubuser = z.object({
+  id: Id,
+  serverId: Id,
+  userId: Id,
+  username: z.string(),
+  email: z.string(),
+  permissions: z.array(PermissionSchema),
+  createdAt: EpochMs,
+});
+export type ServerSubuser = z.infer<typeof ServerSubuser>;
+export const AddSubuserRequest = z.object({
+  /** Email or username of an existing account. */
+  user: z.string().min(1).max(254),
+  permissions: z.array(PermissionSchema).min(1),
+});
+export const UpdateSubuserRequest = z.object({ permissions: z.array(PermissionSchema).min(1) });
+
+export const ServerStartup = z.object({
+  templateKind: TemplateKind,
+  dockerImages: z.array(z.object({ label: z.string(), image: z.string() })),
+  dockerImage: z.string(),
+  /** Template startup string with `{{VAR}}` placeholders (egg templates); null for built-ins. */
+  startupCommand: z.string().nullable(),
+  /** Startup with values substituted; non-viewable variable values are replaced by `••••`. */
+  resolvedStartup: z.string().nullable(),
+  variables: z.array(
+    z.object({
+      envName: EnvVarName,
+      name: z.string(),
+      description: z.string(),
+      /** null when the variable is not user-viewable and the requester is not an administrator. */
+      value: z.string().nullable(),
+      defaultValue: z.string(),
+      editable: z.boolean(),
+      rules: z.string(),
+    }),
+  ),
+  minecraft: MinecraftOptions.pick({ software: true, version: true, build: true, javaMajor: true, jvmArgs: true, jvmPreset: true })
+    .extend({ heapMaxBytes: Bytes })
+    .nullable(),
+});
+export type ServerStartup = z.infer<typeof ServerStartup>;
+export const UpdateStartupVariableRequest = z.object({ envName: EnvVarName, value: z.string().max(8192) });
+export const UpdateDockerImageRequest = z.object({ image: z.string().min(1).max(255) });
+
+/** `PATCH /servers/:id` (servers.settings.edit). */
+export const UpdateServerSettingsRequest = z.object({
+  name: DisplayName.optional(),
+  description: z.string().max(1024).optional(),
+});
+/** `PATCH /servers/:id/build` (servers.admin). Memory/CPU changes apply on next restart. */
+export const UpdateServerBuildRequest = z.object({
+  memoryLimitBytes: Bytes.min(256 * 1024 * 1024).optional(),
+  cpuLimitMillicores: z.number().int().min(250).nullable().optional(),
+  storageQuotaBytes: Bytes.nullable().optional(),
+  allocationLimit: z.number().int().min(0).max(50).optional(),
+  backupLimit: z.number().int().min(0).max(100).optional(),
+  ownerId: Id.optional(),
+  restartPolicy: RestartPolicy.optional(),
+  startup: z.enum(["manual", "auto"]).optional(),
+});
 
 export const ServerActionRequest = z.object({
   action: z.enum(["start", "stop", "restart", "kill"]),

@@ -112,7 +112,10 @@ write(
     pidsLimit: 4096,
     ports: [{ containerPort: 25565, hostPort: 25565, hostIp: "0.0.0.0", protocol: "tcp" }],
     networks: [{ name: "bf-net-main", aliases: ["lobby"] }],
-    stopCommand: "stop",
+    entrypoint: "argv",
+    dataMountPath: "/data",
+    readOnlyRootfs: true,
+    stop: { type: "command", command: "stop" },
     stopTimeoutMs: 60000,
     restartPolicy: { mode: "on-failure", maxRetries: 3, backoffMs: 10000 },
     jvmProbe: true,
@@ -203,6 +206,47 @@ const status = {
   containerId: "3f4e5d6c7b8a",
   specHash: "sha256:" + "b".repeat(64),
 };
+// Egg-style workload: image entrypoint evaluates STARTUP, data at /home/container, SIGINT stop.
+write(
+  "cmd-workload-ensure-egg.json",
+  cmd("00000000-0000-4000-8000-00000000000c", "workload.ensure", {
+    workloadId: WORKLOAD_ID,
+    kind: "generic",
+    image: "ghcr.io/pterodactyl/yolks:debian",
+    entrypoint: "image",
+    command: [],
+    env: { STARTUP: "./bin/x64/factorio --start-server {{SAVE_NAME}}.zip", SAVE_NAME: "gamesave", SERVER_PORT: "34197", TZ: "UTC" },
+    memoryLimitBytes: 2147483648,
+    cpuLimitMillicores: null,
+    pidsLimit: 4096,
+    ports: [
+      { containerPort: 34197, hostPort: 34197, hostIp: "0.0.0.0", protocol: "tcp" },
+      { containerPort: 34197, hostPort: 34197, hostIp: "0.0.0.0", protocol: "udp" },
+    ],
+    networks: [],
+    dataMountPath: "/home/container",
+    readOnlyRootfs: true,
+    stop: { type: "signal", signal: "SIGINT" },
+    stopTimeoutMs: 60000,
+    restartPolicy: { mode: "on-failure", maxRetries: 3, backoffMs: 10000 },
+    jvmProbe: false,
+    labels: {},
+  }),
+);
+write(
+  "cmd-workload-install.json",
+  cmd("00000000-0000-4000-8000-00000000000d", "workload.install", {
+    workloadId: WORKLOAD_ID,
+    image: "ghcr.io/pterodactyl/installers:debian",
+    entrypoint: "bash",
+    script: "#!/bin/bash\ncd /mnt/server\necho installed > marker.txt\n",
+    env: { SAVE_NAME: "gamesave" },
+    memoryLimitBytes: 1073741824,
+    cpuLimitMillicores: null,
+    timeoutMs: 1800000,
+  }),
+);
+
 write("hello.json", { t: "hello", agentVersion: "0.1.0", protocolVersion: 1, ts: T0, facts, capabilities: ["docker", "jvm-probe", "slp"], workloads: [status] });
 write("heartbeat.json", { t: "heartbeat", ts: T0, uptimeMs: 86400000 });
 write("progress.json", { t: "progress", id: "00000000-0000-4000-8000-000000000004", ts: T0, stage: "download", message: "42 MiB of 48 MiB", percent: 87.5 });

@@ -23,6 +23,10 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | `api_tokens` | `id, user_id CASCADE, name, token_hash unique, prefix, scopes jsonb, expires_at, last_used_at, revoked_at` | For integrations; permissions ⊆ owner's. |
 | `setup_state` | singleton row `id=1, completed_at, setup_token_hash` | First-run owner creation guarded by a one-time token printed to the control-plane log. |
 
+### Phase 3 additions (identity)
+* `users.username` text unique (`^[a-z0-9][a-z0-9_-]{2,31}$`; existing rows backfilled from the email local part with a numeric suffix on collision).
+* `user_ssh_keys`: `id, user_id → users CASCADE, name, key_type, public_key (authorized_keys line), fingerprint unique per user, created_at, last_used_at`.
+
 ## Infrastructure
 
 | Table | Key columns | Notes |
@@ -45,6 +49,16 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | `installed_extensions` | `id, server_id CASCADE, kind (plugin/mod/datapack), source (modrinth/upload/url), project_id, version_id, name, filename, sha256, enabled, installed_at, installed_by` | Phase 4. |
 | `extension_history` | `id, server_id CASCADE, action (install/update/remove/rollback/enable/disable), from_version, to_version, actor, at, job_id` | Phase 4. |
 | `worlds` | `id, server_id CASCADE, name, dimension_dirs text[], seed null, size_bytes, measured_at` | Phase 4. |
+
+### Phase 3 additions (servers)
+| Table | Key columns | Notes |
+|-------|-------------|-------|
+| `templates` | `id, key unique, name, description, category, kind (minecraft/velocity/egg), game, author, source (builtin/import), source_format, docker_images jsonb, startup text, config_files jsonb, startup_done jsonb, stop jsonb, install jsonb null, features text[], file_denylist text[], runtime jsonb, raw_import jsonb null, created_at, updated_at` | Built-ins seeded idempotently (`minecraft-java`, `velocity`). |
+| `template_variables` | `id, template_id → templates CASCADE, env_name, name, description, default_value, user_viewable, user_editable, rules, sort_order` unique(template_id, env_name) | |
+| `allocations` | `id, node_id → nodes CASCADE, ip inet, port int, alias, notes, server_id → servers SET NULL null, is_primary bool, created_at` unique(node_id, ip, port); partial unique(server_id) where is_primary | Deleting a node with allocations in use is blocked by the server FK on nodes. |
+| `server_variables` | `server_id → servers CASCADE, env_name, value` PK(server_id, env_name) | Values for egg variables (defaults not copied). |
+| `server_subusers` | `id, server_id → servers CASCADE, user_id → users CASCADE, permissions text[], created_by, created_at` unique(server_id, user_id) | |
+| `servers` (changes) | `+ owner_id → users RESTRICT, template_id → templates RESTRICT, description, docker_image, suspended bool, allocation_limit, backup_limit; software/minecraft_version/heap_max_bytes become nullable; port/host_ip replaced by the primary allocation` | Owner deletion requires transferring their servers first. |
 
 ## Networks (Velocity)
 
