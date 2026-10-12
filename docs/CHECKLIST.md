@@ -84,7 +84,7 @@ agent `workload.install`, `fs.copy|compress|chmod|find`, `node.ports`, egg-style
 ## Phase 4 — Automation, backups, API & Minecraft depth
 Contracts: `api/backups.ts`, `api/schedules.ts`, identity `ApiKey*`, agent `backup.create|upload|restore|delete|transfer.push` (+ golden fixtures).
 - [ ] Schedules (cron + sequential tasks: command/power/backup, offsets, only-when-online), execution history, retries
-- [ ] Backups: manual/scheduled, Minecraft-consistent (save-off/save-all), local + S3, locked backups, limits, restore with startup validation
+- [ ] Backups: manual/scheduled, Minecraft-consistent (save-off/save-all), local + S3, locked backups, limits, restore with startup validation — agent side done and tested (`internal/backup`: deterministic tar.gz with ignore files + `!`, skipped specials counted, maxBytes + free-disk reserve, presigned multipart upload with retries/ETags/no redirects/URL redaction, restore with sha256-before-touch + fs.extract rules + truncate after validation + permission bits/ownership, delete, transfer.push, BUSY claims; real Paper end-to-end through a fake S3). Control plane/UI pending.
 - [ ] API keys (user-scoped, permission subset, IP allowlist, Bearer auth, rate limits)
 - [ ] Worlds (create/upload/import/replace/export, sizes, seeds) w/ safe shutdown
 - [ ] Plugins/mods: Modrinth adapter, search/filter, install/update/remove/enable/disable, upload w/ policy, deps, history, rollback

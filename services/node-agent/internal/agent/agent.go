@@ -23,6 +23,7 @@ import (
 
 	"github.com/blockforge/node-agent/internal/artifact"
 	"github.com/blockforge/node-agent/internal/auth"
+	"github.com/blockforge/node-agent/internal/backup"
 	"github.com/blockforge/node-agent/internal/config"
 	"github.com/blockforge/node-agent/internal/facts"
 	"github.com/blockforge/node-agent/internal/fsops"
@@ -40,7 +41,7 @@ import (
 // Capabilities advertised in hello.
 var Capabilities = []string{"docker", "jvm-probe", "slp", "fs.sandbox", "fs.extract", "fs.transfer",
 	"artifact.fetch", "logs", "console", "restart-policy", "credentials.rotate.staged",
-	"egg-runtime", "workload.install", "artifact-cache", "node.ports", "fs.copy", "fs.compress", "fs.chmod", "fs.find", "sftp"}
+	"egg-runtime", "workload.install", "artifact-cache", "node.ports", "fs.copy", "fs.compress", "fs.chmod", "fs.find", "sftp", "backup"}
 
 // Agent is a running node agent.
 type Agent struct {
@@ -68,6 +69,7 @@ type Agent struct {
 	host      *metrics.HostSampler
 	wl        *metrics.WorkloadSampler
 	sftp      *sftpd.Server
+	backups   *backup.Manager
 	sftpErr   string
 
 	approved  atomic.Bool
@@ -76,6 +78,8 @@ type Agent struct {
 
 	// FetcherTransport overrides the artifact transport (tests).
 	FetcherTransport http.RoundTripper
+	// BackupTransport overrides the transport for presigned backup URLs (tests).
+	BackupTransport http.RoundTripper
 }
 
 // CPHTTPClient builds the control-plane HTTP client (TLS ≥ 1.2, optional pinned CA, HTTP/1.1 so the
@@ -310,6 +314,9 @@ func (a *Agent) Setup(ctx context.Context) error {
 		URL:    func(id string) string { return config.Endpoint(a.cpURL, "/agent/v1/transfers/"+id) },
 		Auth:   a.currentAuth,
 	}
+	a.backups = &backup.Manager{DataRoot: a.cfg.DataRoot, Sandbox: a.sandbox, Claims: a.driver,
+		FreeSpace: a.sandbox.FreeSpace, Reserve: a.cfg.BackupFreeReserveBytes, Transport: a.BackupTransport,
+		Transfers: a.transfers, Logger: a.log}
 	a.facts = &facts.Collector{DataRoot: a.cfg.DataRoot, ExcludeIfaces: a.cfg.NetIfaceExclude, Docker: a.driver.Client()}
 	if a.sftp != nil {
 		a.facts.SFTP = &protocol.SftpFact{Port: a.sftp.Port(), HostKeyFingerprint: a.sftp.Fingerprint()}
@@ -418,6 +425,12 @@ func commandTimeout(c *Command) time.Duration {
 		return 2 * time.Minute
 	case protocol.CmdNodePorts:
 		return 30 * time.Second
+	case protocol.CmdBackupCreate, protocol.CmdBackupUpload, protocol.CmdBackupRestore:
+		return 6 * time.Hour
+	case protocol.CmdBackupTransferPush:
+		return 2 * time.Hour
+	case protocol.CmdBackupDelete:
+		return time.Minute
 	}
 	switch c.Type {
 	case protocol.CmdWorkloadEnsure, protocol.CmdFsExtract, protocol.CmdArtifactFetch:

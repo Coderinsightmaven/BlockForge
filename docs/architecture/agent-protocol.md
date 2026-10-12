@@ -264,7 +264,7 @@ backoff) and returns the ETags; presigned URLs are not subject to the download h
 come from a signed command, but must be HTTPS and are never logged. `backup.restore` requires the workload
 to be stopped (`BUSY` otherwise), downloads URL sources to a temp file and verifies the sha256 before touching
 the data dir, then extracts with the `fs.extract` safety rules; `truncate` removes existing data first (except
-`.blockforge/`). `backup.delete` removes the local archive (idempotent). `backup.transfer.push` streams a
+`.blockforge/`). Files that change size while a live backup reads them are truncated/zero-padded to the size seen at open — consistency comes from the control plane's `save-off`/`save-all flush` (or stopping the server). One backup/install/restore per workload at a time (`BUSY`); removal is refused during a backup; `workload.remove` with `deleteData` never deletes `<dataRoot>/backups/<id>`. `backup.delete` removes the local archive (idempotent). `backup.transfer.push` streams a
 local archive to the control plane for browser download.
 
 **SFTP service.** The agent serves SFTP on a configurable port (default 2022) with an Ed25519 host key

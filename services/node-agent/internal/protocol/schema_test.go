@@ -78,9 +78,9 @@ func TestDefaults(t *testing.T) {
 	if err != nil || p.(*NodeProbePayload).TimeoutMs != 3000 {
 		t.Fatalf("probe default: %v %+v", err, p)
 	}
-	_, known, _ := ParsePayload("backup.create", []byte(`{}`))
+	_, known, _ := ParsePayload("workload.migrate", []byte(`{}`))
 	if known {
-		t.Fatal("backup.create must be unsupported in this agent")
+		t.Fatal("workload.migrate must be unsupported in this agent")
 	}
 }
 

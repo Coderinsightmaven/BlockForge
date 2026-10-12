@@ -70,6 +70,11 @@ func enrollAgent(t *testing.T, cp *fakeCP) (string, *config.Config) {
 }
 
 func startAgent(t *testing.T, cp *fakeCP, dir string) *harness {
+	return startAgentWith(t, cp, dir, nil)
+}
+
+// startAgentWith lets a test adjust the agent (e.g. inject transports) before it runs.
+func startAgentWith(t *testing.T, cp *fakeCP, dir string, tweak func(*Agent)) *harness {
 	cfg, err := config.Load(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +82,9 @@ func startAgent(t *testing.T, cp *fakeCP, dir string) *harness {
 	a, err := New(cfg, dir, quietLogger())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if tweak != nil {
+		tweak(a)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &harness{t: t, cp: cp, dir: dir, cfg: cfg, cancel: cancel, done: make(chan error, 1)}
@@ -195,7 +203,7 @@ func TestAgentEndToEndWithFakeControlPlane(t *testing.T) {
 		t.Fatalf("lifetime: %v", r)
 	}
 	// Unknown type → UNSUPPORTED_COMMAND.
-	unk := cp.signCmd(nextID(), "backup.create", map[string]any{}, now, time.Minute)
+	unk := cp.signCmd(nextID(), "workload.migrate", map[string]any{}, now, time.Minute)
 	cp.send(unk)
 	json.Unmarshal([]byte(unk.Body), &bodyID)
 	if r := cp.result(bodyID.ID, 10*time.Second); errCode(r) != "UNSUPPORTED_COMMAND" {

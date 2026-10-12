@@ -63,8 +63,8 @@ type wstate struct {
 	tracker        RestartTracker
 	timer          *time.Timer
 	pendingRestart bool
-	// installing is set while a workload.install container runs (start/remove/install answer BUSY).
-	installing   bool
+	// claims holds the exclusive operations in flight (install, restore, backup); see Claim.
+	claims       map[string]bool
 	followCID    string
 	followCancel context.CancelFunc
 
@@ -616,8 +616,8 @@ func (d *Driver) Start(ctx context.Context, id string) (protocol.WorkloadStatus,
 }
 
 func (d *Driver) startLocked(ctx context.Context, id string, manual bool) (protocol.WorkloadStatus, error) {
-	if d.isInstalling(id) {
-		return protocol.WorkloadStatus{}, protocol.RetryableErrorf(protocol.CodeBusy, "an install is running for this workload")
+	if what := d.claimed(id, ClaimInstall, ClaimRestore); what != "" {
+		return protocol.WorkloadStatus{}, protocol.RetryableErrorf(protocol.CodeBusy, "an operation (%s) is in progress for this workload", what)
 	}
 	spec, err := d.loadSpec(id)
 	if err != nil {
@@ -765,8 +765,8 @@ func (d *Driver) Remove(ctx context.Context, id string, deleteData bool) error {
 	w := d.state(id)
 	w.opMu.Lock()
 	defer w.opMu.Unlock()
-	if d.isInstalling(id) {
-		return protocol.RetryableErrorf(protocol.CodeBusy, "an install is running for this workload")
+	if what := d.claimed(id, ClaimInstall, ClaimRestore, ClaimBackup); what != "" {
+		return protocol.RetryableErrorf(protocol.CodeBusy, "an operation (%s) is in progress for this workload", what)
 	}
 	c, err := d.inspectManaged(ctx, id)
 	if err != nil {
@@ -1193,9 +1193,60 @@ func (d *Driver) pruneNetworks(ctx context.Context, names []string) {
 	}
 }
 
-func (d *Driver) isInstalling(id string) bool {
+// Exclusive per-workload operations.
+const (
+	ClaimInstall = "install"
+	ClaimRestore = "restore"
+	ClaimBackup  = "backup"
+)
+
+// Claim marks a workload busy with an exclusive operation and returns its release func.
+//   - install / restore: nothing else may be in flight and the workload container must be stopped
+//     (no pending policy restart either); start, remove and other claims answer BUSY meanwhile.
+//   - backup: may run next to a running server, but not during an install, restore or another
+//     backup; remove answers BUSY meanwhile.
+func (d *Driver) Claim(ctx context.Context, id, what string) (func(), error) {
+	w := d.state(id)
+	w.opMu.Lock()
+	defer w.opMu.Unlock()
+	w.mu.Lock()
+	for held := range w.claims {
+		w.mu.Unlock()
+		return nil, protocol.RetryableErrorf(protocol.CodeBusy, "another operation (%s) is in progress for this workload", held)
+	}
+	pending := w.pendingRestart
+	w.mu.Unlock()
+	if what != ClaimBackup {
+		c, err := d.inspectManaged(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if pending || (c != nil && c.State != nil && (c.State.Running || c.State.Restarting || c.State.Paused)) {
+			return nil, protocol.RetryableErrorf(protocol.CodeBusy, "the workload is running; stop it before the %s", what)
+		}
+	}
+	w.mu.Lock()
+	if w.claims == nil {
+		w.claims = map[string]bool{}
+	}
+	w.claims[what] = true
+	w.mu.Unlock()
+	return func() {
+		w.mu.Lock()
+		delete(w.claims, what)
+		w.mu.Unlock()
+	}, nil
+}
+
+// claimed returns the first of the given claims currently held ("" if none).
+func (d *Driver) claimed(id string, kinds ...string) string {
 	w := d.state(id)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.installing
+	for _, k := range kinds {
+		if w.claims[k] {
+			return k
+		}
+	}
+	return ""
 }

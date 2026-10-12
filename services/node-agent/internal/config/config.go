@@ -36,11 +36,32 @@ var DefaultImageAllowlist = []string{
 	"ghcr.io/pterodactyl/installers:*",
 	"ghcr.io/parkervcp/yolks:*",
 	"ghcr.io/parkervcp/installers:*",
+	"ghcr.io/parkervcp/steamcmd:*",
+	// parkervcp/eggs moved to pelican-eggs; current community eggs reference these images.
+	"ghcr.io/pelican-eggs/yolks:*",
+	"ghcr.io/pelican-eggs/installers:*",
+	"ghcr.io/pelican-eggs/steamcmd:*",
 }
 
-// legacyDefaultImageAllowlist is what agents ≤ 0.1.0 wrote into agent.json at enrollment. A config
-// still holding exactly this list is treated as "defaults" and upgraded on load.
-var legacyDefaultImageAllowlist = []string{"eclipse-temurin:*"}
+// previousDefaultImageAllowlists are the defaults earlier agents wrote into agent.json at enrollment.
+// A config still holding exactly one of them was never customised and is upgraded on load.
+var previousDefaultImageAllowlists = [][]string{
+	{"eclipse-temurin:*"}, // 0.1.0 (Phase 2)
+	{"eclipse-temurin:*", "ghcr.io/pterodactyl/yolks:*", "ghcr.io/pterodactyl/installers:*",
+		"ghcr.io/parkervcp/yolks:*", "ghcr.io/parkervcp/installers:*"}, // Phase 3
+}
+
+func isPreviousDefault(list []string) bool {
+	for _, d := range previousDefaultImageAllowlists {
+		if equalStrings(list, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultBackupFreeReserveBytes is kept free on the backup filesystem by backup.create/restore.
+const DefaultBackupFreeReserveBytes = 2 << 30
 
 // DefaultArtifactCacheMaxBytes caps <dataRoot>/cache/artifacts (LRU eviction above it).
 const DefaultArtifactCacheMaxBytes = 10 << 30
@@ -98,6 +119,8 @@ type Config struct {
 	MaxConcurrentCommands int   `json:"maxConcurrentCommands,omitempty"`
 
 	ArtifactCacheMaxBytes int64 `json:"artifactCacheMaxBytes,omitempty"`
+	// BackupFreeReserveBytes is kept free by backup.create/restore (default 2 GiB).
+	BackupFreeReserveBytes int64 `json:"backupFreeReserveBytes,omitempty"`
 	// CopyMaxBytes bounds fs.copy (default 10 GiB; also bounded by free space minus 1 GiB).
 	CopyMaxBytes int64      `json:"copyMaxBytes,omitempty"`
 	SFTP         SFTPConfig `json:"sftp"`
@@ -135,7 +158,7 @@ func (c *Config) ApplyDefaults() {
 	if c.DataRoot == "" {
 		c.DataRoot = DefaultDataRoot()
 	}
-	if len(c.ImageAllowlist) == 0 || equalStrings(c.ImageAllowlist, legacyDefaultImageAllowlist) {
+	if len(c.ImageAllowlist) == 0 || isPreviousDefault(c.ImageAllowlist) {
 		c.ImageAllowlist = append([]string(nil), DefaultImageAllowlist...)
 	}
 	if c.ArtifactCacheMaxBytes <= 0 {
@@ -143,6 +166,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.CopyMaxBytes <= 0 {
 		c.CopyMaxBytes = 10 << 30
+	}
+	if c.BackupFreeReserveBytes <= 0 {
+		c.BackupFreeReserveBytes = DefaultBackupFreeReserveBytes
 	}
 	if c.SFTP.Listen == "" {
 		c.SFTP.Listen = "0.0.0.0:2022"

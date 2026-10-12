@@ -103,6 +103,21 @@ func (a *Agent) handlers() map[string]Handler {
 			p := c.Payload.(*protocol.FsFindPayload)
 			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Find(p.Path, p.Query, p.MaxResults) })
 		},
+		protocol.CmdBackupCreate: func(ctx context.Context, c *Command) (any, error) {
+			return a.backups.Create(ctx, c.Payload.(*protocol.BackupCreatePayload), c.Progress)
+		},
+		protocol.CmdBackupUpload: func(ctx context.Context, c *Command) (any, error) {
+			return a.backups.Upload(ctx, c.Payload.(*protocol.BackupUploadPayload), c.Progress)
+		},
+		protocol.CmdBackupRestore: func(ctx context.Context, c *Command) (any, error) {
+			return a.backups.Restore(ctx, c.Payload.(*protocol.BackupRestorePayload), c.Progress)
+		},
+		protocol.CmdBackupDelete: func(ctx context.Context, c *Command) (any, error) {
+			return empty{}, a.backups.Delete(c.Payload.(*protocol.BackupRefPayload))
+		},
+		protocol.CmdBackupTransferPush: func(ctx context.Context, c *Command) (any, error) {
+			return a.backups.TransferPush(ctx, c.Payload.(*protocol.BackupTransferPushPayload))
+		},
 		protocol.CmdNodeProbe: func(ctx context.Context, c *Command) (any, error) {
 			return probe(ctx, c.Payload.(*protocol.NodeProbePayload)), nil
 		},

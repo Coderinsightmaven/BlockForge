@@ -336,13 +336,18 @@ func (t *Transfers) Push(ctx context.Context, root *fsops.Root, p *protocol.FsTr
 		return nil, err
 	}
 	defer f.Close()
+	return t.PushReader(ctx, f, fi.Size(), p.TransferID)
+}
+
+// PushReader streams size bytes from r to POST <cp>/agent/v1/transfers/:id (also used for backups).
+func (t *Transfers) PushReader(ctx context.Context, r io.Reader, size int64, transferID string) (*Result, error) {
 	h := sha256.New()
-	counter := &countingReader{r: io.TeeReader(f, h)}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.URL(p.TransferID), counter)
+	counter := &countingReader{r: io.TeeReader(r, h)}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.URL(transferID), counter)
 	if err != nil {
 		return nil, protocol.Errorf(protocol.CodeInternal, "build request: %v", err)
 	}
-	req.ContentLength = fi.Size()
+	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
 	auth, err := t.Auth()
 	if err != nil {

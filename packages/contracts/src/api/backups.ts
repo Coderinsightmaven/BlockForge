@@ -31,6 +31,7 @@ export const Backup = z.object({
   sha256: z.string().nullable(),
   /** Patterns excluded from the archive (request + `.blockforgeignore`/`.pteroignore` in the data root). */
   ignored: z.array(z.string()),
+  /** Symlinks and other special files (FIFOs, sockets, devices) that were not archived. */
   skippedSymlinks: z.number().int().nonnegative().nullable(),
   error: z.string().nullable(),
   createdBy: z.string().nullable(),

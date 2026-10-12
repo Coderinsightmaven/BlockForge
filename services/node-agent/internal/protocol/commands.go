@@ -8,35 +8,40 @@ import (
 
 // Command types (AGENT_COMMANDS keys in commands.ts).
 const (
-	CmdNodeFacts         = "node.facts"
-	CmdNodePorts         = "node.ports"
-	CmdWorkloadInstall   = "workload.install"
-	CmdFsCopy            = "fs.copy"
-	CmdFsCompress        = "fs.compress"
-	CmdFsChmod           = "fs.chmod"
-	CmdFsFind            = "fs.find"
-	CmdNodeProbe         = "node.probe"
-	CmdWorkloadEnsure    = "workload.ensure"
-	CmdWorkloadStart     = "workload.start"
-	CmdWorkloadStop      = "workload.stop"
-	CmdWorkloadKill      = "workload.kill"
-	CmdWorkloadRemove    = "workload.remove"
-	CmdWorkloadStatus    = "workload.status"
-	CmdWorkloadConsole   = "workload.console"
-	CmdWorkloadLogsTail  = "workload.logs.tail"
-	CmdFsList            = "fs.list"
-	CmdFsStat            = "fs.stat"
-	CmdFsRead            = "fs.read"
-	CmdFsWrite           = "fs.write"
-	CmdFsMkdir           = "fs.mkdir"
-	CmdFsRename          = "fs.rename"
-	CmdFsDelete          = "fs.delete"
-	CmdFsDu              = "fs.du"
-	CmdFsExtract         = "fs.extract"
-	CmdFsTransferPush    = "fs.transfer.push"
-	CmdFsTransferPull    = "fs.transfer.pull"
-	CmdArtifactFetch     = "artifact.fetch"
-	CmdCredentialsRotate = "credentials.rotate"
+	CmdNodeFacts          = "node.facts"
+	CmdNodePorts          = "node.ports"
+	CmdWorkloadInstall    = "workload.install"
+	CmdFsCopy             = "fs.copy"
+	CmdFsCompress         = "fs.compress"
+	CmdFsChmod            = "fs.chmod"
+	CmdFsFind             = "fs.find"
+	CmdBackupCreate       = "backup.create"
+	CmdBackupUpload       = "backup.upload"
+	CmdBackupRestore      = "backup.restore"
+	CmdBackupDelete       = "backup.delete"
+	CmdBackupTransferPush = "backup.transfer.push"
+	CmdNodeProbe          = "node.probe"
+	CmdWorkloadEnsure     = "workload.ensure"
+	CmdWorkloadStart      = "workload.start"
+	CmdWorkloadStop       = "workload.stop"
+	CmdWorkloadKill       = "workload.kill"
+	CmdWorkloadRemove     = "workload.remove"
+	CmdWorkloadStatus     = "workload.status"
+	CmdWorkloadConsole    = "workload.console"
+	CmdWorkloadLogsTail   = "workload.logs.tail"
+	CmdFsList             = "fs.list"
+	CmdFsStat             = "fs.stat"
+	CmdFsRead             = "fs.read"
+	CmdFsWrite            = "fs.write"
+	CmdFsMkdir            = "fs.mkdir"
+	CmdFsRename           = "fs.rename"
+	CmdFsDelete           = "fs.delete"
+	CmdFsDu               = "fs.du"
+	CmdFsExtract          = "fs.extract"
+	CmdFsTransferPush     = "fs.transfer.push"
+	CmdFsTransferPull     = "fs.transfer.pull"
+	CmdArtifactFetch      = "artifact.fetch"
+	CmdCredentialsRotate  = "credentials.rotate"
 )
 
 // ---------------------------------------------------------------------------
@@ -152,6 +157,56 @@ type FsFindPayload struct {
 	Path       string `json:"path"`
 	Query      string `json:"query"`
 	MaxResults int    `json:"maxResults"`
+}
+
+// BackupCreatePayload is the payload of backup.create.
+type BackupCreatePayload struct {
+	WorkloadID string   `json:"workloadId"`
+	BackupID   string   `json:"backupId"`
+	Ignore     []string `json:"ignore"`
+	MaxBytes   int64    `json:"maxBytes"`
+}
+
+type BackupUploadPart struct {
+	PartNumber int    `json:"partNumber"`
+	URL        string `json:"url"`
+}
+
+// BackupUploadPayload is the payload of backup.upload (presigned multipart PUT URLs).
+type BackupUploadPayload struct {
+	WorkloadID  string             `json:"workloadId"`
+	BackupID    string             `json:"backupId"`
+	PartSize    int64              `json:"partSize"`
+	Parts       []BackupUploadPart `json:"parts"`
+	DeleteLocal bool               `json:"deleteLocal"`
+}
+
+type BackupSource struct {
+	Type string `json:"type"`
+	URL  string `json:"url,omitempty"`
+}
+
+// BackupRestorePayload is the payload of backup.restore.
+type BackupRestorePayload struct {
+	WorkloadID    string       `json:"workloadId"`
+	BackupID      string       `json:"backupId"`
+	Source        BackupSource `json:"source"`
+	Sha256        string       `json:"sha256"`
+	Truncate      bool         `json:"truncate"`
+	MaxTotalBytes int64        `json:"maxTotalBytes"`
+}
+
+// BackupRefPayload is the payload of backup.delete.
+type BackupRefPayload struct {
+	WorkloadID string `json:"workloadId"`
+	BackupID   string `json:"backupId"`
+}
+
+// BackupTransferPushPayload is the payload of backup.transfer.push.
+type BackupTransferPushPayload struct {
+	WorkloadID string `json:"workloadId"`
+	BackupID   string `json:"backupId"`
+	TransferID string `json:"transferId"`
 }
 
 // ArtifactResult is the result of artifact.fetch and fs.transfer.*.
@@ -550,6 +605,32 @@ var Commands = map[string]CommandDef{
 		F("cache", Default(Bool(), constAny(true))),
 	), New: func() any { return &ArtifactFetchPayload{} }, Mutating: true},
 	CmdCredentialsRotate: {Schema: Obj(), New: func() any { return &EmptyPayload{} }},
+	// Backups are not Mutating: exclusivity is handled by the driver's per-workload claims (a backup
+	// may run next to a running server; restore/install need it stopped).
+	CmdBackupCreate: {Schema: workloadRef.Extend(
+		F("backupId", uuidSchema),
+		F("ignore", Default(Arr(Str().Max(512), -1, 100), emptyArr)),
+		F("maxBytes", bytesSchema.Max(512*gib)),
+	), New: func() any { return &BackupCreatePayload{} }},
+	CmdBackupUpload: {Schema: workloadRef.Extend(
+		F("backupId", uuidSchema),
+		F("partSize", Int().Min(5*mib).Max(5*gib)),
+		F("parts", Arr(Obj(F("partNumber", Int().Min(1).Max(10_000)), F("url", Str().HTTPSURL())), 1, 10_000)),
+		F("deleteLocal", Default(Bool(), constAny(true))),
+	), New: func() any { return &BackupUploadPayload{} }},
+	CmdBackupRestore: {Schema: workloadRef.Extend(
+		F("backupId", uuidSchema),
+		F("source", Union("type", map[string]*ObjectSchema{
+			"local": Obj(F("type", Str())),
+			"url":   Obj(F("type", Str()), F("url", Str().HTTPSURL())),
+		})),
+		F("sha256", Str().Regex(`^[a-f0-9]{64}$`)),
+		F("truncate", Bool()),
+		F("maxTotalBytes", bytesSchema.Max(512*gib)),
+	), New: func() any { return &BackupRestorePayload{} }},
+	CmdBackupDelete: {Schema: workloadRef.Extend(F("backupId", uuidSchema)), New: func() any { return &BackupRefPayload{} }},
+	CmdBackupTransferPush: {Schema: workloadRef.Extend(F("backupId", uuidSchema), F("transferId", uuidSchema)),
+		New: func() any { return &BackupTransferPushPayload{} }},
 }
 
 // ParsePayload validates a payload for a known command type. ok=false means the type is unknown.
@@ -609,6 +690,16 @@ func WorkloadIDOf(p any) string {
 	case *FsChmodPayload:
 		return v.WorkloadID
 	case *FsFindPayload:
+		return v.WorkloadID
+	case *BackupCreatePayload:
+		return v.WorkloadID
+	case *BackupUploadPayload:
+		return v.WorkloadID
+	case *BackupRestorePayload:
+		return v.WorkloadID
+	case *BackupRefPayload:
+		return v.WorkloadID
+	case *BackupTransferPushPayload:
 		return v.WorkloadID
 	}
 	return ""

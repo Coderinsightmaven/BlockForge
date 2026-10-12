@@ -148,3 +148,62 @@ func TestInstallContainer(t *testing.T) {
 	}
 	e.mu.Unlock()
 }
+
+// Claims: restore/install need a stopped workload and block start; backup runs next to a running
+// server but is exclusive with other claims and blocks remove; backups survive workload.remove.
+func TestWorkloadClaims(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	id := newUUID()
+	defer e.d.Remove(ctx, id, true)
+	if _, err := e.d.Ensure(ctx, e.spec(id), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.d.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	e.waitState(id, protocol.StateRunning, 10*time.Second)
+	if _, err := e.d.Claim(ctx, id, ClaimRestore); errCode(err) != protocol.CodeBusy {
+		t.Fatalf("restore while running: %v", err)
+	}
+	rel, err := e.d.Claim(ctx, id, ClaimBackup)
+	if err != nil {
+		t.Fatalf("backup next to a running server: %v", err)
+	}
+	if _, err := e.d.Claim(ctx, id, ClaimBackup); errCode(err) != protocol.CodeBusy {
+		t.Fatalf("second backup: %v", err)
+	}
+	if err := e.d.Remove(ctx, id, true); errCode(err) != protocol.CodeBusy {
+		t.Fatalf("remove during backup: %v", err)
+	}
+	rel()
+	e.d.Kill(ctx, id)
+	rel, err = e.d.Claim(ctx, id, ClaimRestore)
+	if err != nil {
+		t.Fatalf("restore on a stopped workload: %v", err)
+	}
+	if _, err := e.d.Start(ctx, id); errCode(err) != protocol.CodeBusy {
+		t.Fatalf("start during restore: %v", err)
+	}
+	if _, err := e.install(id, "echo x\n", time.Minute); errCode(err) != protocol.CodeBusy {
+		t.Fatalf("install during restore: %v", err)
+	}
+	rel()
+	if _, err := e.d.Start(ctx, id); err != nil {
+		t.Fatalf("start after restore: %v", err)
+	}
+	e.d.Kill(ctx, id)
+	// workload.remove(deleteData) never deletes <dataRoot>/backups/<id>.
+	bdir := filepath.Join(e.d.o.DataRoot, "backups", id)
+	os.MkdirAll(bdir, 0o700)
+	os.WriteFile(filepath.Join(bdir, "b.tar.gz"), []byte("archive"), 0o600)
+	if err := e.d.Remove(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(bdir, "b.tar.gz")); err != nil {
+		t.Fatal("workload.remove deleted the workload's backups")
+	}
+	if _, err := os.Stat(e.sb.WorkloadBase(id)); !os.IsNotExist(err) {
+		t.Fatal("workload data not removed")
+	}
+}

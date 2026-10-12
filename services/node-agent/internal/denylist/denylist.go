@@ -119,3 +119,17 @@ func globSegs(pat, segs []string) bool {
 
 // Active reports whether the list has any rule (nil-safe).
 func (d *List) Active() bool { return d != nil && len(d.rules) > 0 }
+
+// Negates reports whether any rule re-allows paths ("!pattern"); callers that prune whole directories
+// must not do so when a negation could re-include something below them.
+func (d *List) Negates() bool {
+	if d == nil {
+		return false
+	}
+	for _, r := range d.rules {
+		if r.negate {
+			return true
+		}
+	}
+	return false
+}

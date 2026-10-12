@@ -92,6 +92,9 @@ func TestCommandFixtures(t *testing.T) {
 		"cmd-credentials-rotate.json":         "ok",
 		"cmd-workload-ensure-egg.json":        "ok",
 		"cmd-workload-install.json":           "ok",
+		"cmd-backup-create.json":              "ok",
+		"cmd-backup-restore-url.json":         "ok",
+		"cmd-backup-upload.json":              "ok",
 	}
 	for file, want := range cases {
 		t.Run(file, func(t *testing.T) {
@@ -370,5 +373,20 @@ func TestEggAndInstallFixturesDecode(t *testing.T) {
 	if in.Image != "ghcr.io/pterodactyl/installers:debian" || in.Entrypoint != "bash" || in.TimeoutMs != 1_800_000 ||
 		in.CPULimitMillicores != nil || in.MemoryLimitBytes != 1<<30 || !strings.Contains(in.Script, "marker.txt") {
 		t.Fatalf("install %+v", in)
+	}
+}
+
+func TestBackupFixturesDecode(t *testing.T) {
+	c := decodeFixturePayload(t, "cmd-backup-create.json").(*protocol.BackupCreatePayload)
+	if c.BackupID == "" || len(c.Ignore) != 3 || c.Ignore[2] != "!logs/keep.log" || c.MaxBytes != 53687091200 {
+		t.Fatalf("create %+v", c)
+	}
+	r := decodeFixturePayload(t, "cmd-backup-restore-url.json").(*protocol.BackupRestorePayload)
+	if r.Source.Type != "url" || !strings.HasPrefix(r.Source.URL, "https://s3.example.com/") || !r.Truncate || len(r.Sha256) != 64 {
+		t.Fatalf("restore %+v", r)
+	}
+	u := decodeFixturePayload(t, "cmd-backup-upload.json").(*protocol.BackupUploadPayload)
+	if u.PartSize != 64<<20 || len(u.Parts) != 2 || u.Parts[1].PartNumber != 2 || !u.DeleteLocal {
+		t.Fatalf("upload %+v", u)
 	}
 }

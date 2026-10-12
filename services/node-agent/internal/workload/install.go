@@ -143,36 +143,12 @@ func (d *Driver) Install(ctx context.Context, p *protocol.WorkloadInstallPayload
 		return nil, protocol.Errorf(protocol.CodeImageNotAllowed, "image %q is not allowed by this agent's image allowlist", p.Image)
 	}
 	id := p.WorkloadID
-	w := d.state(id)
-
-	// Claim the workload: no other install, and the workload container must not run.
-	w.opMu.Lock()
-	w.mu.Lock()
-	if w.installing {
-		w.mu.Unlock()
-		w.opMu.Unlock()
-		return nil, protocol.RetryableErrorf(protocol.CodeBusy, "an install is already running for this workload")
-	}
-	pending := w.pendingRestart
-	w.mu.Unlock()
-	c, err := d.inspectManaged(ctx, id)
+	// Claim the workload: nothing else in flight, and the workload container must not run.
+	release, err := d.Claim(ctx, id, ClaimInstall)
 	if err != nil {
-		w.opMu.Unlock()
 		return nil, err
 	}
-	if pending || (c != nil && c.State != nil && (c.State.Running || c.State.Restarting || c.State.Paused)) {
-		w.opMu.Unlock()
-		return nil, protocol.RetryableErrorf(protocol.CodeBusy, "the workload is running; stop it before installing")
-	}
-	w.mu.Lock()
-	w.installing = true
-	w.mu.Unlock()
-	w.opMu.Unlock()
-	defer func() {
-		w.mu.Lock()
-		w.installing = false
-		w.mu.Unlock()
-	}()
+	defer release()
 
 	if err := d.o.Sandbox.EnsureDataDir(id); err != nil {
 		return nil, protocol.Errorf(protocol.CodeInternal, "prepare data directory: %v", err)

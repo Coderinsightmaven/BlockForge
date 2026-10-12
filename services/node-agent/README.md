@@ -71,13 +71,14 @@ blockforge-agent run [--config-dir /etc/blockforge]
 
 `agent.json` keys you may edit: `dataRoot`, `workloadUid/Gid`, `imageAllowlist` (entries `repo:*` = any
 tag of exactly that repo, or exact references; default `eclipse-temurin:*`, `ghcr.io/pterodactyl/yolks:*`,
-`ghcr.io/pterodactyl/installers:*`, `ghcr.io/parkervcp/yolks:*`, `ghcr.io/parkervcp/installers:*`; a config
-still holding the 0.1.0 default `["eclipse-temurin:*"]` is upgraded on load), `downloadHostAllowlist`
+`ghcr.io/pterodactyl/installers:*`, `ghcr.io/parkervcp/{yolks,installers,steamcmd}:*`,
+`ghcr.io/pelican-eggs/{yolks,installers,steamcmd}:*`; a config still holding a previous default list is
+upgraded on load), `downloadHostAllowlist`
 (exact hosts, `host:port`, or `*.domain`; defaults are the Mojang/Paper/Purpur/Fabric/Forge/NeoForge/Modrinth
 hosts), `netIfaceExclude` (glob patterns; default skips `lo`, `veth*`, `docker*`, `br-*` and common CNI
 devices), `dockerHost` (e.g. `unix:///run/user/1000/docker.sock` for rootless Docker or a Podman socket),
 `maxConcurrentCommands`, `artifactCacheMaxBytes` (default 10 GiB), `sftp.enabled` (default true) and
-`sftp.listen` (default `0.0.0.0:2022`).
+`sftp.listen` (default `0.0.0.0:2022`), `copyMaxBytes` (default 10 GiB), `backupFreeReserveBytes` (default 2 GiB).
 
 Environment overrides: `BLOCKFORGE_SFTP_LISTEN`, `BLOCKFORGE_SFTP_ENABLED`, `BLOCKFORGE_CONFIG_DIR`, `BLOCKFORGE_DATA_ROOT`, `BLOCKFORGE_LOG_LEVEL`,
 `BLOCKFORGE_HOSTNAME`, `DOCKER_HOST`, and the gopsutil host-path variables `HOST_PROC`, `HOST_SYS`,
@@ -198,6 +199,34 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
   cannot extend, packet sizes bounded by pkg/sftp (256 KiB). Mutations are reported as
   `sftp.activity` events (≤ 1 s, ≤ 100 actions). It is the agent's only inbound port: open `2022/tcp` in the
   host firewall only for the clients that need it.
+
+## Backups
+
+* **`backup.create`** archives the data dir (through the `os.Root` sandbox, sorted walk, gzip level 1) to
+  `<dataRoot>/backups/<workloadId>/<backupId>.tar.gz` (dir 0700, file 0600; temp file + fsync + rename;
+  identical data → identical archive). `.blockforge/` is always excluded; `.pteroignore`, `.blockforgeignore`
+  and the request's `ignore` (in that order, last match wins, `!` re-includes) use the denylist matcher.
+  Symlinks, FIFOs, sockets and devices are skipped and counted (`skippedSymlinks`). Files that change size
+  while a server runs are cut or zero-padded to the size seen at open — run `save-off` / `save-all flush`
+  first (the control plane does). `maxBytes` bounds the archive; the free-disk reserve
+  (`backupFreeReserveBytes`, default 2 GiB) is checked up front and every 32 MiB → `QUOTA_EXCEEDED`, nothing
+  left behind. Progress frames report files and MiB.
+* **`backup.upload`** PUTs `partSize` slices of the archive to the presigned multipart URLs (exactly
+  ⌈size/partSize⌉ parts numbered 1..N), 3 in flight, `Content-Length` per part, redirects never followed,
+  retries with jittered exponential backoff on network errors / 429 / 5xx (4 attempts), immediate failure on
+  other statuses (e.g. an expired signature). Returns the ETags; `deleteLocal` removes the archive only after
+  every part succeeded. URLs are never logged and query strings are stripped from errors.
+* **`backup.restore`** requires the workload to be stopped (`BUSY`, also for start/install/remove during the
+  restore). `url` sources are downloaded to `<dataRoot>/backups/.tmp` (redirects refused, size ≤
+  `maxTotalBytes`, reserve kept); the sha256 of the archive (local or downloaded) is verified **before** the
+  data dir is touched. The archive is then fully validated with the `fs.extract` rules, and only after that
+  `truncate` removes everything except `.blockforge/`; files get the archive's permission bits (masked to
+  0777) and the workload UID/GID.
+* **`backup.delete`** is idempotent; **`backup.transfer.push`** streams an archive to `POST
+  <cp>/agent/v1/transfers/:id`.
+* A backup may run next to a running server but not during an install, restore or another backup of the
+  same workload. **`workload.remove` with `deleteData` never touches `<dataRoot>/backups/<id>`**: the
+  control plane deletes backups explicitly with `backup.delete`.
 
 ## Denylist (template `fileDenylist`)
 

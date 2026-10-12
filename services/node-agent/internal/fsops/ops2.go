@@ -510,3 +510,30 @@ func (r *Root) Compress(p protocol.FsCompressPayload, now time.Time) (*CompressR
 	}
 	return &CompressResult{Path: displayPath(dest), Size: size, Entries: entries}, nil
 }
+
+// Truncate removes every top-level entry of the data root except the named ones (symlinks are
+// removed, never followed).
+func (r *Root) Truncate(keep ...string) error {
+	d, err := r.r.Open(".")
+	if err != nil {
+		return MapError("truncate", "", err)
+	}
+	names, err := d.Readdirnames(-1)
+	d.Close()
+	if err != nil {
+		return MapError("truncate", "", err)
+	}
+	keepSet := map[string]bool{}
+	for _, k := range keep {
+		keepSet[k] = true
+	}
+	for _, n := range names {
+		if keepSet[n] {
+			continue
+		}
+		if err := r.r.RemoveAll(n); err != nil {
+			return MapError("truncate", n, err)
+		}
+	}
+	return nil
+}

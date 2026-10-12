@@ -18,6 +18,8 @@ import (
 type ExtractResult struct {
 	Entries int64 `json:"entries"`
 	Bytes   int64 `json:"bytes"`
+	// Files counts regular files written (not on the fs.extract wire format).
+	Files int64 `json:"-"`
 }
 
 type archiveKind int
@@ -105,21 +107,50 @@ func (r *Root) Extract(p protocol.FsExtractPayload) (*ExtractResult, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return r.ExtractFrom(f, fi.Size(), dest, ArchiveOptions{MaxTotalBytes: p.MaxTotalBytes, MaxEntries: p.MaxEntries})
+}
+
+// ArchiveOptions tune ExtractFrom.
+type ArchiveOptions struct {
+	MaxTotalBytes int64
+	MaxEntries    int64
+	// KeepPerms applies the archive's permission bits (masked to 0777; never setuid/setgid/sticky)
+	// to regular files instead of 0644. Used for backups the agent wrote itself.
+	KeepPerms bool
+	// BeforeWrite runs after the whole archive has been validated and before anything is written
+	// (backup restore truncates the data dir here).
+	BeforeWrite func() error
+	// Progress is told about extracted entries and bytes.
+	Progress func(entries, bytes int64)
+}
+
+// ExtractFrom extracts an archive that may live outside the sandbox (a backup) into dest (clean,
+// sandbox-relative) with the fs.extract safety rules: validation first, no links/devices/escapes,
+// entry and byte limits counted on decompressed data, denylist (if set) on every entry path.
+func (r *Root) ExtractFrom(f *os.File, size int64, dest string, o ArchiveOptions) (*ExtractResult, error) {
 	kind, err := detectArchive(f)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.MkdirAll(dest); err != nil {
-		return nil, err
+	ex := &extractor{r: r, dest: dest, maxBytes: o.MaxTotalBytes, maxEntries: o.MaxEntries, keepPerms: o.KeepPerms, progress: o.Progress}
+	begin := func() error {
+		if o.BeforeWrite != nil {
+			if err := o.BeforeWrite(); err != nil {
+				return err
+			}
+		}
+		return r.MkdirAll(dest)
 	}
-	ex := &extractor{r: r, dest: dest, maxBytes: p.MaxTotalBytes, maxEntries: p.MaxEntries}
 	switch kind {
 	case kindZip:
-		zr, err := zip.NewReader(f, fi.Size())
+		zr, err := zip.NewReader(f, size)
 		if err != nil {
 			return nil, protocol.Errorf(protocol.CodeValidationFailed, "invalid zip archive")
 		}
 		if err := ex.planZip(zr); err != nil {
+			return nil, err
+		}
+		if err := begin(); err != nil {
 			return nil, err
 		}
 		if err := ex.extractZip(zr); err != nil {
@@ -149,6 +180,9 @@ func (r *Root) Extract(p protocol.FsExtractPayload) (*ExtractResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := begin(); err != nil {
+			return nil, err
+		}
 		rd, closeFn, err = open()
 		if err != nil {
 			return nil, err
@@ -160,7 +194,7 @@ func (r *Root) Extract(p protocol.FsExtractPayload) (*ExtractResult, error) {
 			return nil, err
 		}
 	}
-	return &ExtractResult{Entries: ex.entries, Bytes: ex.written}, nil
+	return &ExtractResult{Entries: ex.entries, Bytes: ex.written, Files: ex.files}, nil
 }
 
 type extractor struct {
@@ -171,6 +205,17 @@ type extractor struct {
 	entries    int64
 	written    int64
 	created    []string
+	keepPerms  bool
+	files      int64
+	progress   func(entries, bytes int64)
+}
+
+// fileMode is 0644, or the archive's permission bits when keepPerms is set.
+func (ex *extractor) fileMode(m fs.FileMode) fs.FileMode {
+	if ex.keepPerms {
+		return m.Perm()
+	}
+	return 0o644
 }
 
 func (ex *extractor) quota(format string, args ...any) error {
@@ -229,7 +274,7 @@ func (ex *extractor) extractZip(zr *zip.Reader) error {
 		if err != nil {
 			return protocol.Errorf(protocol.CodeValidationFailed, "zip entry %q: %v", truncateName(zf.Name), err)
 		}
-		err = ex.writeFile(target, rc)
+		err = ex.writeFile(target, rc, ex.fileMode(zf.Mode()))
 		rc.Close()
 		if err != nil {
 			return err
@@ -319,14 +364,14 @@ func (ex *extractor) extractTar(tr *tar.Reader) error {
 			}
 			continue
 		}
-		if err := ex.writeFile(target, tr); err != nil {
+		if err := ex.writeFile(target, tr, ex.fileMode(fs.FileMode(h.Mode))); err != nil {
 			return err
 		}
 	}
 }
 
 // writeFile copies at most the remaining byte budget (+1 to detect overflow) into target.
-func (ex *extractor) writeFile(target string, src io.Reader) error {
+func (ex *extractor) writeFile(target string, src io.Reader, mode fs.FileMode) error {
 	if err := ex.r.MkdirAll(path.Dir(target)); err != nil {
 		return err
 	}
@@ -337,7 +382,7 @@ func (ex *extractor) writeFile(target string, src io.Reader) error {
 			return protocol.Errorf(protocol.CodeConflict, "archive file %q collides with a directory", target)
 		}
 	}
-	tf, err := ex.r.CreateTemp(target, 0o644)
+	tf, err := ex.r.CreateTemp(target, mode)
 	if err != nil {
 		return err
 	}
@@ -358,8 +403,12 @@ func (ex *extractor) writeFile(target string, src io.Reader) error {
 		return err
 	}
 	ex.written += n
+	ex.files++
 	if !existed {
 		ex.created = append(ex.created, target)
+	}
+	if ex.progress != nil {
+		ex.progress(ex.entries, ex.written)
 	}
 	return nil
 }

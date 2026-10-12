@@ -158,6 +158,7 @@ export const AGENT_COMMANDS = {
       sizeBytes: Bytes,
       sha256: z.string(),
       files: z.number().int().nonnegative(),
+      /** Symlinks and other special files (FIFOs, sockets, devices) skipped. */
       skippedSymlinks: z.number().int().nonnegative(),
       durationMs: z.number().int().nonnegative(),
     }),
