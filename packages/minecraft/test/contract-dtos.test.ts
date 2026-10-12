@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   ModrinthClient,
   checkModrinthUpdates,
+  contractVersionType,
   fromContractPlanRequest,
   fromContractSearchQuery,
   getModrinthProject,
@@ -44,7 +45,7 @@ import {
   toContractUpdateStatus,
   toContractVersionSummary,
   jarCompatibility,
-  type FileProblem,
+  type UpdateProblem,
   type JarCompatibility,
   type PlanWarningCode as LibPlanWarningCode,
 } from "../src/index.js";
@@ -54,7 +55,7 @@ import { fixture, modrinthFetch } from "./helpers.js";
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 type Assert<T extends true> = T;
 type _Codes = Assert<Same<LibPlanWarningCode, z.infer<typeof PlanWarningCode>>>;
-type _Problems = Assert<Same<FileProblem, z.infer<typeof ExtensionUpdateProblem>>>;
+type _Problems = Assert<Same<UpdateProblem, z.infer<typeof ExtensionUpdateProblem>>>;
 type _Compat = Assert<JarCompatibility extends z.infer<typeof ExtensionCompatibility> ? true : false>;
 type _ProblemCodes = Assert<JarCompatibility["problems"][number]["code"] extends z.infer<typeof ExtensionProblemCode> ? true : false>;
 
@@ -85,7 +86,9 @@ describe("library → contract converters parse with the contract schemas (recor
     expect(details).toMatchObject({ compatible: true, published: Date.parse(p.published) });
     const versions = await listCompatibleVersions(client(), "luckperms", { software: "paper", minecraftVersion: "1.21.11" });
     for (const v of versions) parses(ModrinthVersionSummary, toContractVersionSummary(v));
-    expect(toContractVersionSummary({ ...versions[0]!, versionType: "nightly" }).versionType).toBe("alpha");
+    // R2-8: unknown version types are never remapped — summaries are skipped, plan/update converters throw.
+    expect(() => toContractVersionSummary({ ...versions[0]!, versionType: "snapshot" })).toThrow(TypeError);
+    expect(() => contractVersionType("snapshot")).toThrow(TypeError);
   });
 
   it("install plans (with warnings, optional deps, replaces) and the API request mapping", async () => {
@@ -204,6 +207,7 @@ describe("players → contract", () => {
     expect(out.listErrors).toEqual([
       { file: "server.properties", message: "not readable" },
       { file: "ops.json", message: "operator Notch has level 7; the server only knows 0–4" },
+      { file: "banned-players.json", message: "entry 2: the reason contains control or line-break characters (shown with spaces)" },
     ]);
   });
 

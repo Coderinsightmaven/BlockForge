@@ -156,37 +156,62 @@ function str(o: Record<string, unknown>, k: string): string | null {
   return typeof v === "string" ? v : null;
 }
 
-function banFields(o: Record<string, unknown>): BanFields {
-  return {
-    created: str(o, "created") ?? "",
-    source: str(o, "source") ?? BAN_SOURCE_UNKNOWN,
-    expires: str(o, "expires") ?? BAN_FOREVER,
-    reason: str(o, "reason"),
-  };
-}
 
-function toEntry<K extends PlayerListKind>(kind: K, o: Record<string, unknown>): PlayerListEntryMap[K] | string {
+/** Control, format (bidi) and line/paragraph separator characters: never shown as-is. */
+const UNSAFE_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+const UNSAFE_TEXT_G = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu;
+
+/**
+ * A list entry as the server reads it, plus notes about non-fatal oddities; a string when the
+ * entry is unusable (the server ignores it) or carries text that must not be displayed.
+ *
+ * Ops: `level` missing → 0 (`PermissionLevel.ALL`, 26.3 `ServerOpListEntry`); a non-integer number
+ * is truncated like Gson's `getAsInt` (noted); anything else makes the entry unusable. Banned IPs:
+ * the IP is reported canonically (IPv4); a stored spelling that differs is noted — the server
+ * compares the exact text, so such a ban only takes effect once rewritten.
+ */
+function toEntry<K extends PlayerListKind>(kind: K, o: Record<string, unknown>): { entry: PlayerListEntryMap[K]; notes: string[] } | string {
+  const notes: string[] = [];
+  /** Single-line text: unsafe characters become spaces in the entry (the file keeps the original) and are noted. */
+  const text = (key: string): string | null => {
+    const v = str(o, key);
+    if (v === null || !UNSAFE_TEXT.test(v)) return v;
+    notes.push(`the ${key} contains control or line-break characters (shown with spaces)`);
+    return v.replace(UNSAFE_TEXT_G, " ");
+  };
   if (kind === "banned-ips") {
-    const ip = str(o, "ip");
-    if (!ip || normalizeIp(ip) === null) return "invalid or missing ip";
-    return { ip, ...banFields(o) } as PlayerListEntryMap[K];
+    const raw = str(o, "ip");
+    const ip = raw ? normalizeIp(raw) : null;
+    if (!raw || !ip) return "invalid or missing ip";
+    if (raw !== ip) notes.push(`ip stored as "${raw.replace(UNSAFE_TEXT, "?").slice(0, 64)}"; the server only matches the exact text ${ip}`);
+    return { entry: { ip, ...banFieldsClean(text) } as PlayerListEntryMap[K], notes };
   }
   const rawUuid = str(o, "uuid");
   const uuid = rawUuid ? normalizeUuid(rawUuid) : null;
   if (!uuid) return "invalid or missing uuid";
-  const name = str(o, "name") ?? "";
-  if (kind === "whitelist") return { uuid, name } as PlayerListEntryMap[K];
+  const name = text("name");
+  if (kind === "whitelist") return { entry: { uuid, name: name ?? "" } as PlayerListEntryMap[K], notes };
   if (kind === "ops") {
-    const level = own(o, "level");
+    const rawLevel = own(o, "level");
+    let level: number;
+    if (rawLevel === undefined) level = 0;
+    else if (typeof rawLevel === "number" && Number.isFinite(rawLevel)) {
+      level = Math.trunc(rawLevel);
+      if (level !== rawLevel) notes.push(`level ${rawLevel} is not an integer; the server uses ${level}`);
+    } else return "level is not a number";
     const bypass = own(o, "bypassesPlayerLimit");
-    return {
-      uuid,
-      name,
-      level: typeof level === "number" && Number.isInteger(level) ? level : 4,
-      bypassesPlayerLimit: bypass === true,
-    } as PlayerListEntryMap[K];
+    return { entry: { uuid, name: name ?? "", level, bypassesPlayerLimit: bypass === true } as PlayerListEntryMap[K], notes };
   }
-  return { uuid, name, ...banFields(o) } as PlayerListEntryMap[K];
+  return { entry: { uuid, name: name ?? "", ...banFieldsClean(text) } as PlayerListEntryMap[K], notes };
+}
+
+function banFieldsClean(text: (key: string) => string | null): BanFields {
+  return {
+    created: text("created") ?? "",
+    source: text("source") ?? BAN_SOURCE_UNKNOWN,
+    expires: text("expires") ?? BAN_FOREVER,
+    reason: text("reason"),
+  };
 }
 
 /**
@@ -214,7 +239,10 @@ export function parsePlayerList<K extends PlayerListKind>(kind: K, text: string)
     }
     const e = toEntry(kind, item);
     if (typeof e === "string") doc.issues.push(`entry ${i + 1}: ${e} (the server ignores it; kept unchanged)`);
-    else doc.entries.push(e);
+    else {
+      doc.entries.push(e.entry);
+      for (const n of e.notes) doc.issues.push(`entry ${i + 1}: ${n}`);
+    }
   });
   return doc;
 }
@@ -255,7 +283,7 @@ function rebuild<K extends PlayerListKind>(kind: K, raw: unknown[], issues: stri
   for (const r of raw) {
     if (!isRecord(r)) continue;
     const e = toEntry(kind, r);
-    if (typeof e !== "string") entries.push(e);
+    if (typeof e !== "string") entries.push(e.entry);
   }
   return { kind, entries, raw, issues };
 }

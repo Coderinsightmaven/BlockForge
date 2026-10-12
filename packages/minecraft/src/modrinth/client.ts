@@ -108,7 +108,11 @@ export class ModrinthRateLimiter {
     return this.state;
   }
 
-  /** How long the next request should wait (0 = send now). */
+  /**
+   * How long the next request should wait (0 = send now): until the reset when the window is used
+   * up, otherwise — with `lowWatermark` or fewer requests left — the remaining time spread over the
+   * remaining requests (capped at `maxWaitMs` by `acquire`).
+   */
   waitMs(): number {
     const st = this.state;
     if (!st || st.remaining === null) return 0;
@@ -119,14 +123,38 @@ export class ModrinthRateLimiter {
     return 0;
   }
 
+  /** Serialises `acquire`: one caller at a time holds the permit, including across its sleep. */
+  private gate: Promise<void> = Promise.resolve();
+
+  /**
+   * Waits for a permit. While quota remains the request is always sent, at most `maxWaitMs` later;
+   * `RATE_LIMITED` is thrown only when the window is used up and its reset is further away than
+   * `maxWaitMs`. The request is counted against the window before sleeping, so concurrent callers
+   * queue behind each other and see the reduced quota.
+   */
   async acquire(url: string): Promise<void> {
-    const wait = this.waitMs();
-    if (wait > this.maxWaitMs) {
-      throw new CatalogError("RATE_LIMITED", "Modrinth rate limit window exhausted", { url, retryAfterMs: Math.max(wait, this.resetAt - this.now()) });
+    const previous = this.gate;
+    let release!: () => void;
+    this.gate = new Promise<void>((resolve) => (release = resolve));
+    await previous;
+    try {
+      const st = this.state;
+      const left = this.resetAt - this.now();
+      if (!st || st.remaining === null || left <= 0) return;
+      if (st.remaining <= 0) {
+        if (left > this.maxWaitMs) throw new CatalogError("RATE_LIMITED", "Modrinth rate limit window exhausted", { url, retryAfterMs: left });
+        await this.sleep(left);
+        // The window has reset; the next response tells us the new quota.
+        this.state = { ...st, remaining: null };
+        this.resetAt = 0;
+        return;
+      }
+      const wait = Math.min(this.waitMs(), this.maxWaitMs);
+      this.state = { ...st, remaining: st.remaining - 1 };
+      if (wait > 0) await this.sleep(wait);
+    } finally {
+      release();
     }
-    if (wait > 0) await this.sleep(wait);
-    // Count this request against the window until the next response tells us better.
-    if (this.state && this.state.remaining !== null && this.state.remaining > 0) this.state = { ...this.state, remaining: this.state.remaining - 1 };
   }
 
   update(headers: Headers, status: number): void {

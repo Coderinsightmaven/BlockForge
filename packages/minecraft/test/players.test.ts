@@ -84,7 +84,8 @@ describe("player list files (byte-exact against Gson output)", () => {
   it.each(files)("%s: %s parses and round-trips byte-for-byte", (kind, file) => {
     const text = fixture(`players/${file}`);
     const doc = parsePlayerList(kind, text);
-    expect(doc.issues).toEqual([]);
+    // The reason of jeb_'s ban contains U+2028: shown with a space and noted (the file keeps it).
+    expect(doc.issues).toEqual(file === "gson-banned-players.json" ? ["entry 2: the reason contains control or line-break characters (shown with spaces)"] : []);
     expect(serializePlayerList(doc)).toBe(text);
   });
 
@@ -103,7 +104,7 @@ describe("player list files (byte-exact against Gson output)", () => {
       expires: "forever",
       reason: "Don't grief <spawn> & \"town\" = bad",
     });
-    expect(bans[1]!.reason).toBe("Spam ☃ line\u2028sep \\ back");
+    expect(bans[1]!.reason).toBe("Spam ☃ line sep \\ back");
     expect(parsePlayerList("banned-ips", fixture("players/gson-banned-ips.json")).entries[0]!.ip).toBe("203.0.113.7");
     expect(parsePlayerList("ops", "").entries).toEqual([]);
   });

@@ -563,7 +563,7 @@ export const ModrinthPlanChangedDetails = z.object({ reason: z.literal("plan_cha
 // Updates
 
 /** Why an available update cannot be applied (library `FileProblem`). */
-export const ExtensionUpdateProblem = z.enum(["NO_JAR", "UNSAFE_FILENAME", "URL_NOT_ALLOWED", "TOO_LARGE", "NO_SHA512"]);
+export const ExtensionUpdateProblem = z.enum(["NO_JAR", "UNSAFE_FILENAME", "URL_NOT_ALLOWED", "TOO_LARGE", "NO_SHA512", "UNSAFE_INSTALLED_PATH"]);
 /** Description of each `ExtensionUpdateProblem` (for UI labels). */
 export const EXTENSION_UPDATE_PROBLEMS = {
   NO_JAR: "The new version's primary file is not an installable jar",
@@ -571,6 +571,7 @@ export const EXTENSION_UPDATE_PROBLEMS = {
   URL_NOT_ALLOWED: "The new version is not hosted on the Modrinth CDN",
   TOO_LARGE: "The new version's file is larger than BlockForge installs",
   NO_SHA512: "Modrinth has no SHA-512 checksum for the new version's file",
+  UNSAFE_INSTALLED_PATH: "The installed file's path is not safe to replace",
 } as const satisfies Record<z.infer<typeof ExtensionUpdateProblem>, string>;
 
 export const ExtensionUpdateStatus = z.object({

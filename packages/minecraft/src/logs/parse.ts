@@ -130,11 +130,46 @@ export function consoleMessage(raw: string | ParsedLogLine, opts: ConsoleMessage
 }
 
 /**
- * Player name: Mojang names are [A-Za-z0-9_]{1,16}; offline-mode servers accept any printable
- * ASCII, Floodgate prefixes Bedrock names with "." — brackets/parentheses/angle brackets are
- * excluded so names cannot swallow the surrounding log syntax.
+ * Player name in event lines: the Java Edition grammar `[A-Za-z0-9_]{1,16}`, plus — as the only,
+ * explicit extra — Floodgate's default `.` prefix for Bedrock players (`.Steve`). Anything else
+ * (`@`, `/`, `..`, spaces, other offline-mode oddities) never becomes an event.
  */
-const NAME = String.raw`([.*]?[!-'*-;=?-Z^-~\\]{1,16})`;
+const NAME = String.raw`(\.?[A-Za-z0-9_]{1,16})`;
+
+/**
+ * Forge/NeoForge logger segments allowed per event kind (`null` = no logger printed: vanilla,
+ * Fabric, Paper, Velocity console). The classes are the ones whose LOGGER prints each line in the
+ * 26.3 server jar (Mojang names, used by Forge/NeoForge at runtime since 1.17); the
+ * `minecraft/<SimpleClass>` form is verified on real `[minecraft/Eula]` / `[minecraft/Main]` lines.
+ * The MCP names (`ServerLoginNetHandler`, `NetHandlerPlayServer`, …) cover Forge ≤ 1.16 and are
+ * not verified on captured lines.
+ */
+const mc = (...classes: string[]): readonly (string | null)[] => [null, ...classes.map((c) => `minecraft/${c}`)];
+export const EVENT_LOGGERS = {
+  /** `Done (…)! For help, type "help"` (`DedicatedServer`). */
+  ready: mc("DedicatedServer"),
+  /** Join/leave broadcasts (`MinecraftServer.sendSystemMessage`; `PlayerList` on old versions). */
+  broadcast: mc("MinecraftServer", "DedicatedServer", "PlayerList"),
+  /** `… logged in with entity id …`. */
+  login: mc("PlayerList"),
+  /** `UUID of player … is …`. */
+  uuid: mc("ServerLoginPacketListenerImpl", "ServerLoginNetHandler", "NetHandlerLoginServer"),
+  /** `… lost connection: …`. */
+  disconnect: mc(
+    "ServerGamePacketListenerImpl",
+    "ServerConfigurationPacketListenerImpl",
+    "ServerLoginPacketListenerImpl",
+    "ServerPlayNetHandler",
+    "ServerLoginNetHandler",
+    "NetHandlerPlayServer",
+    "NetHandlerLoginServer",
+  ),
+  /** Port bind failure and the EULA notice. */
+  startup: mc("DedicatedServer", "Main", "Eula"),
+} as const;
+
+/** Velocity's own loggers in its latest.log (the console prints none). */
+const isVelocityLogger = (logger: string | null) => logger === null || /^com\.velocitypowered\.[\w$.]{1,200}$/.test(logger);
 
 export type LogEvent =
   | { type: "ready"; seconds: number | null }
@@ -172,39 +207,44 @@ function num(s: string): number {
 export function detectLogEvents(raw: string | ParsedLogLine): LogEvent[] {
   const p = typeof raw === "string" ? parseLogLine(raw) : raw;
   const events: LogEvent[] = [];
-  // 26.3+ logs join/leave broadcasts as "System chat: Steve joined the game". Server events need
-  // a recognised layout and a server logger; crash indicators below still look at every line.
-  const msg = consoleMessage(p) ?? "";
   if (isChatMessage(p.message)) return events;
+  // 26.3+ logs join/leave broadcasts as "System chat: Steve joined the game". Each server event
+  // needs a recognised layout and the logger that prints it (`EVENT_LOGGERS`); crash indicators
+  // below still look at every line.
+  const server = (loggers: readonly (string | null)[]) => consoleMessage(p, { loggers }) ?? "";
+  const velocity = isVelocityLogger(p.logger) ? (consoleMessage(p, { loggers: [p.logger] }) ?? "") : "";
 
   // Readiness: game servers `Done (3.456s)! For help, type "help"`; Velocity `Done (1.55s)!`.
-  let m = /^Done \((\d+(?:[.,]\d+)?)s\)!(?: For help, type "help")?/.exec(msg);
+  const READY = /^Done \((\d+(?:[.,]\d+)?)s\)!(?: For help, type "help")?/;
+  let m = READY.exec(server(EVENT_LOGGERS.ready)) ?? READY.exec(velocity);
   if (m) events.push({ type: "ready", seconds: num(m[1]!) });
 
-  if ((m = new RegExp(String.raw`^${NAME} joined the game$`).exec(msg)) && validName(m[1]!)) events.push({ type: "player_join", name: m[1]! });
-  else if ((m = new RegExp(String.raw`^${NAME} \(formerly known as ${NAME}\) joined the game$`).exec(msg)) && validName(m[1]!)) {
+  const broadcast = server(EVENT_LOGGERS.broadcast);
+  if ((m = new RegExp(String.raw`^${NAME} joined the game$`).exec(broadcast)) && validName(m[1]!)) events.push({ type: "player_join", name: m[1]! });
+  else if ((m = new RegExp(String.raw`^${NAME} \(formerly known as ${NAME}\) joined the game$`).exec(broadcast)) && validName(m[1]!)) {
     events.push({ type: "player_join", name: m[1]!, formerName: m[2]! });
   }
-  if ((m = new RegExp(String.raw`^${NAME} left the game$`).exec(msg)) && validName(m[1]!)) events.push({ type: "player_leave", name: m[1]! });
-  if ((m = new RegExp(String.raw`^${NAME}\[(.*)\] logged in with entity id (\d+) at \(`).exec(msg))) {
+  if ((m = new RegExp(String.raw`^${NAME} left the game$`).exec(broadcast)) && validName(m[1]!)) events.push({ type: "player_leave", name: m[1]! });
+  if ((m = new RegExp(String.raw`^${NAME}\[(.*)\] logged in with entity id (\d+) at \(`).exec(server(EVENT_LOGGERS.login)))) {
     events.push({ type: "player_login", name: m[1]!, address: address(m[2]!), entityId: Number(m[3]) });
   }
-  if ((m = new RegExp(String.raw`^UUID of player ${NAME} is ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`, "i").exec(msg))) {
+  if ((m = new RegExp(String.raw`^UUID of player ${NAME} is ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`, "i").exec(server(EVENT_LOGGERS.uuid)))) {
     events.push({ type: "player_uuid", name: m[1]!, uuid: m[2]!.toLowerCase() });
   }
-  if ((m = new RegExp(String.raw`^${NAME} lost connection: (.*)$`).exec(msg)) && validName(m[1]!)) {
+  const disconnect = server(EVENT_LOGGERS.disconnect);
+  if ((m = new RegExp(String.raw`^${NAME} lost connection: (.*)$`).exec(disconnect)) && validName(m[1]!)) {
     events.push({ type: "player_disconnect", name: m[1]!, reason: m[2]! });
-  } else if ((m = new RegExp(String.raw`^${NAME} \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\) lost connection: (.*)$`).exec(msg)) && validName(m[1]!)) {
+  } else if ((m = new RegExp(String.raw`^${NAME} \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\) lost connection: (.*)$`).exec(disconnect)) && validName(m[1]!)) {
     // Configuration phase (1.20.2+): `{name} ({uuid}) lost connection: {reason}`.
     events.push({ type: "player_disconnect", name: m[1]!, reason: m[3]! });
   }
   // Velocity (ConnectedPlayer#toString / VelocityServerConnection#toString, 4.2.0 source).
-  if ((m = new RegExp(String.raw`^\[connected player\] ${NAME} \((.*?)\) has connected$`).exec(msg))) {
+  if ((m = new RegExp(String.raw`^\[connected player\] ${NAME} \((.*?)\) has connected$`).exec(velocity))) {
     events.push({ type: "proxy_connect", name: m[1]!, address: address(m[2]!) });
-  } else if ((m = new RegExp(String.raw`^\[connected player\] ${NAME} \((.*?)\) has disconnected(?:: (.*))?$`).exec(msg))) {
+  } else if ((m = new RegExp(String.raw`^\[connected player\] ${NAME} \((.*?)\) has disconnected(?:: (.*))?$`).exec(velocity))) {
     events.push({ type: "proxy_disconnect", name: m[1]!, address: address(m[2]!), reason: m[3] ?? null });
   }
-  if ((m = new RegExp(String.raw`^\[server connection\] ${NAME} -> (\S+) has (connected|disconnected)$`).exec(msg))) {
+  if ((m = new RegExp(String.raw`^\[server connection\] ${NAME} -> ([A-Za-z0-9._-]{1,64}) has (connected|disconnected)$`).exec(velocity))) {
     events.push({ type: m[3] === "connected" ? "proxy_server_connect" : "proxy_server_disconnect", name: m[1]!, server: m[2]! });
   }
 
@@ -220,8 +260,9 @@ export function detectLogEvents(raw: string | ParsedLogLine): LogEvent[] {
       supportedJava: m[2] ? javaMajorForClassFileVersion(Number(m[2])) : null,
     });
   }
-  if (/\*\*\*\* FAILED TO BIND TO PORT!/.test(msg)) events.push({ type: "port_bind_failed" });
-  if (/^You need to agree to the EULA in order to run the server/.test(msg)) events.push({ type: "eula_required" });
+  const startup = server(EVENT_LOGGERS.startup);
+  if (/\*\*\*\* FAILED TO BIND TO PORT!/.test(startup)) events.push({ type: "port_bind_failed" });
+  if (/^You need to agree to the EULA in order to run the server/.test(startup)) events.push({ type: "eula_required" });
   const tps = parsePaperTps(p);
   if (tps) events.push(tps);
   return events;

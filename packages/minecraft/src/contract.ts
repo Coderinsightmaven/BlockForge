@@ -55,9 +55,18 @@ export function epochMsOf(date: string | null | undefined): number | null {
   return Number.isFinite(t) && t >= 0 ? Math.trunc(t) : null;
 }
 
-/** Modrinth version types outside release/beta/alpha are reported as `alpha` (least stable). */
+/** Whether a Modrinth version type is one the contract can express. */
+export function isContractVersionType(type: string): type is "release" | "beta" | "alpha" {
+  return type === "release" || type === "beta" || type === "alpha";
+}
+
+/**
+ * A known version type, unchanged. Planned files and update targets only ever carry known types
+ * (the planner refuses others), so an unknown one here is a bug and throws instead of being remapped.
+ */
 export function contractVersionType(type: string): "release" | "beta" | "alpha" {
-  return type === "release" || type === "beta" ? type : "alpha";
+  if (!isContractVersionType(type)) throw new TypeError(`unknown Modrinth version type "${type.slice(0, 32)}"`);
+  return type;
 }
 
 const MODRINTH_ID = /^[A-Za-z0-9]{1,16}$/;
@@ -198,6 +207,11 @@ export function toContractProjectDetails(p: ModrinthProjectDetails, software: Se
   };
 }
 
+/**
+ * Version summary for the contract. `listCompatibleVersions` only returns versions with a known
+ * type; for other sources filter with `isContractVersionType` first — an unknown type (`snapshot`, …)
+ * throws instead of being remapped.
+ */
 export function toContractVersionSummary(v: ModrinthVersionSummary): ContractVersionSummary {
   return {
     versionId: v.versionId,
@@ -224,7 +238,8 @@ export function toContractModrinthRef(id: ModrinthFileIdentity): ContractModrint
     title: capN(id.title, 256),
     versionId: id.versionId,
     versionNumber: cap(id.versionNumber, 128),
-    versionType: contractVersionType(id.versionType),
+    // The contract defines this one mapping: unknown upstream types of an installed file → `alpha`.
+    versionType: isContractVersionType(id.versionType) ? id.versionType : "alpha",
     iconUrl: httpsOrNull(id.iconUrl, "cdn.modrinth.com"),
     pageUrl: `https://modrinth.com/project/${encodeURIComponent(id.slug ?? id.projectId)}`,
   };
@@ -257,6 +272,23 @@ export function toContractPlanWarning(w: PlanWarning): ContractPlanWarning {
   return { code: w.code, level: w.level, message: cap(w.message, 1024), projectId: idOrNull(w.projectId), versionId: idOrNull(w.versionId) };
 }
 
+export const MAX_CONTRACT_PLAN_WARNINGS = 512;
+
+/**
+ * Plan warnings for the contract (≤ 512): errors first, then warnings, then infos (stable within a
+ * level), so the reasons for `installable: false` always survive the cap; when anything is cut, the
+ * last slot says how many were omitted.
+ */
+export function contractPlanWarnings(warnings: readonly PlanWarning[]): ContractPlanWarning[] {
+  const rank = { error: 0, warning: 1, info: 2 } as const;
+  const sorted = warnings.map((w, i) => ({ w, i })).sort((a, b) => rank[a.w.level] - rank[b.w.level] || a.i - b.i).map((x) => x.w);
+  if (sorted.length <= MAX_CONTRACT_PLAN_WARNINGS) return sorted.map(toContractPlanWarning);
+  const kept = sorted.slice(0, MAX_CONTRACT_PLAN_WARNINGS - 1).map(toContractPlanWarning);
+  const omitted = sorted.length - kept.length;
+  kept.push({ code: "DEPENDENCY_LIMIT", level: "info", message: `${omitted} more notes were omitted`, projectId: null, versionId: null });
+  return kept;
+}
+
 /** `restartRequired`: the server is not stopped (files take effect at the next start). */
 export function toContractInstallPlan(plan: ModrinthInstallPlan, opts: { restartRequired: boolean }): ContractInstallPlan {
   return {
@@ -267,7 +299,7 @@ export function toContractInstallPlan(plan: ModrinthInstallPlan, opts: { restart
     files: plan.files.slice(0, 128).map(toContractPlannedFile),
     alreadyInstalled: plan.alreadyInstalled.slice(0, 128),
     optionalDependencies: plan.optionalDependencies.slice(0, 128).map((o) => ({ projectId: o.projectId, versionId: o.versionId, slug: capN(o.slug, 64), title: capN(o.title, 256), requiredBy: o.requiredBy })),
-    warnings: plan.warnings.slice(0, 512).map(toContractPlanWarning),
+    warnings: contractPlanWarnings(plan.warnings),
     installable: plan.installable,
     restartRequired: opts.restartRequired,
   };
@@ -344,12 +376,14 @@ export interface PlayersOverviewInput {
  * reported, invalid entries (`issues`) become `listErrors`, lists are cut at 10 000 entries.
  */
 export function toContractPlayersOverview(input: PlayersOverviewInput): ContractPlayersOverview {
-  const listErrors: ContractPlayersOverview["listErrors"] = [];
+  type ListError = ContractPlayersOverview["listErrors"][number];
+  // Collected in priority order (unreadable files, then values BlockForge changed for display,
+  // then per-entry notes) and cut to 64 at the end with a summary, so no class is silently lost.
+  const fileErrs: ListError[] = (input.fileErrors ?? []).map((e) => ({ file: e.file, message: cap(e.message, 512) }));
+  const clampErrs: ListError[] = [];
+  const entryErrs: ListError[] = [];
   const truncated: ContractPlayersOverview["truncated"] = [];
-  const err = (file: (typeof listErrors)[number]["file"], message: string) => {
-    if (listErrors.length < 64) listErrors.push({ file, message: cap(message, 512) });
-  };
-  for (const e of input.fileErrors ?? []) err(e.file, e.message);
+  const err = (file: ListError["file"], message: string) => entryErrs.push({ file, message: cap(message, 512) });
   const take = <T>(kind: ContractPlayersOverview["truncated"][number], items: readonly T[]): T[] => {
     if (items.length > MAX_CONTRACT_PLAYER_LIST_ENTRIES) truncated.push(kind);
     return items.slice(0, MAX_CONTRACT_PLAYER_LIST_ENTRIES);
@@ -383,7 +417,7 @@ export function toContractPlayersOverview(input: PlayersOverviewInput): Contract
     };
   }
 
-  return {
+  const overview: ContractPlayersOverview = {
     online,
     onlineMode: input.onlineMode,
     whitelist: {
@@ -393,15 +427,24 @@ export function toContractPlayersOverview(input: PlayersOverviewInput): Contract
     },
     ops: take("ops", ops?.entries ?? []).map((e) => {
       const level = Math.min(4, Math.max(0, e.level));
-      if (level !== e.level) err("ops.json", `operator ${cap(e.name, 64)} has level ${e.level}; the server only knows 0–4`);
+      if (level !== e.level) clampErrs.push({ file: "ops.json", message: cap(`operator ${cap(e.name, 64)} has level ${e.level}; the server only knows 0–4`, 512) });
       return { uuid: e.uuid, name: cap(e.name, 64), level, bypassesPlayerLimit: e.bypassesPlayerLimit };
     }),
     bannedPlayers: take("bannedPlayers", bannedPlayers?.entries ?? []).map((e) => ({ uuid: e.uuid, name: cap(e.name, 64), ...ban(e) })),
     bannedIps: take("bannedIps", bannedIps?.entries ?? []).map((e) => ({ ip: cap(e.ip, 64), ...ban(e) })),
     truncated,
-    listErrors,
+    listErrors: [],
     availableActions: input.availableActions,
   };
+  const all = [...fileErrs, ...clampErrs, ...entryErrs];
+  if (all.length <= 64) overview.listErrors = all;
+  else {
+    const kept = all.slice(0, 63);
+    const files = [...new Set(all.slice(63).map((e) => e.file))].join(", ");
+    kept.push({ file: all[63]!.file, message: `${all.length - 63} more problems in ${files}` });
+    overview.listErrors = kept;
+  }
+  return overview;
 }
 
 /** `PlayerActionResult.feedback` of the console path. */

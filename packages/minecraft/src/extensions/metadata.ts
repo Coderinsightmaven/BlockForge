@@ -1,6 +1,7 @@
 import type { ExtensionProblemCode, ServerSoftware } from "@blockforge/contracts";
 import { parse as parseToml } from "smol-toml";
 import { isMap, isScalar, parseDocument, type Document } from "yaml";
+import { isSafeJarFilename, isWindowsReservedName } from "../modrinth/plan.js";
 
 /**
  * Parsers for the metadata files inside plugin/mod jars. The control plane reads these small
@@ -358,8 +359,11 @@ export function parseFabricModJson(text: string): ExtensionMetadata {
 
 /** A relative path inside a jar (`META-INF/jars/x.jar`): no `..`/`.` segments, no absolute or drive paths, ends in `.jar`. */
 export function isSafeNestedJarPath(p: string): boolean {
-  if (p.length > 512 || !/^[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*$/.test(p) || !p.toLowerCase().endsWith(".jar")) return false;
-  return p.split("/").every((seg) => seg !== "." && seg !== "..");
+  if (p.length > 512 || !/^[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*$/.test(p)) return false;
+  const segments = p.split("/");
+  // Same rule as installable file names for the jar itself; no "."/".." or device names (CON, NUL, …) anywhere.
+  if (!isSafeJarFilename(segments.at(-1)!)) return false;
+  return segments.every((seg) => seg !== "." && seg !== ".." && !isWindowsReservedName(seg));
 }
 
 /** Fabric dependency ids that are the platform itself (not separate mods). */

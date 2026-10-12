@@ -269,9 +269,13 @@ describe("#5 an installed dependency must match the pin", () => {
     expect(codes(plan.warnings)).not.toContain("DEPENDENCY_ALREADY_INSTALLED:info:LIBW");
   });
 
-  it("installed copy equal to the pin → nothing to fetch", async () => {
+  it("installed copy equal to the pin (same SHA-512) → nothing to fetch", async () => {
     const { client } = upstream(lists, { PINL: pin, OLDL: oldV });
-    const plan = await planModrinthInstall(client, { ...paper, project: "ROOT", installed: [{ path: "plugins/lib.jar", projectId: "LIBW", versionId: "PINL" }] });
+    const plan = await planModrinthInstall(client, {
+      ...paper,
+      project: "ROOT",
+      installed: [{ path: "plugins/lib.jar", projectId: "LIBW", versionId: "PINL", sha512: pin.files[0]!.hashes.sha512! }],
+    });
     expect(plan.files.map((f) => f.projectId)).toEqual(["ROOT"]);
     expect(codes(plan.warnings)).toContain("DEPENDENCY_ALREADY_INSTALLED:info:LIBW");
   });

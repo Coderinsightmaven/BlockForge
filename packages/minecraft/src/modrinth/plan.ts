@@ -1,7 +1,7 @@
 import type { Checksum, ServerSoftware } from "@blockforge/contracts";
 import { CatalogError } from "../errors.js";
 import { assertAllowedUrl } from "../http.js";
-import { MODRINTH_HOSTS, assertModrinthId, type ModrinthClient, type UpdateFilter, type VersionType } from "./client.js";
+import { MODRINTH_HOSTS, assertModrinthId, versionHasFileHash, type ModrinthClient, type UpdateFilter, type VersionType } from "./client.js";
 import { isClientOnly, loaderMatch, sideSupport, type ModrinthLoaderProfile, type SideSupport } from "./loaders.js";
 import type { ModrinthFileRaw, ModrinthProjectRaw, ModrinthVersionRaw } from "./schemas.js";
 import { assertGameVersion, requireLoaderProfile, safeIconUrl } from "./search.js";
@@ -110,12 +110,16 @@ const UNSAFE_FILENAME = /[/\\:*?"<>|\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 /** Windows device names, which stay devices with any extension (`CON.jar`, `nul.txt.jar`). */
 const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])$/i;
 
+/** Whether a path component is a Windows device name (`CON`, `nul.txt`, `COM1.jar`, …): checked on the part before the first dot. */
+export function isWindowsReservedName(component: string): boolean {
+  return WINDOWS_DEVICE.test(component.split(".")[0]!.trimEnd());
+}
+
 /** A Modrinth filename that is safe as a single path component on Linux and Windows and is a `.jar`. */
 export function isSafeJarFilename(name: string): boolean {
   if (name.length < 5 || name.length > 255 || UNSAFE_FILENAME.test(name) || name.startsWith(".") || name.endsWith(" ") || name.endsWith(".")) return false;
   if (!name.toLowerCase().endsWith(".jar")) return false;
-  const stem = name.split(".")[0]!.trimEnd();
-  return !WINDOWS_DEVICE.test(stem);
+  return !isWindowsReservedName(name);
 }
 
 /**
@@ -130,6 +134,10 @@ export function isSafeInstalledExtensionPath(path: string, installDir: "plugins"
 }
 
 export type FileProblem = "NO_JAR" | "UNSAFE_FILENAME" | "URL_NOT_ALLOWED" | "TOO_LARGE" | "NO_SHA512";
+/** Why an available update cannot be applied: a problem with the new file, or an installed path that is not safe to replace. */
+export type UpdateProblem = FileProblem | "UNSAFE_INSTALLED_PATH";
+/** Most installed files of one project a plan replaces (the contract's `replaces` cap). */
+export const MAX_REPLACED_FILES = 16;
 
 export interface InstallableFile {
   file: ModrinthFileRaw;
@@ -195,14 +203,24 @@ function versionFilter(profile: ModrinthLoaderProfile, mc: string | null): { loa
   return mc === null ? { loaders } : { loaders, gameVersions: [mc] };
 }
 
-/** Versions of a project that can run on the server (newest first), for a version picker. */
-export async function listCompatibleVersions(client: ModrinthClient, project: string, target: CompatibilityTarget): Promise<ModrinthVersionSummary[]> {
+/**
+ * Versions of a project the installer would accept (newest first), for a version picker: the same
+ * `isSelectableVersion` policy as the planner (listed, compatible, known type, prereleases only
+ * with `allowPrerelease` — default true like the planner; the API passes its own default, false).
+ */
+export async function listCompatibleVersions(
+  client: ModrinthClient,
+  project: string,
+  target: CompatibilityTarget,
+  opts: { allowPrerelease?: boolean } = {},
+): Promise<ModrinthVersionSummary[]> {
   const profile = requireLoaderProfile(target.software);
   const mc = targetVersion(target, profile);
+  const allowPre = opts.allowPrerelease ?? true;
   const versions = await client.listVersions(project, versionFilter(profile, mc));
   return versions
+    .filter((v) => isSelectableVersion(v, profile, mc, allowPre))
     .map((v) => summarizeVersion(v, profile, mc, client.cdnHosts))
-    .filter((s) => s.loaderMatch !== "none" && s.gameVersionMatch)
     .sort((a, b) => (Date.parse(b.datePublished) || 0) - (Date.parse(a.datePublished) || 0));
 }
 
@@ -332,6 +350,13 @@ interface Node {
   depth: number;
 }
 
+/** Whether an installed file's hash is one of the version's files (`unknown` when the ref carries no hash). */
+function installedHashState(i: InstalledExtensionRef, v: ModrinthVersionRaw): "match" | "mismatch" | "unknown" {
+  if (i.sha512) return versionHasFileHash(v, i.sha512, "sha512") ? "match" : "mismatch";
+  if (i.sha1) return versionHasFileHash(v, i.sha1, "sha1") ? "match" : "mismatch";
+  return "unknown";
+}
+
 function hashesOf(i: InstalledExtensionRef): string[] {
   const out: string[] = [];
   if (i.sha1) out.push(i.sha1.toLowerCase());
@@ -409,7 +434,10 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
   // Installed versions (identification results): needed for pins and incompatibility checks.
   const installedVersions = new Map<string, ModrinthVersionRaw>();
   const installedVersionIds = [...new Set(installed.map((i) => i.versionId).filter((id): id is string => !!id))];
-  if (installedVersionIds.length > 0) for (const iv of await client.getVersions(installedVersionIds)) installedVersions.set(iv.id, iv);
+  for (let i = 0; i < installedVersionIds.length; i += 100) {
+    if (!spend()) break; // counted like every other request; unknown installed versions are reported below
+    for (const iv of await client.getVersions(installedVersionIds.slice(i, i + 100))) installedVersions.set(iv.id, iv);
+  }
 
   // --- root version
   let rootVersion: ModrinthVersionRaw;
@@ -424,7 +452,8 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
     if (c.loader === "none") warn("VERSION_MISMATCH", "error", `${what} is not built for ${req.software} (${displayText(pinned.loaders.join(", "))})`, rootProject.id, pinned.id);
     else if (!c.gameVersion) warn("VERSION_MISMATCH", overridable, `${what} does not list Minecraft ${mc}`, rootProject.id, pinned.id);
     if (!c.listed) warn("NOT_LISTED", overridable, `${what} is ${displayText(pinned.status ?? "not listed", 32)} on Modrinth`, rootProject.id, pinned.id);
-    if (!allowPre && pinned.version_type !== "release") warn("PRERELEASE", overridable, `${what} is a ${displayText(pinned.version_type, 16)} build and prereleases are not allowed`, rootProject.id, pinned.id);
+    if (TYPE_RANK[pinned.version_type] === undefined) warn("VERSION_MISMATCH", "error", `${what} has the unknown version type "${displayText(pinned.version_type, 16)}"`, rootProject.id, pinned.id);
+    else if (!allowPre && pinned.version_type !== "release") warn("PRERELEASE", overridable, `${what} is a ${displayText(pinned.version_type, 16)} build and prereleases are not allowed`, rootProject.id, pinned.id);
   } else {
     const picked = pickModrinthVersion(await client.listVersions(rootProject.id, filter), profile, mc, { allowPrerelease: allowPre });
     if (!picked) throw new CatalogError("UNAVAILABLE", `${label(rootProject.id)} has no version for ${req.software}${mc ? ` ${mc}` : ""}`);
@@ -435,6 +464,8 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
   const order: Node[] = [];
   const optional = new Map<string, { projectId: string | null; versionId: string | null; requiredBy: string }>();
   const incompatible: Array<{ by: string; projectId: string }> = [];
+  /** Incompatibilities with one specific version: compared by id, never fetched. */
+  const incompatibleVersions: Array<{ by: string; versionId: string }> = [];
   const mentioned = new Set<string>();
 
   /** A pinned version honoured only when it belongs to the project and passes the selection policy. */
@@ -489,12 +520,10 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
         continue;
       }
       if (type === "incompatible") {
-        if (!projectId && pinned) projectId = (await fetchVersion(pinned))?.project_id ?? null;
-        if (projectId) {
+        if (pinned) incompatibleVersions.push({ by: node.projectId, versionId: pinned });
+        else if (projectId) {
           mentioned.add(projectId);
           incompatible.push({ by: node.projectId, projectId });
-        } else {
-          later(() => warn("DEPENDENCY_UNRESOLVED", "warning", `${label(node.projectId)} declares an incompatibility with version ${pinned ?? "?"} that could not be looked up`, node.projectId, node.version.id));
         }
         continue;
       }
@@ -546,6 +575,12 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
       let chosen: ModrinthVersionRaw | null = pinned ? await honourPin(pid, pinned) : null;
       const inst = installedByProject.get(pid);
       if (inst) {
+        // Never short-circuit on a path the planner could not replace.
+        const unsafe = inst.filter((i) => !isSafeInstalledExtensionPath(i.path, profile.installDir));
+        if (unsafe.length > 0) {
+          later(() => warn("UNSAFE_INSTALLED_PATH", "error", `the installed ${label(pid)} at ${displayText(unsafe.map((i) => i.path).join(", "))} is not a plain ${profile.installDir}/<name>.jar file; remove it manually`, pid, null));
+          continue;
+        }
         const instVersions = inst.map((i) => (i.versionId ? installedVersions.get(i.versionId) : undefined));
         if (instVersions.some((v) => v === undefined)) {
           later(() => warn("DEPENDENCY_INSTALLED_UNKNOWN", "error", `${label(node.projectId)} needs ${label(pid)}; the installed copy (${displayText(inst.map((i) => i.path).join(", "))}) cannot be matched to a Modrinth version`, pid, null));
@@ -553,14 +588,24 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
         }
         const versions = instVersions as ModrinthVersionRaw[];
         if (chosen) {
-          if (versions.every((v) => v.id === chosen!.id)) {
-            later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(pid)} ${vlabel(chosen!)}, which is installed`, pid, chosen!.id));
+          const pin = chosen;
+          const same = inst.every((i, k) => versions[k]!.id === pin.id && installedHashState(i, pin) === "match");
+          if (same) {
+            later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(pid)} ${vlabel(pin)}, which is installed`, pid, pin.id));
             continue;
           }
-          // Installed version differs from the pin: replace it (the file loop fills `replaces`).
+          // Other version, other bytes, or bytes we cannot check: download the pin and replace the old jar(s).
         } else if (versions.every((v) => versionCompatibility(v, profile, mc).loader !== "none" && versionCompatibility(v, profile, mc).gameVersion)) {
-          later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(pid)}, which is installed (${displayText(versions.map((v) => v.version_number).join(", "))})`, pid, null));
-          continue;
+          const states = inst.map((i, k) => installedHashState(i, versions[k]!));
+          if (states.includes("mismatch")) {
+            later(() => warn("DEPENDENCY_INSTALLED_UNKNOWN", "error", `${label(node.projectId)} needs ${label(pid)}; the installed file does not match the Modrinth version it was identified as`, pid, null));
+            continue;
+          }
+          if (states.every((st) => st === "match")) {
+            later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(pid)}, which is installed (${displayText(versions.map((v) => v.version_number).join(", "))})`, pid, null));
+            continue;
+          }
+          later(() => warn("REPLACES_INSTALLED", "warning", `the installed ${label(pid)} cannot be verified (no hash) and will be replaced`, pid, null));
         } else {
           later(() => warn("REPLACES_INSTALLED", "warning", `the installed ${label(pid)} does not fit this server and will be replaced`, pid, null));
         }
@@ -593,6 +638,12 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
       if (dependencyType(d.dependency_type) === "incompatible" && d.project_id && nodes.has(d.project_id)) incompatible.push({ by: iv.project_id, projectId: d.project_id });
     }
   }
+  for (const { by, versionId } of incompatibleVersions) {
+    const planned = [...nodes.values()].find((n) => n.version.id === versionId);
+    const inst = installed.find((i) => i.versionId === versionId);
+    if (planned && planned.projectId !== by) warn("INCOMPATIBLE_IN_PLAN", "error", `${label(by)} is incompatible with ${label(planned.projectId)} ${vlabel(planned.version)}`, planned.projectId, versionId);
+    else if (inst && inst.projectId !== by && !nodes.has(inst.projectId ?? "")) warn("INCOMPATIBLE_INSTALLED", "error", `${label(by)} is incompatible with the installed ${displayText(inst.path)}`, inst.projectId ?? null, versionId);
+  }
   for (const { by, projectId } of incompatible) {
     if (installedByProject.has(projectId) || (installedByProject.has(by) && nodes.has(projectId))) {
       const path = (installedByProject.get(projectId) ?? installedByProject.get(by))![0]!.path;
@@ -614,6 +665,10 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
     }
     if (loaderMatch(profile, v.loaders) === "warning") {
       warn("QUILT_ON_FABRIC", "warning", `${what} is built for ${displayText(v.loaders.join(", "))}; Fabric cannot load Quilt-only mods`, node.projectId, v.id);
+    }
+    if (TYPE_RANK[v.version_type] === undefined) {
+      warn("VERSION_MISMATCH", "error", `${what} has the unknown version type "${displayText(v.version_type, 16)}"`, node.projectId, v.id);
+      continue;
     }
     if (v.version_type !== "release") warn("PRERELEASE", "info", `${what} is a ${displayText(v.version_type, 16)} build`, node.projectId, v.id);
 
@@ -641,6 +696,10 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
       if (i.path === destPath) continue;
       if (isSafeInstalledExtensionPath(i.path, profile.installDir)) replaces.push(i.path);
       else warn("UNSAFE_INSTALLED_PATH", "error", `the installed ${label(node.projectId)} at ${displayText(i.path)} is not a plain ${profile.installDir}/<name>.jar file; remove it manually`, node.projectId, v.id);
+    }
+    if (replaces.length > MAX_REPLACED_FILES) {
+      warn("REPLACES_INSTALLED", "error", `${replaces.length} installed copies of ${label(node.projectId)} would have to be replaced (at most ${MAX_REPLACED_FILES}); remove the extra ones first`, node.projectId, v.id);
+      continue;
     }
     if (replaces.length > 0) warn("REPLACES_INSTALLED", "info", `${label(node.projectId)} replaces ${displayText(replaces.join(", "))}`, node.projectId, v.id);
     const clash = installed.find((i) => i.path.toLowerCase() === destPath.toLowerCase() && i.projectId !== node.projectId);
@@ -780,7 +839,7 @@ export interface ModrinthUpdateStatus {
   updateAvailable: boolean;
   /** Ready-to-run replacement when an update is available and installable. */
   file: ModrinthPlannedFile | null;
-  problem: FileProblem | null;
+  problem: UpdateProblem | null;
 }
 
 /** Version types an update may have: never less stable than what is installed (unless `allowPrerelease`). */
@@ -841,11 +900,11 @@ export async function checkModrinthUpdates(
     }
     const newer = !!(cur && lat && lat.id !== cur.id && (Date.parse(lat.date_published) || 0) > (Date.parse(cur.date_published) || 0));
     let file: ModrinthPlannedFile | null = null;
-    let problem: FileProblem | null = null;
+    let problem: UpdateProblem | null = null;
     if (newer && lat) {
       const picked = primaryJarFile(lat, client.cdnHosts);
       if ("problem" in picked) problem = picked.problem;
-      else if (!isSafeInstalledExtensionPath(f.path, profile.installDir)) problem = "UNSAFE_FILENAME";
+      else if (!isSafeInstalledExtensionPath(f.path, profile.installDir)) problem = "UNSAFE_INSTALLED_PATH";
       else {
         const pf = picked.file;
         const destPath = `${profile.installDir}/${pf.filename}`;

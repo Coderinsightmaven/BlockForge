@@ -104,6 +104,9 @@ function messageOf(line: string): string {
   return commandFeedbackMessage(line) ?? "";
 }
 
+/** Most players returned from one `list` line (the rest are counted in `skipped`). */
+export const MAX_LISTED_PLAYERS = 10_000;
+
 const NAME_AND_ID = /^(\S{1,16}) \(([0-9a-fA-F-]{32,36})\)$/;
 
 /** Splits a ", "-separated name list; entries that are not valid player names are counted, not returned. */
@@ -112,13 +115,14 @@ function splitPlayers(text: string): { players: OnlinePlayer[]; skipped: number 
   const players: OnlinePlayer[] = [];
   let skipped = 0;
   if (t === "") return { players, skipped };
-  for (const part of t.split(", ").slice(0, 1000)) {
+  // Every entry is looked at: invalid names and entries beyond MAX_LISTED_PLAYERS are counted, never silently lost.
+  for (const part of t.split(", ")) {
     const p = part.trim();
     if (p === "") continue;
     const m = NAME_AND_ID.exec(p);
     const name = m ? m[1]! : p;
     const uuid = m ? normalizeUuid(m[2]!) : null;
-    if (!isValidPlayerName(name) || (m && uuid === null)) skipped++;
+    if (!isValidPlayerName(name) || (m && uuid === null) || players.length >= MAX_LISTED_PLAYERS) skipped++;
     else players.push({ name, uuid });
   }
   return { players, skipped };

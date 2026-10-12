@@ -102,8 +102,13 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
   names), on `cdn.modrinth.com` (normalised href stored), ≤ 2 GiB, with SHA-512 (always the agent
   checksum). Hash lookups only count when the returned version lists the hash. Search drops hits
   without a matching loader and client-only hits (`filteredOut`).
-* Rate limits: `ModrinthRateLimiter` (shareable via the `limiter` option) spaces requests when few
-  remain, waits for the reset up to `maxWaitMs` (2 s), otherwise `RATE_LIMITED`.
+* Rate limits: `ModrinthRateLimiter` (shareable via the `limiter` option) serialises callers with
+  one permit, spaces requests when few remain (each wait ≤ `maxWaitMs`, 2 s — requests are always
+  sent while quota remains) and throws `RATE_LIMITED` only when the window is used up and its reset
+  is further than `maxWaitMs`.
+* More than 16 installed copies to replace, unknown version types and installed copies whose path
+  or hash does not match block a plan; update checks report `UNSAFE_INSTALLED_PATH` for paths they
+  cannot replace.
 
 ## Players
 
@@ -116,6 +121,11 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
 * Console commands accept only `[A-Za-z0-9_]{1,16}` names and IPv4 addresses (IPv4-mapped IPv6 is
   normalised; vanilla `IpBanList` cuts addresses at the first `:`, so IPv6 bans never match); reasons are collapsed to
   one line (control/format/separator characters → spaces, ≤ 200 characters).
+* Events (`detectLogEvents`) need the logger class that prints each line (`EVENT_LOGGERS`; none for
+  vanilla/Fabric/Paper/Velocity console, `minecraft/<Class>` on Forge/NeoForge) and a strict name
+  (`[A-Za-z0-9_]{1,16}`, plus Floodgate's `.` prefix).
+* List files: op `level` missing → 0 like the server; text with control/line-break characters is
+  shown with spaces and noted; banned-ips entries are canonical IPv4 (other stored spellings noted).
 * Output parsers only read the message part of a console line (chat lines `<name> …` never match);
   the control plane should still only parse lines that follow the command it sent.
 
