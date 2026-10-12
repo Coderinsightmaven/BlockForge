@@ -122,7 +122,7 @@ converge to a state) — replay protection and idempotency are defence in depth.
 | `heartbeat` | `{ts, uptimeMs}` | Every `heartbeatIntervalMs`. Node becomes `unreachable` after 3 missed intervals. |
 | `progress` | `{id, ts, stage, message?, percent?}` | Long-running command progress. |
 | `result` | `{id, ts, ok: true, data}` or `{id, ts, ok: false, error: {code, message, retryable, details?}}` | Exactly one per command. |
-| `metrics` | `{ts, node: NodeMetricSample, workloads: WorkloadMetricSample[]}` | Every `metricsIntervalMs` (batched up to 2 samples per frame). |
+| `metrics` | `{ts, node: NodeMetricSample, workloads: WorkloadMetricSample[]}` | Every `metricsIntervalMs`; exactly one node sample per frame. |
 | `event` | `{ts, event: "workload.state" \| "workload.oom" \| "agent.warning", data}` | Asynchronous state changes. |
 | `logs` | `{workloadId, lines: [{ts, stream: "stdout"\|"stderr", line}], dropped?: n}` | Continuous stdout/stderr of managed workloads (≤ 200 lines/s/workload sustained, burst 2000; excess dropped and counted). Lines truncated at 8 KiB. |
 
@@ -131,7 +131,21 @@ converge to a state) — replay protection and idempotency are defence in depth.
 `VALIDATION_FAILED`, `UNSUPPORTED_COMMAND`, `COMMAND_REJECTED`, `NOT_FOUND`,
 `ALREADY_EXISTS`, `CONFLICT` (e.g. `ifMatchSha256` mismatch), `PATH_FORBIDDEN`,
 `QUOTA_EXCEEDED`, `CHECKSUM_MISMATCH`, `DOWNLOAD_FAILED`, `HOST_NOT_ALLOWED`,
-`RUNTIME_ERROR` (Docker failure), `TIMEOUT`, `BUSY`, `INTERNAL`.
+`IMAGE_NOT_ALLOWED`, `RUNTIME_ERROR` (Docker failure), `TIMEOUT`, `BUSY`, `INTERNAL`.
+
+### 5.1 Behaviour notes (agreed with the Go implementation)
+* `fs.write` with `ifMatchSha256` set and the file missing → `CONFLICT` with `details.currentSha256: null`;
+  `ifMatchSha256: null` and the file exists → `ALREADY_EXISTS`.
+* `WorkloadStatus.state` is `restarting` while an agent-side restart (restart policy back-off) is pending.
+* `containerId` is Docker's 12-character short id.
+* `node.probe` returns `reachable: true` with `error` set when TCP connects but the Minecraft SLP exchange fails.
+* `agent.warning` events use codes such as `WORKLOAD_RESTART_LIMIT` (restart policy exhausted).
+* `fs.transfer.pull` verifies an optional `X-BlockForge-Sha256` response header from the control plane.
+* `workload.state` events are re-sent after every (re)connect/resync — consumers must be idempotent.
+* After an agent restart, a replayed command id found in the journal is rejected as `COMMAND_REJECTED`
+  ("duplicate") and its original outcome is unknown to the agent. The control plane must then reconcile
+  (`workload.status` / `fs.stat`) and, if needed, re-issue the operation under a **new** command id.
+* `fs.list` returns at most 50 000 entries and sets `truncated: true` when capped.
 
 ## 6. Command catalogue
 

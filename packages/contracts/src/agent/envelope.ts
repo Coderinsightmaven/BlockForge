@@ -40,6 +40,7 @@ export const AgentErrorCode = z.enum([
   "CHECKSUM_MISMATCH",
   "DOWNLOAD_FAILED",
   "HOST_NOT_ALLOWED",
+  "IMAGE_NOT_ALLOWED",
   "RUNTIME_ERROR",
   "TIMEOUT",
   "BUSY",

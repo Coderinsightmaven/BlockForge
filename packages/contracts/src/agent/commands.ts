@@ -73,7 +73,11 @@ export const AGENT_COMMANDS = {
     }),
     result: z.object({ lines: z.array(LogLine) }),
   },
-  "fs.list": { payload: WorkloadRef.extend({ path: RelativePath }), result: z.object({ entries: z.array(FileEntry) }) },
+  "fs.list": {
+    payload: WorkloadRef.extend({ path: RelativePath }),
+    /** The agent caps listings (50 000 entries); `truncated` tells the UI to suggest search instead. */
+    result: z.object({ entries: z.array(FileEntry), truncated: z.boolean().default(false) }),
+  },
   "fs.stat": { payload: WorkloadRef.extend({ path: RelativePath }), result: FileEntry },
   "fs.read": {
     payload: WorkloadRef.extend({ path: RelativePath, maxBytes: z.number().int().min(1).max(5 * 1024 * 1024) }),

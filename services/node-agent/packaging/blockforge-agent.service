@@ -1,0 +1,60 @@
+# BlockForge node agent — hardened systemd unit.
+# Install: see services/node-agent/README.md ("Install as a systemd service").
+#
+# The agent runs as the dedicated, unprivileged user `blockforge`, which is a member of the `docker`
+# group (root-equivalent on the host — the agent therefore only exposes its fixed, signed command
+# catalogue). Workload containers run as the same UID/GID by default, so no chown is needed.
+[Unit]
+Description=BlockForge node agent
+Documentation=file:///usr/local/share/doc/blockforge-agent/README.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=blockforge
+Group=blockforge
+SupplementaryGroups=docker
+ExecStart=/usr/local/bin/blockforge-agent run --config-dir /etc/blockforge
+Environment=BLOCKFORGE_LOG_LEVEL=info
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0027
+LimitNOFILE=65536
+TasksMax=1024
+
+# --- sandboxing ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+# Data root and config dir are the only writable paths. If the data root lives under /home,
+# set ProtectHome=read-only and add it here instead.
+ReadWritePaths=/var/lib/blockforge /etc/blockforge
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=default
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @mount @swap @reboot @module @raw-io @obsolete @debug
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

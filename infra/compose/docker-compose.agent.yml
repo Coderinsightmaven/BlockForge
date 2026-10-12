@@ -1,0 +1,82 @@
+# BlockForge node agent as a container (Docker Desktop dev box or a Linux node).
+#
+# Parameters (environment or an .env file next to this file):
+#   BF_DATA_ROOT    absolute data root; bind-mounted at the IDENTICAL path because workload bind
+#                   sources are resolved by the Docker daemon on the host   (default /var/lib/blockforge)
+#   BF_UID/BF_GID   user the agent and its workloads run as                 (default 1000:1000)
+#   BF_DOCKER_GID   group owning /var/run/docker.sock (Docker Desktop: 0, Ubuntu: `stat -c %g /var/run/docker.sock`)
+#   BF_CP_URL       control-plane URL used by the enroll command below
+#   BF_AGENT_IMAGE  image tag (default blockforge/node-agent:dev, built from this repo)
+#
+# Docker Desktop (control plane on the Windows host):
+#   docker compose -f infra/compose/docker-compose.agent.yml build
+#   BLOCKFORGE_ENROLL_TOKEN=bfe_... docker compose -f infra/compose/docker-compose.agent.yml run --rm \
+#       -e BLOCKFORGE_ENROLL_TOKEN agent enroll --url http://host.docker.internal:8080 --insecure-allow-http --name dev-node
+#   docker compose -f infra/compose/docker-compose.agent.yml up -d agent
+#
+# Linux node with an SSH reverse tunnel to the control plane (e.g. the test node):
+#   BF_DATA_ROOT=/home/game/blockforge BF_DOCKER_GID=983 BF_CP_URL=http://127.0.0.1:18080 ...same commands...
+#
+# network_mode: host is deliberate: the agent must reach workload containers on their bf-* bridge
+# networks for Server List Ping (container IPs are routable from the host network namespace, not from
+# another bridge), and loopback-only control-plane tunnels (127.0.0.1:18080) must be reachable.
+name: blockforge-agent
+
+x-agent-image: &agent-image
+  image: ${BF_AGENT_IMAGE:-blockforge/node-agent:dev}
+  build:
+    context: ../..
+    dockerfile: infra/containers/node-agent/Dockerfile
+
+services:
+  # One-shot: make sure the data root exists and is owned by BF_UID:BF_GID (top-level directory only).
+  agent-init:
+    <<: *agent-image
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ${BF_DATA_ROOT:-/var/lib/blockforge}:${BF_DATA_ROOT:-/var/lib/blockforge}
+    command: ["init-dirs", "--uid", "${BF_UID:-1000}", "--gid", "${BF_GID:-1000}", "${BF_DATA_ROOT:-/var/lib/blockforge}"]
+    restart: "no"
+
+  agent:
+    <<: *agent-image
+    container_name: blockforge-agent
+    depends_on:
+      agent-init:
+        condition: service_completed_successfully
+    user: "${BF_UID:-1000}:${BF_GID:-1000}"
+    group_add: ["${BF_DOCKER_GID:-0}"]
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    environment:
+      HOST_PROC: /host/proc
+      HOST_SYS: /host/sys
+      HOST_ETC: /host/etc
+      # Set HOST_ROOT=/host/root and enable the commented mount below to report every host filesystem;
+      # without it only the filesystem holding the data root is reported.
+      BLOCKFORGE_CONFIG_DIR: ${BF_DATA_ROOT:-/var/lib/blockforge}/agent
+      BLOCKFORGE_DATA_ROOT: ${BF_DATA_ROOT:-/var/lib/blockforge}
+      BLOCKFORGE_LOG_LEVEL: ${BF_LOG_LEVEL:-info}
+      BF_CP_URL: ${BF_CP_URL:-http://host.docker.internal:8080}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+      - ${BF_DATA_ROOT:-/var/lib/blockforge}:${BF_DATA_ROOT:-/var/lib/blockforge}
+      # - /:/host/root:ro,rslave
+    command: ["run"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"

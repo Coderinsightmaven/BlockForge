@@ -1,0 +1,5 @@
+# Build context is the repository root; only the agent module is sent to the builder.
+*
+!services/node-agent/
+services/node-agent/bin/
+services/node-agent/scripts/
