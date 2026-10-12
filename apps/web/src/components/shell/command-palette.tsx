@@ -1,10 +1,11 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { Moon, Search, Server, Sun, User } from "lucide-react";
+import { Gamepad2, Moon, Search, Server, Sun, User } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Me } from "@blockforge/contracts";
 import { canAny, hasGlobal } from "@/lib/permissions";
-import { nodesQuery, usersQuery } from "@/lib/queries";
+import { nodesQuery, serversQuery, usersQuery } from "@/lib/queries";
+import { canSeeAllServers } from "@/lib/server-permissions";
 import { useTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +18,7 @@ import {
 } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
-import { NODE_CONNECTION_META, StatusDot, statusMeta } from "@/components/ui/status";
+import { NODE_CONNECTION_META, SERVER_STATE_META, StatusDot, statusMeta } from "@/components/ui/status";
 import { NAV_ITEMS, navAvailability } from "./nav-items";
 import { useQuickActions } from "./quick-actions";
 
@@ -33,6 +34,11 @@ export function CommandPalette({ me }: { me: Me | undefined }) {
   const canUsers = hasGlobal(me, "users.view");
   const nodes = useQuery({ ...nodesQuery, enabled: open && canNodes });
   const users = useInfiniteQuery({ ...usersQuery, enabled: open && canUsers });
+  // The API only returns servers the session can see; admins get everything, others their own.
+  const servers = useInfiniteQuery({
+    ...serversQuery(canSeeAllServers(me) ? "all" : "mine", ""),
+    enabled: open,
+  });
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -52,6 +58,7 @@ export function CommandPalette({ me }: { me: Me | undefined }) {
 
   const pages = NAV_ITEMS.filter((i) => i.to && navAvailability(i, me).kind === "available");
   const userItems = users.data?.pages.flatMap((p) => p.items) ?? [];
+  const serverItems = servers.data?.pages.flatMap((p) => p.items) ?? [];
 
   return (
     <>
@@ -69,9 +76,11 @@ export function CommandPalette({ me }: { me: Me | undefined }) {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-xl gap-0 overflow-hidden p-0" hideClose>
           <DialogTitle className="sr-only">Search</DialogTitle>
-          <DialogDescription className="sr-only">Search pages, nodes, users and actions</DialogDescription>
+          <DialogDescription className="sr-only">
+            Search pages, servers, nodes, users and actions
+          </DialogDescription>
           <Command loop>
-            <CommandInput placeholder="Search pages, nodes, users, actions…" />
+            <CommandInput placeholder="Search servers, nodes, users, pages…" />
             <CommandList>
               <CommandEmpty>No results.</CommandEmpty>
               <CommandGroup heading="Pages">
@@ -102,6 +111,26 @@ export function CommandPalette({ me }: { me: Me | undefined }) {
                   Switch to {resolved === "dark" ? "light" : "dark"} theme
                 </CommandItem>
               </CommandGroup>
+              {serverItems.length ? (
+                <CommandGroup heading="Servers">
+                  {serverItems.map((sv) => (
+                    <CommandItem
+                      key={sv.id}
+                      value={`server ${sv.name} ${sv.slug} ${sv.shortId} ${sv.address ?? ""} ${sv.id}`}
+                      keywords={[sv.nodeName, sv.templateName, sv.ownerName]}
+                      onSelect={() =>
+                        run(() => void navigate({ to: "/servers/$serverId", params: { serverId: sv.id } }))
+                      }
+                    >
+                      <Gamepad2 aria-hidden />
+                      <span className="truncate">{sv.name}</span>
+                      <span className="ml-auto">
+                        <StatusDot meta={statusMeta(SERVER_STATE_META, sv.state)} />
+                      </span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              ) : null}
               {canNodes && nodes.data?.length ? (
                 <CommandGroup heading="Nodes">
                   {nodes.data.map((n) => (

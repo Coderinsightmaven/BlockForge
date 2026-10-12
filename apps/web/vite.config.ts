@@ -5,6 +5,9 @@ import react from "@vitejs/plugin-react";
 import { defaultClientConditions, defineConfig } from "vite";
 import type { ProxyOptions } from "vite";
 
+/** Source of workspace packages that are free of module side effects (see build.rolldownOptions). */
+const PURE_WORKSPACE_SOURCES = /\/packages\/(contracts|minecraft|eggs)\/src\//;
+
 /** The control plane listens here in development (apps/control-plane). */
 const CONTROL_PLANE = "http://127.0.0.1:8080";
 
@@ -36,5 +39,18 @@ export default defineConfig({
   },
   server: { host: "127.0.0.1", port: 5173, strictPort: true, proxy },
   preview: { host: "127.0.0.1", port: 4173, strictPort: true, proxy },
-  build: { target: "es2022", sourcemap: true, chunkSizeWarningLimit: 900 },
+  build: {
+    target: "es2022",
+    sourcemap: true,
+    chunkSizeWarningLimit: 900,
+    rolldownOptions: {
+      treeshake: {
+        // The workspace libraries only declare schemas/constants/functions (no top-level side
+        // effects) but do not set `sideEffects: false`, so unused modules (agent protocol,
+        // catalogue adapters, …) would otherwise be kept in the SPA bundle.
+        moduleSideEffects: (id) =>
+          PURE_WORKSPACE_SOURCES.test(id.replaceAll("\\", "/")) ? false : undefined,
+      },
+    },
+  },
 });

@@ -1,5 +1,6 @@
 import type { MetricSeriesId } from "@blockforge/contracts";
 import type { AuditFilters, IncidentStatus } from "./api/endpoints";
+import type { ServerListFilter } from "./api/servers-api";
 
 /**
  * Query keys, hierarchical so a prefix invalidates a whole area
@@ -16,6 +17,47 @@ export const qk = {
     list: ["nodes", "list"] as const,
     detail: (id: string) => ["nodes", "detail", id] as const,
     tokens: ["nodes", "enrollment-tokens"] as const,
+    allocations: (id: string, filter: "all" | "free" | "used") =>
+      ["nodes", "allocations", id, filter] as const,
+    allocationsAll: (id: string) => ["nodes", "allocations", id] as const,
+  },
+  servers: {
+    all: ["servers"] as const,
+    lists: ["servers", "list"] as const,
+    list: (filter: ServerListFilter, q: string) => ["servers", "list", filter, q] as const,
+    detail: (id: string) => ["servers", "detail", id] as const,
+    placement: (body: unknown) => ["servers", "placement", body] as const,
+  },
+  /** Per-server sub-resources; `qk.server(id).all` invalidates all of them. */
+  server: (id: string) => ({
+    all: ["server", id] as const,
+    startup: ["server", id, "startup"] as const,
+    subusers: ["server", id, "subusers"] as const,
+    allocations: ["server", id, "allocations"] as const,
+    activity: (filters: AuditFilters) => ["server", id, "activity", filters] as const,
+    filesAll: ["server", id, "files"] as const,
+    files: (path: string) => ["server", id, "files", path] as const,
+    search: (path: string, q: string) => ["server", id, "files-search", path, q] as const,
+    file: (path: string) => ["server", id, "file", path] as const,
+  }),
+  templates: {
+    all: ["templates"] as const,
+    list: ["templates", "list"] as const,
+    detail: (id: string) => ["templates", "detail", id] as const,
+  },
+  catalog: {
+    software: ["catalog", "software"] as const,
+    versions: (software: string) => ["catalog", "versions", software] as const,
+    builds: (software: string, version: string) => ["catalog", "builds", software, version] as const,
+    plan: (software: string, version: string, build: string) =>
+      ["catalog", "plan", software, version, build] as const,
+  },
+  jobs: {
+    detail: (id: string) => ["jobs", "detail", id] as const,
+    logs: (id: string) => ["jobs", "logs", id] as const,
+  },
+  account: {
+    sshKeys: ["account", "ssh-keys"] as const,
   },
   metrics: {
     all: ["metrics"] as const,

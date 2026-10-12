@@ -1,5 +1,6 @@
 import {
   Activity,
+  FileJson,
   Archive,
   Bell,
   CalendarClock,
@@ -19,7 +20,16 @@ import type { LucideIcon } from "lucide-react";
 import type { Me, Permission } from "@blockforge/contracts";
 import { canAny, hasGlobal } from "@/lib/permissions";
 
-export type AppPath = "/" | "/nodes" | "/monitoring" | "/alerts" | "/users" | "/audit" | "/settings";
+export type AppPath =
+  | "/"
+  | "/servers"
+  | "/nodes"
+  | "/monitoring"
+  | "/alerts"
+  | "/users"
+  | "/audit"
+  | "/settings"
+  | "/admin/templates";
 
 export interface NavItem {
   label: string;
@@ -31,6 +41,8 @@ export interface NavItem {
   permission?: Permission;
   /** Permission must be global (not just scoped somewhere). */
   globalOnly?: boolean;
+  /** Lives inside each server's page; the entry explains where instead of linking. */
+  perServer?: string;
   keywords?: string[];
 }
 
@@ -43,7 +55,13 @@ export const NAV_ITEMS: NavItem[] = [
     permission: "monitoring.view",
     keywords: ["dashboard", "home"],
   },
-  { label: "Game Servers", icon: Gamepad2, phase: 3 },
+  // Everyone signed in has a server list (owned / shared servers); the API filters it.
+  {
+    label: "Game Servers",
+    icon: Gamepad2,
+    to: "/servers",
+    keywords: ["servers", "minecraft", "console", "games"],
+  },
   { label: "Server Networks", icon: Network, phase: 5 },
   { label: "Proxies", icon: Waypoints, phase: 5 },
   {
@@ -62,7 +80,7 @@ export const NAV_ITEMS: NavItem[] = [
   },
   { label: "Players", icon: Users, phase: 4 },
   { label: "Plugins & Mods", icon: Puzzle, phase: 4 },
-  { label: "Files", icon: FolderOpen, phase: 4 },
+  { label: "Files", icon: FolderOpen, perServer: "Open a server's Files tab" },
   { label: "Backups", icon: Archive, phase: 6 },
   { label: "Schedules & Tasks", icon: CalendarClock, phase: 4 },
   {
@@ -94,7 +112,20 @@ export const NAV_ITEMS: NavItem[] = [
 export type NavAvailability =
   { kind: "available" } | { kind: "phase"; reason: string } | { kind: "forbidden"; reason: string };
 
+/** Administration entries shown below the main sections when permitted. */
+export const ADMIN_NAV_ITEMS: NavItem[] = [
+  {
+    label: "Templates",
+    icon: FileJson,
+    to: "/admin/templates",
+    permission: "templates.view",
+    globalOnly: true,
+    keywords: ["eggs", "nests", "import", "games"],
+  },
+];
+
 export function navAvailability(item: NavItem, me: Me | null | undefined): NavAvailability {
+  if (item.perServer) return { kind: "phase", reason: item.perServer };
   if (!item.to) return { kind: "phase", reason: `Available in Phase ${item.phase}` };
   if (item.permission) {
     const ok = item.globalOnly ? hasGlobal(me, item.permission) : canAny(me, item.permission);

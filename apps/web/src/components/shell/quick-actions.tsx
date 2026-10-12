@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { BellPlus, Plus, ServerCog, UserPlus } from "lucide-react";
+import { BellPlus, Gamepad2, Plus, ServerCog, UserPlus } from "lucide-react";
 import type { Me } from "@blockforge/contracts";
 import { canAny, hasGlobal } from "@/lib/permissions";
 import { useEnrollmentDialog } from "@/features/nodes/enrollment-dialog";
@@ -24,6 +24,13 @@ export function useQuickActions(me: Me | undefined): QuickAction[] {
   const navigate = useNavigate();
   const enrollment = useEnrollmentDialog();
   const actions: QuickAction[] = [];
+  if (canAny(me, "servers.create"))
+    actions.push({
+      id: "server",
+      label: "Create server",
+      icon: Gamepad2,
+      run: () => void navigate({ to: "/servers/new" }),
+    });
   if (hasGlobal(me, "nodes.enroll"))
     actions.push({ id: "enroll", label: "Enroll node", icon: ServerCog, run: enrollment.open });
   if (canAny(me, "alerts.manage"))

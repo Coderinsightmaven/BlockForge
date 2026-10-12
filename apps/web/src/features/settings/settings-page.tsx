@@ -23,8 +23,9 @@ import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RoleBadges } from "@/features/users/user-dialogs";
+import { SshKeysCard } from "./ssh-keys";
 
-export type SettingsTab = "account" | "security" | "appearance";
+export type SettingsTab = "account" | "security" | "ssh" | "appearance";
 
 /** "JBSWY3DPEHPK3PXP" → "JBSW Y3DP EHPK 3PXP" for manual entry. */
 export function groupSecret(secret: string): string {
@@ -363,6 +364,7 @@ export function SettingsPage({
         <TabsList>
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="security">Security</TabsTrigger>
+          <TabsTrigger value="ssh">SSH keys</TabsTrigger>
           <TabsTrigger value="appearance">Appearance</TabsTrigger>
         </TabsList>
         <TabsContent value="account" className="flex flex-col gap-3">
@@ -374,6 +376,11 @@ export function SettingsPage({
               <dl className="grid gap-2 text-sm sm:grid-cols-[10rem_1fr]">
                 <dt className="text-muted-foreground">Name</dt>
                 <dd>{me.user.displayName}</dd>
+                <dt className="text-muted-foreground">Username</dt>
+                <dd>
+                  <code className="font-mono">{me.user.username}</code>
+                  <span className="ml-2 text-xs text-muted-foreground">used for SFTP logins</span>
+                </dd>
                 <dt className="text-muted-foreground">Email</dt>
                 <dd>{me.user.email}</dd>
                 <dt className="text-muted-foreground">Roles</dt>
@@ -392,6 +399,9 @@ export function SettingsPage({
         </TabsContent>
         <TabsContent value="security">
           <MfaSection me={me} />
+        </TabsContent>
+        <TabsContent value="ssh">
+          <SshKeysCard mfaEnabled={me.user.mfaEnabled} />
         </TabsContent>
         <TabsContent value="appearance">
           <Appearance />

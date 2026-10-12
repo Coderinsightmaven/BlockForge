@@ -1,8 +1,8 @@
 /**
  * Contract-valid objects for unit tests only. Never imported by application code.
  */
-import { Me, Node } from "@blockforge/contracts";
-import type { Me as MeT, Node as NodeT, Permission } from "@blockforge/contracts";
+import { Me, Node, SERVER_OWNER_PERMISSIONS, Server } from "@blockforge/contracts";
+import type { Me as MeT, Node as NodeT, Permission, Server as ServerT } from "@blockforge/contracts";
 
 export const USER_ID = "11111111-1111-4111-8111-111111111111";
 export const NODE_ID = "22222222-2222-4222-8222-222222222222";
@@ -14,6 +14,7 @@ export function makeMe(
     user: {
       id: USER_ID,
       email: "owner@example.test",
+      username: "owner",
       displayName: "Test Owner",
       status: "active",
       mfaEnabled: opts.mfaEnabled ?? false,
@@ -73,4 +74,57 @@ export function jsonResponse(
 
 export function apiErrorBody(code: string, message = "nope", requestId = "req-1", details?: unknown) {
   return { error: { code, message, requestId, ...(details === undefined ? {} : { details }) } };
+}
+
+export const SERVER_ID = "55555555-5555-4555-8555-555555555555";
+export const TEMPLATE_ID = "66666666-6666-4666-8666-666666666666";
+
+export function makeServer(overrides: Partial<ServerT> = {}): ServerT {
+  return Server.parse({
+    id: SERVER_ID,
+    shortId: "55555555",
+    name: "Survival",
+    slug: "survival",
+    description: "",
+    kind: "game",
+    ownerId: USER_ID,
+    ownerName: "Test Owner",
+    templateId: TEMPLATE_ID,
+    templateName: "Minecraft: Java Edition",
+    templateKind: "minecraft",
+    game: "minecraft-java",
+    nodeId: NODE_ID,
+    nodeName: "fra-1",
+    networkId: null,
+    software: "paper",
+    minecraftVersion: "1.21.4",
+    build: "100",
+    javaMajor: 21,
+    heapMaxBytes: 3 * 1024 ** 3,
+    dockerImage: "eclipse-temurin:21-jre",
+    state: "running",
+    desiredState: "running",
+    activeOperation: null,
+    activeJobId: null,
+    suspended: false,
+    memoryLimitBytes: 4 * 1024 ** 3,
+    cpuLimitMillicores: 2000,
+    storageQuotaBytes: null,
+    allocationLimit: 2,
+    backupLimit: 3,
+    allocations: [],
+    address: "play.example.test:25565",
+    startup: "auto",
+    restartPolicy: { mode: "on-failure", maxRetries: 3, backoffMs: 10000 },
+    timezone: "UTC",
+    location: null,
+    lastStartedAt: null,
+    lastCrashAt: null,
+    lastExitCode: null,
+    createdAt: 1_700_000_000_000,
+    latest: null,
+    myPermissions: [...SERVER_OWNER_PERMISSIONS],
+    sftp: null,
+    ...overrides,
+  });
 }

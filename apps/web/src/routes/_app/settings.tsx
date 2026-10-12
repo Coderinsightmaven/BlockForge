@@ -5,7 +5,10 @@ import type { SettingsTab } from "@/features/settings/settings-page";
 
 export const Route = createFileRoute("/_app/settings")({
   validateSearch: (search: Record<string, unknown>): { tab?: SettingsTab } => ({
-    tab: search.tab === "security" || search.tab === "appearance" ? search.tab : undefined,
+    tab:
+      search.tab === "security" || search.tab === "ssh" || search.tab === "appearance"
+        ? search.tab
+        : undefined,
   }),
   component: function Settings() {
     const me = useMe();

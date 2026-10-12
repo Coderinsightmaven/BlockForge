@@ -86,7 +86,9 @@ describe("permissions", () => {
       );
     expect(NAV_ITEMS).toHaveLength(15);
     expect(by("Overview").kind).toBe("available");
-    expect(by("Game Servers")).toEqual({ kind: "phase", reason: "Available in Phase 3" });
+    expect(by("Game Servers").kind).toBe("available"); // everyone has a (possibly empty) server list
+    expect(by("Files")).toEqual({ kind: "phase", reason: "Open a server's Files tab" });
+    expect(by("Players")).toEqual({ kind: "phase", reason: "Available in Phase 4" });
     expect(by("Backups")).toEqual({ kind: "phase", reason: "Available in Phase 6" });
     expect(by("Audit Logs").kind).toBe("forbidden");
     expect(by("Settings").kind).toBe("available");

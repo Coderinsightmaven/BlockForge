@@ -2,7 +2,8 @@ import { Link } from "@tanstack/react-router";
 import type { Me } from "@blockforge/contracts";
 import { cn } from "@/lib/utils";
 import { Tooltip } from "@/components/ui/tooltip";
-import { NAV_ITEMS, navAvailability } from "./nav-items";
+import { ADMIN_NAV_ITEMS, NAV_ITEMS, navAvailability } from "./nav-items";
+import type { NavItem } from "./nav-items";
 
 export function BrandMark({ className }: { className?: string }) {
   return (
@@ -15,51 +16,58 @@ export function BrandMark({ className }: { className?: string }) {
 
 const itemBase = "flex h-8 items-center gap-2.5 rounded-md px-2 text-sm [&_svg]:size-4 [&_svg]:shrink-0";
 
+function NavEntry({ item, me, onNavigate }: { item: NavItem; me: Me | undefined; onNavigate?: () => void }) {
+  const Icon = item.icon;
+  const availability = navAvailability(item, me);
+  if (availability.kind !== "available" || !item.to) {
+    return (
+      <Tooltip content={availability.kind === "available" ? null : availability.reason} side="right">
+        <span
+          tabIndex={0}
+          aria-disabled="true"
+          className={cn(
+            itemBase,
+            "cursor-not-allowed text-muted-foreground/70 focus-visible:outline-2 focus-visible:outline-ring",
+          )}
+        >
+          <Icon aria-hidden />
+          <span className="truncate">{item.label}</span>
+          <span className="sr-only"> ({availability.kind === "available" ? "" : availability.reason})</span>
+        </span>
+      </Tooltip>
+    );
+  }
+  return (
+    <Link
+      to={item.to}
+      onClick={onNavigate}
+      activeOptions={{ exact: item.to === "/" }}
+      className={cn(itemBase, "text-muted-foreground hover:bg-accent hover:text-foreground")}
+      activeProps={{ className: "bg-accent font-medium text-foreground", "aria-current": "page" }}
+    >
+      <Icon aria-hidden />
+      <span className="truncate">{item.label}</span>
+    </Link>
+  );
+}
+
 export function SidebarNav({ me, onNavigate }: { me: Me | undefined; onNavigate?: () => void }) {
+  const admin = ADMIN_NAV_ITEMS.filter((i) => navAvailability(i, me).kind === "available");
   return (
     <nav aria-label="Main" className="flex flex-col gap-0.5">
-      {NAV_ITEMS.map((item) => {
-        const Icon = item.icon;
-        const availability = navAvailability(item, me);
-        if (availability.kind !== "available" || !item.to) {
-          return (
-            <Tooltip
-              key={item.label}
-              content={availability.kind === "available" ? null : availability.reason}
-              side="right"
-            >
-              <span
-                tabIndex={0}
-                aria-disabled="true"
-                className={cn(
-                  itemBase,
-                  "cursor-not-allowed text-muted-foreground/70 focus-visible:outline-2 focus-visible:outline-ring",
-                )}
-              >
-                <Icon aria-hidden />
-                <span className="truncate">{item.label}</span>
-                <span className="sr-only">
-                  {" "}
-                  ({availability.kind === "available" ? "" : availability.reason})
-                </span>
-              </span>
-            </Tooltip>
-          );
-        }
-        return (
-          <Link
-            key={item.label}
-            to={item.to}
-            onClick={onNavigate}
-            activeOptions={{ exact: item.to === "/" }}
-            className={cn(itemBase, "text-muted-foreground hover:bg-accent hover:text-foreground")}
-            activeProps={{ className: "bg-accent font-medium text-foreground", "aria-current": "page" }}
-          >
-            <Icon aria-hidden />
-            <span className="truncate">{item.label}</span>
-          </Link>
-        );
-      })}
+      {NAV_ITEMS.map((item) => (
+        <NavEntry key={item.label} item={item} me={me} onNavigate={onNavigate} />
+      ))}
+      {admin.length ? (
+        <>
+          <div className="mt-3 mb-1 px-2 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+            Administration
+          </div>
+          {admin.map((item) => (
+            <NavEntry key={item.label} item={item} me={me} onNavigate={onNavigate} />
+          ))}
+        </>
+      ) : null}
     </nav>
   );
 }

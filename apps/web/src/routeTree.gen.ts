@@ -19,8 +19,12 @@ import { Route as AppAuditRouteImport } from "./routes/_app/audit";
 import { Route as AppMonitoringRouteImport } from "./routes/_app/monitoring";
 import { Route as AppSettingsRouteImport } from "./routes/_app/settings";
 import { Route as AppUsersRouteImport } from "./routes/_app/users";
+import { Route as AppAdminTemplatesRouteImport } from "./routes/_app/admin/templates";
 import { Route as AppNodesIndexRouteImport } from "./routes/_app/nodes/index";
 import { Route as AppNodesNodeIdRouteImport } from "./routes/_app/nodes/$nodeId";
+import { Route as AppServersIndexRouteImport } from "./routes/_app/servers/index";
+import { Route as AppServersServerIdRouteImport } from "./routes/_app/servers/$serverId";
+import { Route as AppServersNewRouteImport } from "./routes/_app/servers/new";
 
 const AppRoute = AppRouteImport.update({
   id: "/_app",
@@ -71,6 +75,11 @@ const AppUsersRoute = AppUsersRouteImport.update({
   path: "/users",
   getParentRoute: () => AppRoute,
 } as any);
+const AppAdminTemplatesRoute = AppAdminTemplatesRouteImport.update({
+  id: "/admin/templates",
+  path: "/admin/templates",
+  getParentRoute: () => AppRoute,
+} as any);
 const AppNodesIndexRoute = AppNodesIndexRouteImport.update({
   id: "/nodes/",
   path: "/nodes/",
@@ -79,6 +88,21 @@ const AppNodesIndexRoute = AppNodesIndexRouteImport.update({
 const AppNodesNodeIdRoute = AppNodesNodeIdRouteImport.update({
   id: "/nodes/$nodeId",
   path: "/nodes/$nodeId",
+  getParentRoute: () => AppRoute,
+} as any);
+const AppServersIndexRoute = AppServersIndexRouteImport.update({
+  id: "/servers/",
+  path: "/servers/",
+  getParentRoute: () => AppRoute,
+} as any);
+const AppServersServerIdRoute = AppServersServerIdRouteImport.update({
+  id: "/servers/$serverId",
+  path: "/servers/$serverId",
+  getParentRoute: () => AppRoute,
+} as any);
+const AppServersNewRoute = AppServersNewRouteImport.update({
+  id: "/servers/new",
+  path: "/servers/new",
   getParentRoute: () => AppRoute,
 } as any);
 
@@ -92,8 +116,12 @@ export interface FileRoutesByFullPath {
   "/monitoring": typeof AppMonitoringRoute;
   "/settings": typeof AppSettingsRoute;
   "/users": typeof AppUsersRoute;
+  "/admin/templates": typeof AppAdminTemplatesRoute;
   "/nodes/$nodeId": typeof AppNodesNodeIdRoute;
+  "/servers/$serverId": typeof AppServersServerIdRoute;
+  "/servers/new": typeof AppServersNewRoute;
   "/nodes/": typeof AppNodesIndexRoute;
+  "/servers/": typeof AppServersIndexRoute;
 }
 export interface FileRoutesByTo {
   "/login": typeof LoginRoute;
@@ -105,8 +133,12 @@ export interface FileRoutesByTo {
   "/settings": typeof AppSettingsRoute;
   "/users": typeof AppUsersRoute;
   "/": typeof AppIndexRoute;
+  "/admin/templates": typeof AppAdminTemplatesRoute;
   "/nodes/$nodeId": typeof AppNodesNodeIdRoute;
+  "/servers/$serverId": typeof AppServersServerIdRoute;
+  "/servers/new": typeof AppServersNewRoute;
   "/nodes": typeof AppNodesIndexRoute;
+  "/servers": typeof AppServersIndexRoute;
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport;
@@ -120,8 +152,12 @@ export interface FileRoutesById {
   "/_app/settings": typeof AppSettingsRoute;
   "/_app/users": typeof AppUsersRoute;
   "/_app/": typeof AppIndexRoute;
+  "/_app/admin/templates": typeof AppAdminTemplatesRoute;
   "/_app/nodes/$nodeId": typeof AppNodesNodeIdRoute;
+  "/_app/servers/$serverId": typeof AppServersServerIdRoute;
+  "/_app/servers/new": typeof AppServersNewRoute;
   "/_app/nodes/": typeof AppNodesIndexRoute;
+  "/_app/servers/": typeof AppServersIndexRoute;
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath;
@@ -135,8 +171,12 @@ export interface FileRouteTypes {
     | "/monitoring"
     | "/settings"
     | "/users"
+    | "/admin/templates"
     | "/nodes/$nodeId"
-    | "/nodes/";
+    | "/servers/$serverId"
+    | "/servers/new"
+    | "/nodes/"
+    | "/servers/";
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/login"
@@ -148,8 +188,12 @@ export interface FileRouteTypes {
     | "/settings"
     | "/users"
     | "/"
+    | "/admin/templates"
     | "/nodes/$nodeId"
-    | "/nodes";
+    | "/servers/$serverId"
+    | "/servers/new"
+    | "/nodes"
+    | "/servers";
   id:
     | "__root__"
     | "/_app"
@@ -162,8 +206,12 @@ export interface FileRouteTypes {
     | "/_app/settings"
     | "/_app/users"
     | "/_app/"
+    | "/_app/admin/templates"
     | "/_app/nodes/$nodeId"
-    | "/_app/nodes/";
+    | "/_app/servers/$serverId"
+    | "/_app/servers/new"
+    | "/_app/nodes/"
+    | "/_app/servers/";
   fileRoutesById: FileRoutesById;
 }
 export interface RootRouteChildren {
@@ -245,6 +293,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof AppUsersRouteImport;
       parentRoute: typeof AppRoute;
     };
+    "/_app/admin/templates": {
+      id: "/_app/admin/templates";
+      path: "/admin/templates";
+      fullPath: "/admin/templates";
+      preLoaderRoute: typeof AppAdminTemplatesRouteImport;
+      parentRoute: typeof AppRoute;
+    };
     "/_app/nodes/": {
       id: "/_app/nodes/";
       path: "/nodes";
@@ -259,6 +314,27 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof AppNodesNodeIdRouteImport;
       parentRoute: typeof AppRoute;
     };
+    "/_app/servers/": {
+      id: "/_app/servers/";
+      path: "/servers";
+      fullPath: "/servers/";
+      preLoaderRoute: typeof AppServersIndexRouteImport;
+      parentRoute: typeof AppRoute;
+    };
+    "/_app/servers/$serverId": {
+      id: "/_app/servers/$serverId";
+      path: "/servers/$serverId";
+      fullPath: "/servers/$serverId";
+      preLoaderRoute: typeof AppServersServerIdRouteImport;
+      parentRoute: typeof AppRoute;
+    };
+    "/_app/servers/new": {
+      id: "/_app/servers/new";
+      path: "/servers/new";
+      fullPath: "/servers/new";
+      preLoaderRoute: typeof AppServersNewRouteImport;
+      parentRoute: typeof AppRoute;
+    };
   }
 }
 
@@ -269,8 +345,12 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute;
   AppUsersRoute: typeof AppUsersRoute;
   AppIndexRoute: typeof AppIndexRoute;
+  AppAdminTemplatesRoute: typeof AppAdminTemplatesRoute;
   AppNodesNodeIdRoute: typeof AppNodesNodeIdRoute;
+  AppServersServerIdRoute: typeof AppServersServerIdRoute;
+  AppServersNewRoute: typeof AppServersNewRoute;
   AppNodesIndexRoute: typeof AppNodesIndexRoute;
+  AppServersIndexRoute: typeof AppServersIndexRoute;
 }
 
 const AppRouteChildren: AppRouteChildren = {
@@ -280,8 +360,12 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppUsersRoute: AppUsersRoute,
   AppIndexRoute: AppIndexRoute,
+  AppAdminTemplatesRoute: AppAdminTemplatesRoute,
   AppNodesNodeIdRoute: AppNodesNodeIdRoute,
+  AppServersServerIdRoute: AppServersServerIdRoute,
+  AppServersNewRoute: AppServersNewRoute,
   AppNodesIndexRoute: AppNodesIndexRoute,
+  AppServersIndexRoute: AppServersIndexRoute,
 };
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren);

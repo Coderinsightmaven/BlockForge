@@ -14,6 +14,7 @@ import {
   NotificationTestResult,
   OverviewSummary,
   Role,
+  RotateCredentialsResponse,
   SetupStatus,
   User,
   page,
@@ -136,7 +137,8 @@ export const nodesApi = {
     apiClient.patch(`/nodes/${enc(id)}`, { body, schema: Node }),
   approve: (id: string) => apiClient.post(`/nodes/${enc(id)}/approve`, { schema: Node }),
   revoke: (id: string) => apiClient.post(`/nodes/${enc(id)}/revoke`, { schema: Node }),
-  rotateCredentials: (id: string) => apiClient.post(`/nodes/${enc(id)}/rotate-credentials`, { schema: Node }),
+  rotateCredentials: (id: string) =>
+    apiClient.post(`/nodes/${enc(id)}/rotate-credentials`, { schema: RotateCredentialsResponse }),
   remove: (id: string) => apiClient.delete<void>(`/nodes/${enc(id)}`),
   listEnrollmentTokens: (signal?: AbortSignal) =>
     apiClient.get("/nodes/enrollment-tokens", { schema: z.array(EnrollmentToken), signal }),

@@ -83,7 +83,7 @@ export function NodeActions({ node }: { node: Node }) {
     mutationFn: () => nodesApi.rotateCredentials(node.id),
     success: "Credential rotation started",
     errorTitle: "Could not rotate credentials",
-    onSuccess: onNode,
+    onSuccess: (r) => onNode(r.node),
   });
   const revoke = useApiMutation({
     mutationFn: () => nodesApi.revoke(node.id),

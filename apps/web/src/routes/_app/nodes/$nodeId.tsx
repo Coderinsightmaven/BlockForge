@@ -4,7 +4,7 @@ import { useMe } from "@/lib/use-me";
 import { NodeDetailPage } from "@/features/nodes/node-detail-page";
 import type { NodeTab } from "@/features/nodes/node-detail-page";
 
-const TABS: NodeTab[] = ["overview", "metrics", "settings"];
+const TABS: NodeTab[] = ["overview", "metrics", "allocations", "settings"];
 
 export const Route = createFileRoute("/_app/nodes/$nodeId")({
   validateSearch: (search: Record<string, unknown>): { tab?: NodeTab; range?: string } => ({

@@ -23,10 +23,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApproveNodeDialog, NodeActions } from "./node-actions";
 import { CapacityFacts, FilesystemFacts, InterfacesFacts, RuntimeFacts, SystemFacts } from "./node-facts";
 import { CpuTile, DiskIoTile, FilesystemsTile, MemoryTile, NetworkTile } from "./node-live";
+import { NodeAllocations } from "./node-allocations";
 import { NodeSettings } from "./node-settings";
 import { isStale } from "./node-utils";
 
-export type NodeTab = "overview" | "metrics" | "settings";
+export type NodeTab = "overview" | "metrics" | "allocations" | "settings";
 
 export const NODE_CHARTS: Array<{ series: MetricSeriesId; title: string; info?: string }> = [
   { series: "node.cpu.usage", title: "CPU usage", info: "Whole-host CPU utilisation." },
@@ -193,6 +194,7 @@ export function NodeDetailPage({
           <TabsTrigger value="metrics" disabled={!canMetrics}>
             History
           </TabsTrigger>
+          <TabsTrigger value="allocations">Allocations</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
 
@@ -252,6 +254,12 @@ export function NodeDetailPage({
                 />
               ))}
             </div>
+          ) : null}
+        </TabsContent>
+
+        <TabsContent value="allocations">
+          {tab === "allocations" ? (
+            <NodeAllocations node={node} canManage={can(me, "allocations.manage", scope)} />
           ) : null}
         </TabsContent>
 

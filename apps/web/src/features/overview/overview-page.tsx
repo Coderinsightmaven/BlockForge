@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Bell, Gamepad2, Server, ServerCog, Users } from "lucide-react";
+import { Suspense, lazy } from "react";
 import type { ReactNode } from "react";
 import type { Me, OverviewSummary, ServerState } from "@blockforge/contracts";
 import {
@@ -15,7 +16,6 @@ import { canAny, hasGlobal } from "@/lib/permissions";
 import { overviewQuery } from "@/lib/queries";
 import { useOverviewRealtime } from "@/lib/realtime/handlers";
 import type { TimeRange } from "@/lib/time-range";
-import { MetricChart } from "@/components/charts/metric-chart";
 import { TimeRangePicker } from "@/components/charts/time-range-picker";
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState, NoPermission } from "@/components/common/states";
@@ -38,6 +38,11 @@ import { InfoTip } from "@/components/ui/tooltip";
 import { useEnrollmentDialog } from "@/features/nodes/enrollment-dialog";
 import { CapacityRow, CapacityLegend } from "./capacity";
 
+// Charts sit below the live summary: load uPlot after the summary has painted.
+const MetricChart = lazy(() =>
+  import("@/components/charts/metric-chart").then((m) => ({ default: m.MetricChart })),
+);
+
 function StatTile({
   title,
   icon: Icon,
@@ -51,7 +56,7 @@ function StatTile({
   value: ReactNode;
   sub?: ReactNode;
   breakdown?: Array<{ meta: StatusMeta; count: number }>;
-  to?: "/nodes" | "/alerts";
+  to?: "/nodes" | "/alerts" | "/servers";
 }) {
   const body = (
     <Card className="h-full">
@@ -93,8 +98,9 @@ function ServersTile({ servers }: { servers: OverviewSummary["servers"] }) {
     <StatTile
       title="Minecraft servers"
       icon={Gamepad2}
+      to="/servers"
       value={formatNumber(servers.total, 0)}
-      sub={servers.total === 0 ? "No servers yet. Server provisioning arrives in Phase 3." : undefined}
+      sub={servers.total === 0 ? "No servers yet." : undefined}
       breakdown={entries}
     />
   );
@@ -448,38 +454,48 @@ export function OverviewPage({
           <TimeRangePicker value={range} onChange={onRangeChange} />
         </div>
         {canGlobalCharts ? (
-          <div className="grid gap-3 xl:grid-cols-2">
-            <MetricChart
-              title="CPU usage"
-              target={{ series: "global.cpu.usage" }}
-              range={range}
-              info="Average utilisation across all nodes, weighted by core count."
-            />
-            <MetricChart
-              title="Memory"
-              target={{ series: "global.memory" }}
-              range={range}
-              info="Physical memory across nodes. Lines are labelled by kind (e.g. used vs available); allocation is a reservation and is shown separately when reported."
-            />
-            <MetricChart
-              title="Network throughput"
-              target={{ series: "global.net.throughput" }}
-              range={range}
-              info="Aggregate receive / transmit rate across node interfaces."
-            />
-            <MetricChart
-              title="Disk throughput"
-              target={{ series: "global.disk.throughput" }}
-              range={range}
-              info="Aggregate read / write rate across node block devices."
-            />
-            <MetricChart
-              title="Players online"
-              target={{ series: "global.players" }}
-              range={range}
-              info="Players reported by server list pings across all servers."
-            />
-          </div>
+          <Suspense
+            fallback={
+              <div className="grid gap-3 xl:grid-cols-2">
+                {Array.from({ length: 4 }, (_, k) => (
+                  <Skeleton key={k} className="h-64" />
+                ))}
+              </div>
+            }
+          >
+            <div className="grid gap-3 xl:grid-cols-2">
+              <MetricChart
+                title="CPU usage"
+                target={{ series: "global.cpu.usage" }}
+                range={range}
+                info="Average utilisation across all nodes, weighted by core count."
+              />
+              <MetricChart
+                title="Memory"
+                target={{ series: "global.memory" }}
+                range={range}
+                info="Physical memory across nodes. Lines are labelled by kind (e.g. used vs available); allocation is a reservation and is shown separately when reported."
+              />
+              <MetricChart
+                title="Network throughput"
+                target={{ series: "global.net.throughput" }}
+                range={range}
+                info="Aggregate receive / transmit rate across node interfaces."
+              />
+              <MetricChart
+                title="Disk throughput"
+                target={{ series: "global.disk.throughput" }}
+                range={range}
+                info="Aggregate read / write rate across node block devices."
+              />
+              <MetricChart
+                title="Players online"
+                target={{ series: "global.players" }}
+                range={range}
+                info="Players reported by server list pings across all servers."
+              />
+            </div>
+          </Suspense>
         ) : (
           <Card>
             <EmptyState

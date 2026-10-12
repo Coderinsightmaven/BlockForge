@@ -4,6 +4,17 @@ import { isApiError } from "./api/errors";
 import { alertsApi, auditApi, authApi, monitoringApi, nodesApi, rolesApi, usersApi } from "./api/endpoints";
 import type { AuditFilters, IncidentStatus } from "./api/endpoints";
 import { shareNode, shareNodeList } from "./node-cache";
+import {
+  accountApi,
+  allocationsApi,
+  catalogApi,
+  filesApi,
+  jobsApi,
+  serversApi,
+  templatesApi,
+} from "./api/servers-api";
+import type { ServerListFilter } from "./api/servers-api";
+import { shareServer, shareServerPages } from "./server-cache";
 import { qk } from "./query-keys";
 import { refreshIntervalFor, resolveTimeRange, timeRangeKey } from "./time-range";
 import type { TimeRange } from "./time-range";
@@ -152,3 +163,144 @@ export const metricRangeQuery = (
     staleTime: range.kind === "absolute" ? Infinity : 5_000,
     placeholderData: keepPreviousData,
   });
+
+// ---------------------------------------------------------------------------------------------
+// Phase 3: servers, templates, catalogue, allocations, files, jobs, account
+
+export const serversQuery = (filter: ServerListFilter, q: string) =>
+  infiniteQueryOptions({
+    queryKey: qk.servers.list(filter, q),
+    queryFn: ({ signal, pageParam }) =>
+      serversApi.list({ filter, q: q || undefined, limit: 100, cursor: pageParam }, signal),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
+    staleTime: 10_000,
+    // Live state arrives per server over realtime; this is the fallback when the socket is down.
+    refetchInterval: 60_000,
+    structuralSharing: shareServerPages,
+  });
+
+export const serverQuery = (id: string) =>
+  queryOptions({
+    queryKey: qk.servers.detail(id),
+    queryFn: ({ signal }) => serversApi.get(id, signal),
+    staleTime: 10_000,
+    refetchInterval: 60_000,
+    structuralSharing: shareServer,
+  });
+
+export const serverStartupQuery = (id: string) =>
+  queryOptions({
+    queryKey: qk.server(id).startup,
+    queryFn: ({ signal }) => serversApi.startup(id, signal),
+    staleTime: 15_000,
+  });
+
+export const serverSubusersQuery = (id: string) =>
+  queryOptions({
+    queryKey: qk.server(id).subusers,
+    queryFn: ({ signal }) => serversApi.subusers(id, signal),
+    staleTime: 15_000,
+  });
+
+export const serverAllocationsQuery = (id: string) =>
+  queryOptions({
+    queryKey: qk.server(id).allocations,
+    queryFn: ({ signal }) => serversApi.allocations(id, signal),
+    staleTime: 15_000,
+  });
+
+export const serverActivityQuery = (id: string, filters: AuditFilters) =>
+  infiniteQueryOptions({
+    queryKey: qk.server(id).activity(filters),
+    queryFn: ({ signal, pageParam }) =>
+      serversApi.activity(id, { ...filters, limit: 50, cursor: pageParam ?? undefined }, signal),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
+    staleTime: 30_000,
+  });
+
+export const fileListQuery = (id: string, path: string) =>
+  queryOptions({
+    queryKey: qk.server(id).files(path),
+    queryFn: ({ signal }) => filesApi.list(id, path, signal),
+    staleTime: 5_000,
+    placeholderData: keepPreviousData,
+  });
+
+export const fileSearchQuery = (id: string, path: string, q: string) =>
+  queryOptions({
+    queryKey: qk.server(id).search(path, q),
+    queryFn: ({ signal }) => filesApi.search(id, path, q, signal),
+    staleTime: 5_000,
+  });
+
+export const templatesQuery = queryOptions({
+  queryKey: qk.templates.list,
+  queryFn: ({ signal }) => templatesApi.list(signal),
+  staleTime: 60_000,
+});
+
+export const templateQuery = (id: string) =>
+  queryOptions({
+    queryKey: qk.templates.detail(id),
+    queryFn: ({ signal }) => templatesApi.get(id, signal),
+    staleTime: 30_000,
+  });
+
+/** Upstream catalogue data changes slowly and is cached by the control plane too. */
+export const softwareQuery = queryOptions({
+  queryKey: qk.catalog.software,
+  queryFn: ({ signal }) => catalogApi.software(signal),
+  staleTime: 10 * 60_000,
+});
+
+export const versionsQuery = (software: string) =>
+  queryOptions({
+    queryKey: qk.catalog.versions(software),
+    queryFn: ({ signal }) => catalogApi.versions(software, signal),
+    staleTime: 10 * 60_000,
+  });
+
+export const buildsQuery = (software: string, version: string) =>
+  queryOptions({
+    queryKey: qk.catalog.builds(software, version),
+    queryFn: ({ signal }) => catalogApi.builds(software, version, signal),
+    staleTime: 5 * 60_000,
+  });
+
+export const planQuery = (software: string, version: string, build: string) =>
+  queryOptions({
+    queryKey: qk.catalog.plan(software, version, build),
+    queryFn: ({ signal }) => catalogApi.plan(software, version, build, signal),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+
+export const nodeAllocationsQuery = (nodeId: string, filter: "all" | "free" | "used") =>
+  infiniteQueryOptions({
+    queryKey: qk.nodes.allocations(nodeId, filter),
+    // The API filters "free"; "used" is filtered client-side from the full list.
+    queryFn: ({ signal, pageParam }) =>
+      allocationsApi.listForNode(
+        nodeId,
+        { free: filter === "free" ? true : undefined, limit: 500, cursor: pageParam },
+        signal,
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.nextCursor,
+    staleTime: 15_000,
+  });
+
+export const jobQuery = (id: string) =>
+  queryOptions({
+    queryKey: qk.jobs.detail(id),
+    queryFn: ({ signal }) => jobsApi.get(id, signal),
+    staleTime: 2_000,
+  });
+
+export const sshKeysQuery = queryOptions({
+  queryKey: qk.account.sshKeys,
+  queryFn: ({ signal }) => accountApi.sshKeys(signal),
+  staleTime: 60_000,
+});

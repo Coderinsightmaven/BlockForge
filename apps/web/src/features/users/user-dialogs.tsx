@@ -40,6 +40,16 @@ const issuesToErrors = (issues: ReadonlyArray<{ path: PropertyKey[]; message: st
   return out;
 };
 
+/** Suggested username from an email's local part (matches the contract's `Username` rule). */
+export function usernameFromEmail(email: string): string {
+  const local = (email.split("@")[0] ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+/, "");
+  const trimmed = local.slice(0, 32).replace(/[-_]+$/, "");
+  return trimmed.length >= 3 ? trimmed : "";
+}
+
 export function bindingLabel(
   b: Pick<RoleBinding, "roleName" | "scopeType" | "scopeName" | "scopeId">,
 ): string {
@@ -76,6 +86,8 @@ export function CreateUserDialog({
   const owner = isOwner(me);
   const [form, setForm] = useState({
     email: "",
+    username: "",
+    usernameTouched: "",
     displayName: "",
     password: "",
     confirm: "",
@@ -84,7 +96,15 @@ export function CreateUserDialog({
   const [errors, setErrors] = useState<Record<string, string>>({});
   useEffect(() => {
     if (open) {
-      setForm({ email: "", displayName: "", password: "", confirm: "", roleKey: "none" });
+      setForm({
+        email: "",
+        username: "",
+        usernameTouched: "",
+        displayName: "",
+        password: "",
+        confirm: "",
+        roleKey: "none",
+      });
       setErrors({});
     }
   }, [open]);
@@ -100,6 +120,7 @@ export function CreateUserDialog({
     e.preventDefault();
     const parsed = CreateUserRequest.safeParse({
       email: form.email,
+      username: form.username,
       displayName: form.displayName,
       password: form.password,
       roles: form.roleKey === "none" ? [] : [{ roleKey: form.roleKey, scopeType: "global", scopeId: null }],
@@ -125,8 +146,32 @@ export function CreateUserDialog({
             <Input
               type="email"
               value={form.email}
-              onChange={(e) => set("email")(e.target.value)}
+              onChange={(e) => {
+                const email = e.target.value;
+                setForm((f) => ({
+                  ...f,
+                  email,
+                  ...(f.usernameTouched ? {} : { username: usernameFromEmail(email) }),
+                }));
+              }}
               autoComplete="off"
+            />
+          </Field>
+          <Field
+            label="Username"
+            error={errors.username}
+            hint="3–32 lowercase letters, digits, - or _. Used for SFTP and to add the user to servers."
+            required
+          >
+            <Input
+              value={form.username}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, username: e.target.value.toLowerCase(), usernameTouched: "1" }))
+              }
+              maxLength={32}
+              autoComplete="off"
+              spellCheck={false}
+              className="font-mono"
             />
           </Field>
           <Field label="Display name" error={errors.displayName} required>
@@ -196,11 +241,13 @@ export function EditUserDialog({
   onOpenChange: (o: boolean) => void;
 }) {
   const [displayName, setDisplayName] = useState("");
+  const [username, setUsername] = useState("");
   const [status, setStatus] = useState<User["status"]>("active");
   const [errors, setErrors] = useState<Record<string, string>>({});
   useEffect(() => {
     if (user) {
       setDisplayName(user.displayName);
+      setUsername(user.username);
       setStatus(user.status);
       setErrors({});
     }
@@ -219,6 +266,7 @@ export function EditUserDialog({
     if (!user) return;
     const body: z.input<typeof UpdateUserRequest> = {};
     if (displayName.trim() !== user.displayName) body.displayName = displayName.trim();
+    if (username.trim() !== user.username) body.username = username.trim();
     if (status !== user.status) body.status = status;
     const parsed = UpdateUserRequest.safeParse(body);
     if (!parsed.success) {
@@ -238,6 +286,19 @@ export function EditUserDialog({
           </DialogHeader>
           <Field label="Display name" error={errors.displayName}>
             <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} maxLength={80} />
+          </Field>
+          <Field
+            label="Username"
+            error={errors.username}
+            hint="Changing it changes the user's SFTP login names."
+          >
+            <Input
+              value={username}
+              onChange={(e) => setUsername(e.target.value.toLowerCase())}
+              maxLength={32}
+              spellCheck={false}
+              className="font-mono"
+            />
           </Field>
           <Field
             label="Status"

@@ -52,7 +52,9 @@ const accessors = {
 export function matchesUser(u: User, q: string): boolean {
   const n = q.trim().toLowerCase();
   if (!n) return true;
-  return [u.displayName, u.email, ...u.roles.map((r) => r.roleName)].some((v) => v.toLowerCase().includes(n));
+  return [u.displayName, u.email, u.username, ...u.roles.map((r) => r.roleName)].some((v) =>
+    v.toLowerCase().includes(n),
+  );
 }
 
 type DialogState = { kind: "edit" | "password" | "mfa" | "roles"; user: User } | null;
@@ -124,7 +126,7 @@ export function UsersPage({
                 <Input
                   value={q}
                   onChange={(e) => onQueryChange(e.target.value)}
-                  placeholder="Search name, email, role…"
+                  placeholder="Search name, username, email, role…"
                   aria-label="Search users"
                   className="pl-8"
                 />
@@ -186,7 +188,9 @@ export function UsersPage({
                                 </span>
                               ) : null}
                             </div>
-                            <div className="text-xs text-muted-foreground">{u.email}</div>
+                            <div className="text-xs text-muted-foreground">
+                              <code className="font-mono">{u.username}</code> · {u.email}
+                            </div>
                           </TableCell>
                           <TableCell>
                             <StatusBadge meta={statusMeta(USER_STATUS_META, u.status)} />
