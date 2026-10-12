@@ -6,7 +6,7 @@ import { actorOf, requesterBinding, requirePermission } from "../http/auth-hooks
 import { parse } from "../http/validation.js";
 import { AppError, badRequest } from "../lib/errors.js";
 import { GLOBAL } from "../rbac/authorize.js";
-import { StorageError } from "./storage.js";
+import { StorageError, type BackupStorage } from "./storage.js";
 
 const IdParams = z.object({ id: z.uuid() });
 const BackupParams = IdParams.extend({ backupId: z.uuid() });
@@ -56,7 +56,7 @@ export function registerBackupRoutes(app: FastifyInstance, ctx: AppContext): voi
   // --- Storage settings (the S3 secret is write-only) ---------------------------------------
   app.get("/settings/backups.storage", async (req) => {
     await requirePermission(ctx.audit, req, "settings.manage", GLOBAL);
-    return { key: "backups.storage", value: await ctx.backupStorage.view() };
+    return storageView(await ctx.backupStorage.view());
   });
 
   app.put("/settings/backups.storage", async (req) => {
@@ -71,7 +71,7 @@ export function registerBackupRoutes(app: FastifyInstance, ctx: AppContext): voi
     const view = await ctx.backupStorage.view();
     // The audit trail records what changed, never the secret.
     await ctx.audit.record({ ...actorOf(req), action: "settings.update", targetType: "setting", targetId: "backups.storage", outcome: "success", details: { value: view, secretChanged: value.type === "s3" && Boolean(value.secretAccessKey) } });
-    return { key: "backups.storage", value: view };
+    return storageView(view);
   });
 
   app.post("/settings/backups.storage/test", async (req) => {
@@ -91,4 +91,10 @@ export function registerBackupRoutes(app: FastifyInstance, ctx: AppContext): voi
       throw new AppError(502, "UPSTREAM_ERROR", (err as Error).message);
     }
   });
+}
+
+/** Contract `BackupStorageSettingsView`: the secret is never returned, only whether one is stored. */
+function storageView(view: Awaited<ReturnType<BackupStorage["view"]>>) {
+  const { secretAccessKeySet, ...value } = view as typeof view & { secretAccessKeySet?: boolean };
+  return { key: "backups.storage" as const, value, secretAccessKeySet: secretAccessKeySet ?? false };
 }

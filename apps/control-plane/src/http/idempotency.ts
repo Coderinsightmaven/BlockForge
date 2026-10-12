@@ -66,13 +66,13 @@ export class IdempotencyService {
       }
       const [existing] = await this.db.select().from(idempotencyKeys).where(pk).limit(1);
       if (!existing) continue;
-      if (existing.requestHash !== requestHash) throw conflict("This Idempotency-Key was already used for a different request");
+      if (existing.requestHash !== requestHash) throw conflict("This Idempotency-Key was already used for a different request", { reason: "key_reused" });
       if (existing.responseStatus === null) {
         if (this.clock.now() - existing.createdAt.getTime() > STALE_IN_PROGRESS_MS) {
           await this.db.delete(idempotencyKeys).where(and(pk, eq(idempotencyKeys.requestHash, requestHash)));
           continue;
         }
-        throw conflict("A request with this Idempotency-Key is still being processed");
+        throw conflict("A request with this Idempotency-Key is still being processed", { reason: "in_progress" });
       }
       return this.send(reply, { status: existing.responseStatus, body: existing.responseBody }, true);
     }

@@ -100,6 +100,20 @@ export type BackupStorageSettings = z.infer<typeof BackupStorageSettings>;
 /** `GET /settings/backups.storage` → `{key, value}`; the S3 secret is never returned, only whether one is stored. */
 export const BackupStorageSettingsView = z.object({
   key: z.literal("backups.storage"),
-  value: BackupStorageSettings,
+  /** Read shape: the S3 variant has no `secretAccessKey` field at all (strict — a response carrying it is rejected). */
+  value: z.discriminatedUnion("type", [
+    z.object({ type: z.literal("local") }).strict(),
+    z
+      .object({
+        type: z.literal("s3"),
+        endpoint: z.string(),
+        region: z.string(),
+        bucket: z.string(),
+        prefix: z.string(),
+        forcePathStyle: z.boolean(),
+        accessKeyId: z.string(),
+      })
+      .strict(),
+  ]),
   secretAccessKeySet: z.boolean(),
 });

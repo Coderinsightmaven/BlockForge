@@ -9,4 +9,4 @@
 | 3 | Major | `maxBytes` bounds only compressed output → sparse/compressible files cost unbounded read I/O and CPU | pending |
 | 4 | Major | Truncate restore deletes existing data before extraction; a mid-extraction failure loses the old data | pending (staging + swap) |
 | 5 | Major | `workload.ensure` ignores active install/restore claims | pending |
-| 6 | Major | `**`-heavy ignore/denylist patterns cause combinatorial matching (Go + TS matcher) | Go: pending; TS (`contracts/denylist.ts`): orchestrator |
+| 6 | Major | `**`-heavy ignore/denylist patterns cause combinatorial matching (Go + TS matcher) | TS fixed (memoised, limits, shared fixture cases); Go pending |

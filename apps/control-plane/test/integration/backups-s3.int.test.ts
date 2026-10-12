@@ -49,16 +49,18 @@ describe("backup storage settings", () => {
     const r = await startWithOwner();
     t = r.t;
     const owner = r.owner;
-    expect((await owner.get("/settings/backups.storage")).json()).toEqual({ key: "backups.storage", value: { type: "local" } });
+    expect((await owner.get("/settings/backups.storage")).json()).toEqual({ key: "backups.storage", value: { type: "local" }, secretAccessKeySet: false });
     // The secret is required the first time.
     const { secretAccessKey: _omit, ...noSecret } = settings();
     expect((await owner.put("/settings/backups.storage", { value: noSecret })).statusCode).toBe(400);
     const saved = await owner.put("/settings/backups.storage", { value: settings() });
     expect(saved.statusCode, saved.body).toBe(200);
-    expect(saved.json().value).toMatchObject({ type: "s3", bucket, secretAccessKeySet: true });
+    expect(saved.json()).toMatchObject({ key: "backups.storage", value: { type: "s3", bucket }, secretAccessKeySet: true });
+    expect(saved.json().value).not.toHaveProperty("secretAccessKeySet");
+    expect(JSON.stringify(saved.json())).not.toContain("secretAccessKey\"");
     expect(saved.body).not.toContain(TEST_S3.secretAccessKey);
     // Updating without the secret keeps it; the generic settings route does not expose the key.
-    expect((await owner.put("/settings/backups.storage", { value: { ...noSecret, prefix: "bf/" } })).json().value).toMatchObject({ prefix: "bf/", secretAccessKeySet: true });
+    expect((await owner.put("/settings/backups.storage", { value: { ...noSecret, prefix: "bf/" } })).json()).toMatchObject({ value: { prefix: "bf/" }, secretAccessKeySet: true });
     expect((await owner.get("/settings/backups.storage")).body).not.toContain(TEST_S3.secretAccessKey);
     expect((await owner.put("/settings/backups.storage.x", { value: 1 })).statusCode).toBe(404);
     const { rows: secretRows } = await testPool().query("SELECT ciphertext FROM secrets WHERE name = 'backups.s3.secretAccessKey'");
