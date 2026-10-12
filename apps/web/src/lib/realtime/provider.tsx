@@ -30,9 +30,11 @@ export function RealtimeProvider({
     const offError = client.onTopicError((e) => {
       console.warn(`[realtime] ${e.topic ?? "connection"}: ${e.code} ${e.message}`);
     });
-    const online = () => client.reconnectNow();
+    // After sleep / backgrounding / a network change the socket may be half-open while still
+    // reporting OPEN, so re-validate it (probe ping) rather than trusting readyState.
+    const online = () => client.checkHealth();
     const visible = () => {
-      if (document.visibilityState === "visible") client.reconnectNow();
+      if (document.visibilityState === "visible") client.checkHealth();
     };
     window.addEventListener("online", online);
     document.addEventListener("visibilitychange", visible);

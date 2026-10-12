@@ -3,9 +3,8 @@ import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { apiClient } from "@/lib/api/client";
-import { authRedirectFor } from "@/lib/auth";
 import { createQueryClient, meQuery } from "@/lib/queries";
-import { qk } from "@/lib/query-keys";
+import { createSessionEndHandler, navigateToAuthPage } from "@/lib/session";
 import { ThemeProvider } from "@/lib/theme";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -15,25 +14,16 @@ import "./styles.css";
 const queryClient = createQueryClient();
 const router = createAppRouter(queryClient);
 
-let redirecting = false;
+// Any API call that finds the session gone (or half-authenticated) sends the user to the right
+// page, preserving where they were, and forgets the old session's CSRF token.
+const onSessionEnd = createSessionEndHandler({
+  queryClient,
+  location: () => router.state.location,
+  navigate: (target) => navigateToAuthPage(router, target),
+});
+
 apiClient.configure({
-  // Any API call that finds the session gone (or half-authenticated) sends the user to the right
-  // page, preserving where they were.
-  onAuthError: (error) => {
-    const location = router.state.location;
-    const target = authRedirectFor(error.code, location.href);
-    if (!target || redirecting || location.pathname === target.to) return;
-    redirecting = true;
-    queryClient.removeQueries({ queryKey: qk.auth.me });
-    const nav =
-      target.to === "/setup"
-        ? router.navigate({ to: "/setup" })
-        : router.navigate({ to: target.to, search: { redirect: target.redirect } });
-    void nav.finally(() => {
-      redirecting = false;
-      if (target.to === "/login") queryClient.clear();
-    });
-  },
+  onAuthError: (error) => void onSessionEnd(error.code),
   refreshCsrfToken: async () => {
     const me = await queryClient.fetchQuery({ ...meQuery, staleTime: 0 });
     return me.csrfToken;

@@ -156,16 +156,17 @@ describe("monitoring colours follow the node", () => {
 
 describe("realtime payload parsing", () => {
   const s = sample([{ mount: "/", total: GiB, used: 1 }]);
-  it("accepts a bare sample or a wrapped one for the right node", () => {
-    expect(extractNodeSample(s)?.ts).toBe(1000);
+  const OTHER = "33333333-3333-4333-8333-333333333333";
+  it("accepts the contract's {nodeId, sample} payload for the right node only", () => {
     expect(extractNodeSample({ nodeId: NODE_ID, sample: s }, NODE_ID)?.ts).toBe(1000);
-    expect(extractNodeSample({ nodeId: "other", sample: s }, NODE_ID)).toBeNull();
-    expect(extractNodeSample({ cpu: "nope" })).toBeNull();
+    expect(extractNodeSample({ nodeId: OTHER, sample: s }, NODE_ID)).toBeNull();
+    expect(extractNodeSample(s)).toBeNull(); // bare samples are not the contract shape
+    expect(extractNodeSample({ nodeId: NODE_ID, sample: { cpu: "nope" } })).toBeNull();
   });
-  it("only trusts node payloads that match the contract", () => {
+  it("only trusts node.updated payloads that are a bare Node DTO", () => {
     const node = makeNode();
     expect(extractNode(node)?.id).toBe(NODE_ID);
-    expect(extractNode({ node })?.id).toBe(NODE_ID);
+    expect(extractNode({ node })).toBeNull();
     expect(extractNode({ id: NODE_ID, name: "x" })).toBeNull();
   });
 });

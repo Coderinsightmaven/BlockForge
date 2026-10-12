@@ -113,6 +113,9 @@ function UPlotChart({
   windowRef.current = xWindow;
   const [width, setWidth] = useState(0);
   const [cursor, setCursor] = useState<CursorState>({ idx: null, left: 0, top: 0 });
+  // Pointer moves fire far more often than frames; coalesce them into one commit per frame.
+  const pendingCursor = useRef<CursorState | null>(null);
+  const cursorFrame = useRef<number | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
   const mono = data.series.length > MAX_CATEGORICAL_SERIES;
 
@@ -203,13 +206,27 @@ function UPlotChart({
         setCursor: [
           (u) => {
             const idx = u.cursor.idx ?? null;
-            const left = u.cursor.left ?? -1;
-            const top = u.cursor.top ?? -1;
-            // Cursor coordinates are relative to the plotting area; convert to host coordinates.
-            const plotLeft = u.bbox.left / uPlot.pxRatio;
-            setCursor(
-              idx === null || left < 0 ? { idx: null, left: 0, top: 0 } : { idx, left: left + plotLeft, top },
-            );
+            const inside = (u.cursor.left ?? -1) >= 0;
+            let next: CursorState = { idx: null, left: 0, top: 0 };
+            if (idx !== null && inside) {
+              // Anchor the tooltip to the hovered sample (not the raw pointer), converted from
+              // plot-area to host coordinates, so React only re-renders when the sample changes.
+              const x = u.data[0][idx];
+              const plotLeft = u.bbox.left / uPlot.pxRatio;
+              next = {
+                idx,
+                left: (x === undefined ? (u.cursor.left ?? 0) : u.valToPos(x, "x")) + plotLeft,
+                top: 0,
+              };
+            }
+            pendingCursor.current = next;
+            if (cursorFrame.current !== null) return;
+            cursorFrame.current = requestAnimationFrame(() => {
+              cursorFrame.current = null;
+              const n = pendingCursor.current;
+              if (!n) return;
+              setCursor((prev) => (prev.idx === n.idx && Math.abs(prev.left - n.left) < 0.5 ? prev : n));
+            });
           },
         ],
       },
@@ -217,6 +234,8 @@ function UPlotChart({
     const u = new uPlot(opts, aligned, el);
     chartRef.current = u;
     return () => {
+      if (cursorFrame.current !== null) cancelAnimationFrame(cursorFrame.current);
+      cursorFrame.current = null;
       u.destroy();
       chartRef.current = null;
     };

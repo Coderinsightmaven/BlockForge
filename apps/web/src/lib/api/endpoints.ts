@@ -2,6 +2,7 @@ import {
   AlertIncident,
   AlertRule,
   AuditEvent,
+  AuditVerifyResult,
   CreatedEnrollmentToken,
   EnrollmentToken,
   LoginResponse,
@@ -10,6 +11,7 @@ import {
   MfaEnrollStart,
   Node,
   NotificationChannel,
+  NotificationTestResult,
   OverviewSummary,
   Role,
   SetupStatus,
@@ -40,18 +42,6 @@ import { apiClient } from "./client";
  * types (defaults applied server-side); responses are validated against the contract schemas.
  */
 
-/** `GET /audit/verify` — not yet a named contract schema (see contract change requests). */
-export const AuditVerifyResult = z.object({
-  valid: z.boolean(),
-  checked: z.number().int().nonnegative(),
-  firstBrokenId: z.string().nullish(),
-});
-export type AuditVerifyResult = z.infer<typeof AuditVerifyResult>;
-
-/** `POST /notification-channels/:id/test` response. */
-export const ChannelTestResult = z.object({ delivered: z.boolean(), error: z.string().nullish() });
-export type ChannelTestResult = z.infer<typeof ChannelTestResult>;
-
 const UserPage = page(User);
 const AuditPage = page(AuditEvent);
 const IncidentPage = page(AlertIncident);
@@ -64,16 +54,32 @@ function rememberCsrf(me: Me): Me {
   return me;
 }
 
+/**
+ * Starting a new session: any token still in memory belongs to the previous session. Until the
+ * new `Me` arrives the client falls back to the `bf_csrf` cookie, which the server rotates with the
+ * session (this is what the pending-MFA `POST /auth/mfa/verify` uses).
+ */
+function forgetCsrf(): void {
+  apiClient.setCsrfToken(null);
+}
+
 export const authApi = {
   setupStatus: (signal?: AbortSignal) =>
     apiClient.get("/auth/setup", { schema: SetupStatus, signal, skipAuthRedirect: true }),
-  setup: (body: In<typeof SetupRequest>) =>
-    apiClient.post("/auth/setup", { body, schema: Me, skipAuthRedirect: true }).then(rememberCsrf),
-  login: (body: In<typeof LoginRequest>) =>
-    apiClient.post("/auth/login", { body, schema: LoginResponse, skipAuthRedirect: true }).then((r) => {
-      if (r.me) rememberCsrf(r.me);
-      return r;
-    }),
+  setup: (body: In<typeof SetupRequest>) => {
+    forgetCsrf();
+    return apiClient.post("/auth/setup", { body, schema: Me, skipAuthRedirect: true }).then(rememberCsrf);
+  },
+  login: (body: In<typeof LoginRequest>) => {
+    forgetCsrf();
+    return apiClient
+      .post("/auth/login", { body, schema: LoginResponse, skipAuthRedirect: true })
+      .then((r) => {
+        // `mfa_required`: memory stays empty so the fresh session cookie is used for verify.
+        if (r.me) rememberCsrf(r.me);
+        return r;
+      });
+  },
   verifyMfa: (body: In<typeof MfaVerifyRequest>) =>
     apiClient.post("/auth/mfa/verify", { body, schema: Me, skipAuthRedirect: true }).then(rememberCsrf),
   logout: () => apiClient.post<void>("/auth/logout", { skipAuthRedirect: true }),
@@ -177,5 +183,5 @@ export const alertsApi = {
     apiClient.put(`/notification-channels/${enc(id)}`, { body, schema: NotificationChannel }),
   deleteChannel: (id: string) => apiClient.delete<void>(`/notification-channels/${enc(id)}`),
   testChannel: (id: string) =>
-    apiClient.post(`/notification-channels/${enc(id)}/test`, { schema: ChannelTestResult }),
+    apiClient.post(`/notification-channels/${enc(id)}/test`, { schema: NotificationTestResult }),
 };

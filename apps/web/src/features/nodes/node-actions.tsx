@@ -19,15 +19,54 @@ import {
 
 type Action = "approve" | "rotate" | "revoke" | "delete";
 
-export function useApproveNode(node: Node) {
+/**
+ * The one approval confirmation, used by the actions menu and the "waiting for approval" banner,
+ * so approving a node is never a single unconfirmed click.
+ */
+export function ApproveNodeDialog({
+  node,
+  open,
+  onOpenChange,
+}: {
+  node: Node;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const queryClient = useQueryClient();
-  return useApiMutation({
+  const approve = useApiMutation({
     mutationFn: () => nodesApi.approve(node.id),
     success: `${node.name} approved`,
     errorTitle: "Could not approve node",
     invalidate: [qk.overview],
-    onSuccess: (n) => upsertNodeInCache(queryClient, n),
+    onSuccess: (n) => {
+      upsertNodeInCache(queryClient, n);
+      onOpenChange(false);
+    },
   });
+  const host = node.facts?.hostname;
+  return (
+    <ConfirmDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`Approve ${node.name}?`}
+      description={
+        <>
+          The node becomes active and eligible for workloads. Approve only machines you enrolled yourself and
+          recognise
+          {host ? (
+            <>
+              {" "}
+              — this one reports hostname <span className="font-mono text-foreground">{host}</span>
+            </>
+          ) : null}
+          .
+        </>
+      }
+      confirmLabel="Approve"
+      pending={approve.isPending}
+      onConfirm={() => approve.mutate()}
+    />
+  );
 }
 
 export function NodeActions({ node }: { node: Node }) {
@@ -40,7 +79,6 @@ export function NodeActions({ node }: { node: Node }) {
     close();
   };
 
-  const approve = useApproveNode(node);
   const rotate = useApiMutation({
     mutationFn: () => nodesApi.rotateCredentials(node.id),
     success: "Credential rotation started",
@@ -107,15 +145,7 @@ export function NodeActions({ node }: { node: Node }) {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <ConfirmDialog
-        open={open === "approve"}
-        onOpenChange={(o) => !o && close()}
-        title={`Approve ${node.name}?`}
-        description="The node becomes active and eligible for workloads. Approve only machines you enrolled yourself and recognise."
-        confirmLabel="Approve"
-        pending={approve.isPending}
-        onConfirm={() => approve.mutate(undefined, { onSuccess: close })}
-      />
+      <ApproveNodeDialog node={node} open={open === "approve"} onOpenChange={(o) => !o && close()} />
       <ConfirmDialog
         open={open === "rotate"}
         onOpenChange={(o) => !o && close()}

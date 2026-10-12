@@ -1,41 +1,32 @@
 import { useQueryClient } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
-import { Node, NodeMetricSample, OverviewSummary } from "@blockforge/contracts";
-import type { Node as NodeT, NodeMetricSample as NodeMetricSampleT } from "@blockforge/contracts";
+import { REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
+import type { Node, NodeMetricSample } from "@blockforge/contracts";
+import { upsertNodeInCache } from "../node-cache";
 import { qk } from "../query-keys";
 import { useRealtimeTopic } from "./provider";
 
+export { upsertNodeInCache };
+
 /*
- * Realtime → query-cache glue. Event payloads are validated against the contract schemas; a
- * payload that does not parse is treated as a hint and triggers a (throttled) REST refetch
- * instead of being trusted.
+ * Realtime → query-cache glue. Payloads are validated against `REALTIME_EVENT_PAYLOADS`; a payload
+ * that does not parse (or names another subject) is treated as a hint and triggers a throttled
+ * REST refetch instead of being trusted or silently dropped.
  */
 
-/** Pull a `NodeMetricSample` out of a `node.metrics` payload (bare sample or `{nodeId, sample}`). */
-export function extractNodeSample(data: unknown, nodeId?: string): NodeMetricSampleT | null {
-  const direct = NodeMetricSample.safeParse(data);
-  if (direct.success) return direct.data;
-  if (data && typeof data === "object") {
-    const obj = data as Record<string, unknown>;
-    if (nodeId && typeof obj.nodeId === "string" && obj.nodeId !== nodeId) return null;
-    for (const key of ["sample", "latest", "metrics"]) {
-      const nested = NodeMetricSample.safeParse(obj[key]);
-      if (nested.success) return nested.data;
-    }
-  }
-  return null;
+/** `node.metrics` payload `{nodeId, sample}` → the sample, if it is for `nodeId`. */
+export function extractNodeSample(data: unknown, nodeId?: string): NodeMetricSample | null {
+  const parsed = REALTIME_EVENT_PAYLOADS["node.metrics"].safeParse(data);
+  if (!parsed.success) return null;
+  if (nodeId && parsed.data.nodeId !== nodeId) return null;
+  return parsed.data.sample;
 }
 
-/** `node.updated` payload: a full `Node`, or `{node}`. */
-export function extractNode(data: unknown): NodeT | null {
-  const direct = Node.safeParse(data);
-  if (direct.success) return direct.data;
-  if (data && typeof data === "object") {
-    const nested = Node.safeParse((data as Record<string, unknown>).node);
-    if (nested.success) return nested.data;
-  }
-  return null;
+/** `node.updated` payload: the bare `Node` DTO. */
+export function extractNode(data: unknown): Node | null {
+  const parsed = REALTIME_EVENT_PAYLOADS["node.updated"].safeParse(data);
+  return parsed.success ? parsed.data : null;
 }
 
 /** Trailing-edge throttled invalidation of a query prefix. */
@@ -59,18 +50,6 @@ export function useThrottledInvalidate(queryKey: QueryKey, ms = 2000): () => voi
   }, [queryClient, ms]);
 }
 
-export function upsertNodeInCache(queryClient: ReturnType<typeof useQueryClient>, node: NodeT): void {
-  queryClient.setQueryData<NodeT[]>(qk.nodes.list, (list) => {
-    if (!list) return list;
-    const i = list.findIndex((n) => n.id === node.id);
-    if (i === -1) return [...list, node];
-    const next = list.slice();
-    next[i] = node;
-    return next;
-  });
-  queryClient.setQueryData<NodeT>(qk.nodes.detail(node.id), node);
-}
-
 /** Keeps the node list (and cached details) live from the `nodes` topic. */
 export function useNodeListRealtime(enabled: boolean): void {
   const queryClient = useQueryClient();
@@ -90,11 +69,15 @@ export function useNodeDetailRealtime(nodeId: string, enabled: boolean): void {
   useRealtimeTopic(enabled ? `node:${nodeId}` : null, (event) => {
     if (event.type === "node.metrics") {
       const sample = extractNodeSample(event.data, nodeId);
-      if (!sample) return;
-      const patch = (n: NodeT | undefined) =>
+      if (!sample) {
+        // Unusable live sample: fall back to REST so the tiles do not silently freeze.
+        invalidate();
+        return;
+      }
+      const patch = (n: Node | undefined) =>
         n && (!n.latest || n.latest.ts <= sample.ts) ? { ...n, latest: sample } : n;
-      queryClient.setQueryData<NodeT>(qk.nodes.detail(nodeId), patch);
-      queryClient.setQueryData<NodeT[]>(qk.nodes.list, (list) =>
+      queryClient.setQueryData<Node>(qk.nodes.detail(nodeId), patch);
+      queryClient.setQueryData<Node[]>(qk.nodes.list, (list) =>
         list?.map((n) => (n.id === nodeId ? (patch(n) ?? n) : n)),
       );
     } else if (event.type === "node.updated") {
@@ -110,7 +93,7 @@ export function useOverviewRealtime(enabled: boolean): void {
   const invalidate = useThrottledInvalidate(qk.overview, 3000);
   useRealtimeTopic(enabled ? "overview" : null, (event) => {
     if (event.type !== "overview.updated") return;
-    const parsed = OverviewSummary.safeParse(event.data);
+    const parsed = REALTIME_EVENT_PAYLOADS["overview.updated"].safeParse(event.data);
     if (parsed.success) queryClient.setQueryData(qk.overview, parsed.data);
     else invalidate();
   });

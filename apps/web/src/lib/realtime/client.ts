@@ -63,8 +63,11 @@ export interface RealtimeClientOptions {
   heartbeatIntervalMs?: number;
   /** Close and reconnect when nothing was received for this long. */
   heartbeatTimeoutMs?: number;
+  /** How long `checkHealth()` waits for any frame after its probe ping. */
+  probeTimeoutMs?: number;
 }
 
+const CONNECTING = 0;
 const OPEN = 1;
 const DEFAULT_BACKOFF: BackoffOptions = { initialMs: 1000, maxMs: 30_000, factor: 2 };
 
@@ -91,7 +94,10 @@ export class RealtimeClient {
   private status: RealtimeStatus = { state: "idle", attempt: 0, nextRetryAt: null, lastOpenedAt: null };
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private probeTimer: ReturnType<typeof setTimeout> | null = null;
   private lastMessageAt = 0;
+  /** Incremented for every frame from the current socket (liveness probe bookkeeping). */
+  private messageSeq = 0;
   private hasOpenedBefore = false;
   private running = false;
   private readonly backoff: BackoffOptions;
@@ -116,21 +122,49 @@ export class RealtimeClient {
   /** Close the socket and stop reconnecting (logout / unmount). */
   stop(): void {
     this.running = false;
-    this.clearTimers();
-    const ws = this.ws;
-    this.ws = null;
-    if (ws) {
-      this.detach(ws);
-      ws.close(1000, "client stopped");
-    }
+    this.clearReconnectTimer();
+    this.discardSocket(1000, "client stopped");
     this.setStatus({ state: "closed", attempt: 0, nextRetryAt: null });
   }
 
-  /** Skip the remaining backoff (e.g. the browser came back online). */
+  /**
+   * Skip the remaining backoff. A socket that is already open or still connecting is left alone,
+   * so repeated calls (online + visibility events) never stack sockets.
+   */
   reconnectNow(): void {
-    if (!this.running || this.status.state === "open" || this.status.state === "connecting") return;
+    if (!this.running) return;
+    const ws = this.ws;
+    if (ws && (ws.readyState === OPEN || ws.readyState === CONNECTING)) return;
     this.clearReconnectTimer();
     this.connect();
+  }
+
+  /** Replace the current socket (whatever its state) with a fresh one, immediately. */
+  forceReconnect(): void {
+    if (!this.running) return;
+    this.clearReconnectTimer();
+    this.connect();
+  }
+
+  /**
+   * Re-validate the connection after the page becomes visible / the network returns (laptop sleep,
+   * mobile backgrounding leave half-open sockets that still look OPEN). A socket that is not OPEN is
+   * replaced at once; an OPEN one must deliver any frame within `probeTimeoutMs` of a probe ping.
+   */
+  checkHealth(): void {
+    if (!this.running) return;
+    const ws = this.ws;
+    if (!ws || ws.readyState !== OPEN) {
+      this.forceReconnect();
+      return;
+    }
+    this.clearProbe();
+    const seqAtProbe = this.messageSeq;
+    this.send({ op: "ping" });
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null;
+      if (this.ws === ws && this.messageSeq === seqAtProbe) this.forceReconnect();
+    }, this.opts.probeTimeoutMs ?? 5000);
   }
 
   getStatus(): RealtimeStatus {
@@ -185,6 +219,8 @@ export class RealtimeClient {
 
   private connect(): void {
     if (!this.running) return;
+    // Never let two sockets live at once: the previous one (connecting, open or half-open) goes.
+    this.discardSocket(4000, "replaced by a new connection");
     this.setStatus({
       state: this.hasOpenedBefore || this.status.attempt > 0 ? "reconnecting" : "connecting",
       nextRetryAt: null,
@@ -199,7 +235,7 @@ export class RealtimeClient {
     }
     this.ws = ws;
     ws.onopen = () => this.handleOpen(ws);
-    ws.onmessage = (ev) => this.handleMessage(ev.data);
+    ws.onmessage = (ev) => this.handleMessage(ws, ev.data);
     ws.onclose = () => this.handleClose(ws);
     ws.onerror = () => {
       /* a close event always follows */
@@ -217,8 +253,11 @@ export class RealtimeClient {
     if (reconnected) for (const l of [...this.reconnectListeners]) l();
   }
 
-  private handleMessage(raw: unknown): void {
+  private handleMessage(ws: WebSocketLike, raw: unknown): void {
+    // Frames from a socket we already replaced are ignored (no duplicate events).
+    if (ws !== this.ws) return;
     this.lastMessageAt = this.now();
+    this.messageSeq++;
     if (typeof raw !== "string") return;
     let json: unknown;
     try {
@@ -257,6 +296,7 @@ export class RealtimeClient {
     this.detach(ws);
     this.ws = null;
     this.stopHeartbeat();
+    this.clearProbe();
     if (!this.running) {
       this.setStatus({ state: "closed", nextRetryAt: null });
       return;
@@ -284,20 +324,27 @@ export class RealtimeClient {
       if (!ws) return;
       if (this.now() - this.lastMessageAt > timeout) {
         // Half-open socket: drop it without waiting for the TCP stack to notice.
-        this.detach(ws);
-        ws.close(4000, "heartbeat timeout");
-        this.handleCloseForced(ws);
+        this.discardSocket(4000, "heartbeat timeout");
+        if (this.running) this.scheduleReconnect();
         return;
       }
       this.send({ op: "ping" });
     }, interval);
   }
 
-  private handleCloseForced(ws: WebSocketLike): void {
-    if (ws !== this.ws) return;
+  /** Detach and close the current socket, if any, and stop its timers. */
+  private discardSocket(code: number, reason: string): void {
+    const ws = this.ws;
     this.ws = null;
     this.stopHeartbeat();
-    if (this.running) this.scheduleReconnect();
+    this.clearProbe();
+    if (!ws) return;
+    this.detach(ws);
+    try {
+      ws.close(code, reason);
+    } catch {
+      /* already closed */
+    }
   }
 
   private send(frame: ClientFrame): void {
@@ -322,13 +369,13 @@ export class RealtimeClient {
     this.reconnectTimer = null;
   }
 
+  private clearProbe(): void {
+    if (this.probeTimer) clearTimeout(this.probeTimer);
+    this.probeTimer = null;
+  }
+
   private stopHeartbeat(): void {
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
-  }
-
-  private clearTimers(): void {
-    this.clearReconnectTimer();
-    this.stopHeartbeat();
   }
 }

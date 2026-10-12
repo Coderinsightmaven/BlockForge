@@ -3,6 +3,7 @@ import type { MetricSeriesId } from "@blockforge/contracts";
 import { isApiError } from "./api/errors";
 import { alertsApi, auditApi, authApi, monitoringApi, nodesApi, rolesApi, usersApi } from "./api/endpoints";
 import type { AuditFilters, IncidentStatus } from "./api/endpoints";
+import { shareNode, shareNodeList } from "./node-cache";
 import { qk } from "./query-keys";
 import { refreshIntervalFor, resolveTimeRange, timeRangeKey } from "./time-range";
 import type { TimeRange } from "./time-range";
@@ -17,7 +18,9 @@ export function createQueryClient(): QueryClient {
         // Only transient failures are retried; 4xx answers are final.
         retry: (count, err) => (isApiError(err) ? err.isRetryable && count < 2 : count < 1),
       },
-      mutations: { retry: false },
+      // Mutation results/variables can hold one-time secrets (enrollment tokens, MFA secrets,
+      // passwords): never keep them once no component observes the mutation.
+      mutations: { retry: false, gcTime: 0 },
     },
   });
 }
@@ -49,6 +52,8 @@ export const nodesQuery = queryOptions({
   queryFn: ({ signal }) => nodesApi.list(signal),
   staleTime: 10_000,
   refetchInterval: 30_000,
+  // A REST refetch must not replace a newer live sample received over realtime.
+  structuralSharing: shareNodeList,
 });
 
 export const nodeQuery = (id: string) =>
@@ -57,6 +62,7 @@ export const nodeQuery = (id: string) =>
     queryFn: ({ signal }) => nodesApi.get(id, signal),
     staleTime: 10_000,
     refetchInterval: 30_000,
+    structuralSharing: shareNode,
   });
 
 export const enrollmentTokensQuery = queryOptions({

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, MapPin, Tag } from "lucide-react";
+import { useState } from "react";
 import type { Me, MetricSeriesId, Node } from "@blockforge/contracts";
 import { isApiError } from "@/lib/api/errors";
 import { can, canAny } from "@/lib/permissions";
@@ -19,7 +20,7 @@ import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { NodeConnectionBadge, NodeStatusBadge } from "@/components/ui/status";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { NodeActions, useApproveNode } from "./node-actions";
+import { ApproveNodeDialog, NodeActions } from "./node-actions";
 import { CapacityFacts, FilesystemFacts, InterfacesFacts, RuntimeFacts, SystemFacts } from "./node-facts";
 import { CpuTile, DiskIoTile, FilesystemsTile, MemoryTile, NetworkTile } from "./node-live";
 import { NodeSettings } from "./node-settings";
@@ -56,25 +57,28 @@ export const NODE_CHARTS: Array<{ series: MetricSeriesId; title: string; info?: 
   { series: "node.net.errors", title: "Network errors", info: "Interface errors and drops per second." },
 ];
 
-function PendingBanner({ node, canManage }: { node: Node; canManage: boolean }) {
-  const approve = useApproveNode(node);
+export function PendingBanner({ node, canManage }: { node: Node; canManage: boolean }) {
+  const [confirming, setConfirming] = useState(false);
   return (
-    <Callout
-      tone="warning"
-      title="Waiting for approval"
-      className="mb-4"
-      action={
-        canManage ? (
-          <Button size="sm" loading={approve.isPending} onClick={() => approve.mutate()}>
-            Approve
-          </Button>
-        ) : undefined
-      }
-    >
-      {node.name} enrolled with a token that requires approval. It is connected but receives no workloads
-      until an administrator approves it. Verify the hostname and addresses below match a machine you
-      enrolled.
-    </Callout>
+    <>
+      <Callout
+        tone="warning"
+        title="Waiting for approval"
+        className="mb-4"
+        action={
+          canManage ? (
+            <Button size="sm" onClick={() => setConfirming(true)}>
+              Approve…
+            </Button>
+          ) : undefined
+        }
+      >
+        {node.name} enrolled with a token that requires approval. It is connected but receives no workloads
+        until an administrator approves it. Verify the hostname and addresses below match a machine you
+        enrolled.
+      </Callout>
+      {canManage ? <ApproveNodeDialog node={node} open={confirming} onOpenChange={setConfirming} /> : null}
+    </>
   );
 }
 

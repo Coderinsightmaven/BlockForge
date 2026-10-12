@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Filter, ScrollText, ShieldCheck, X } from "lucide-react";
-import { Fragment, useState } from "react";
+import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import type { AuditEvent, Me } from "@blockforge/contracts";
 import { auditApi } from "@/lib/api/endpoints";
@@ -20,7 +20,8 @@ import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { AUDIT_OUTCOME_META, StatusBadge, statusMeta } from "@/components/ui/status";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { SpacerRow, VirtualTable, useVirtualRows } from "@/components/ui/virtual-table";
 
 const ANY = "__any";
 
@@ -102,8 +103,10 @@ export function AuditPage({ me }: { me: Me }) {
   const users = useInfiniteQuery({ ...usersQuery, enabled: allowed && canUsers });
   const q = useInfiniteQuery({ ...auditQuery(applied), enabled: allowed });
 
+  const items = useMemo(() => q.data?.pages.flatMap((p) => p.items) ?? [], [q.data]);
+  // Pages accumulate as the user loads older events; only visible rows are mounted.
+  const virtual = useVirtualRows(items, { estimateSize: 49, getKey: (e) => e.id });
   if (!allowed) return <NoPermission what="view the audit log" />;
-  const items = q.data?.pages.flatMap((p) => p.items) ?? [];
   const userOptions = users.data?.pages.flatMap((p) => p.items) ?? [];
   const set = (k: keyof FilterForm) => (v: string) => setForm((f) => ({ ...f, [k]: v }));
   const apply = (e: FormEvent) => {
@@ -214,9 +217,9 @@ export function AuditPage({ me }: { me: Me }) {
           />
         ) : (
           <>
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
+            <VirtualTable scrollRef={virtual.scrollRef} rowCount={items.length}>
+              <TableHeader className="sticky top-0 z-10 bg-card">
+                <TableRow className="hover:bg-transparent" aria-rowindex={1}>
                   <TableHead className="w-8">
                     <span className="sr-only">Details</span>
                   </TableHead>
@@ -228,85 +231,96 @@ export function AuditPage({ me }: { me: Me }) {
                   <TableHead>Source</TableHead>
                 </TableRow>
               </TableHeader>
-              <TableBody>
-                {items.map((e) => {
-                  const open = expanded.has(e.id);
-                  const hasDetails = Object.keys(e.details).length > 0;
-                  return (
-                    <Fragment key={e.id}>
-                      <TableRow>
-                        <TableCell className="px-1">
-                          <Button
-                            size="icon-sm"
-                            variant="ghost"
-                            aria-expanded={open}
-                            aria-controls={`audit-${e.id}`}
-                            aria-label={open ? "Hide details" : "Show details"}
-                            onClick={() => toggle(e.id)}
-                          >
-                            {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
-                          </Button>
-                        </TableCell>
-                        <TableCell className="text-xs whitespace-nowrap">{formatTimestamp(e.at)}</TableCell>
-                        <TableCell className="text-xs">
-                          <div>{actorLabel(e)}</div>
-                          <div className="text-muted-foreground">{e.actorType}</div>
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">{e.action}</TableCell>
-                        <TableCell className="max-w-56 text-xs">
-                          {e.targetType ? (
-                            <>
-                              <div>{e.targetType}</div>
-                              <div
-                                className="truncate font-mono text-muted-foreground"
-                                title={e.targetId ?? undefined}
-                              >
-                                {e.targetId}
-                              </div>
-                            </>
+              <tbody>
+                <SpacerRow height={virtual.padTop} colSpan={7} />
+              </tbody>
+              {virtual.items.map((vi) => {
+                const e = items[vi.index]!;
+                const open = expanded.has(e.id);
+                const hasDetails = Object.keys(e.details).length > 0;
+                return (
+                  // One measured <tbody> per event so an expanded details row moves with it.
+                  <tbody
+                    key={vi.key}
+                    ref={virtual.virtualizer.measureElement}
+                    data-index={vi.index}
+                    className="border-b"
+                  >
+                    <TableRow aria-rowindex={vi.index + 2} className="border-0">
+                      <TableCell className="px-1">
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-expanded={open}
+                          aria-controls={`audit-${e.id}`}
+                          aria-label={open ? "Hide details" : "Show details"}
+                          onClick={() => toggle(e.id)}
+                        >
+                          {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+                        </Button>
+                      </TableCell>
+                      <TableCell className="text-xs whitespace-nowrap">{formatTimestamp(e.at)}</TableCell>
+                      <TableCell className="text-xs">
+                        <div>{actorLabel(e)}</div>
+                        <div className="text-muted-foreground">{e.actorType}</div>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{e.action}</TableCell>
+                      <TableCell className="max-w-56 text-xs">
+                        {e.targetType ? (
+                          <>
+                            <div>{e.targetType}</div>
+                            <div
+                              className="truncate font-mono text-muted-foreground"
+                              title={e.targetId ?? undefined}
+                            >
+                              {e.targetId}
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge meta={statusMeta(AUDIT_OUTCOME_META, e.outcome)} />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{e.ip ?? "—"}</TableCell>
+                    </TableRow>
+                    {open ? (
+                      <TableRow id={`audit-${e.id}`} className="bg-muted/30 hover:bg-muted/30">
+                        <TableCell />
+                        <TableCell colSpan={6}>
+                          <dl className="mb-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
+                            <div>
+                              <dt className="text-muted-foreground">Event ID</dt>
+                              <dd className="font-mono break-all">{e.id}</dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Request ID</dt>
+                              <dd className="font-mono break-all">{e.requestId ?? "—"}</dd>
+                            </div>
+                            <div>
+                              <dt className="text-muted-foreground">Actor ID</dt>
+                              <dd className="font-mono break-all">{e.actorId ?? "—"}</dd>
+                            </div>
+                          </dl>
+                          {hasDetails ? (
+                            // Rendered as text: details may contain user-controlled strings.
+                            <pre className="max-h-80 overflow-auto rounded-md border bg-card p-2 font-mono text-xs whitespace-pre-wrap break-all">
+                              {JSON.stringify(e.details, null, 2)}
+                            </pre>
                           ) : (
-                            <span className="text-muted-foreground">—</span>
+                            <p className="text-xs text-muted-foreground">No additional details.</p>
                           )}
                         </TableCell>
-                        <TableCell>
-                          <StatusBadge meta={statusMeta(AUDIT_OUTCOME_META, e.outcome)} />
-                        </TableCell>
-                        <TableCell className="font-mono text-xs">{e.ip ?? "—"}</TableCell>
                       </TableRow>
-                      {open ? (
-                        <TableRow id={`audit-${e.id}`} className="bg-muted/30 hover:bg-muted/30">
-                          <TableCell />
-                          <TableCell colSpan={6}>
-                            <dl className="mb-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
-                              <div>
-                                <dt className="text-muted-foreground">Event ID</dt>
-                                <dd className="font-mono break-all">{e.id}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-muted-foreground">Request ID</dt>
-                                <dd className="font-mono break-all">{e.requestId ?? "—"}</dd>
-                              </div>
-                              <div>
-                                <dt className="text-muted-foreground">Actor ID</dt>
-                                <dd className="font-mono break-all">{e.actorId ?? "—"}</dd>
-                              </div>
-                            </dl>
-                            {hasDetails ? (
-                              // Rendered as text: details may contain user-controlled strings.
-                              <pre className="max-h-80 overflow-auto rounded-md border bg-card p-2 font-mono text-xs whitespace-pre-wrap break-all">
-                                {JSON.stringify(e.details, null, 2)}
-                              </pre>
-                            ) : (
-                              <p className="text-xs text-muted-foreground">No additional details.</p>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ) : null}
-                    </Fragment>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                    ) : null}
+                  </tbody>
+                );
+              })}
+              <tbody>
+                <SpacerRow height={virtual.padBottom} colSpan={7} />
+              </tbody>
+            </VirtualTable>
             {q.hasNextPage ? (
               <div className="flex justify-center border-t p-2">
                 <Button

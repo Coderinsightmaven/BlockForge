@@ -41,6 +41,7 @@ function ChangePassword() {
     mutationFn: (body: { currentPassword: string; newPassword: string }) => authApi.changePassword(body),
     success: "Password changed. Your other sessions were signed out.",
     errorTitle: "Could not change password",
+    sensitive: true,
     onSuccess: () => setForm({ currentPassword: "", newPassword: "", confirm: "" }),
   });
   const submit = (e: FormEvent) => {
@@ -138,33 +139,43 @@ function MfaSection({ me }: { me: Me }) {
   const [enrollment, setEnrollment] = useState<{ otpauthUrl: string; secret: string } | null>(null);
   const [code, setCode] = useState("");
   const [codeError, setCodeError] = useState<string | null>(null);
+  // Sensitive mutations reset as soon as they settle, so their API error is kept here.
+  const [mfaError, setMfaError] = useState<unknown>(null);
   const refreshMe = () => queryClient.invalidateQueries({ queryKey: qk.auth.me });
 
   const start = useApiMutation({
     mutationFn: () => authApi.mfaEnrollStart(),
     errorTitle: "Could not start MFA enrolment",
+    sensitive: true,
     onSuccess: (r) => {
       setEnrollment(r);
       setCode("");
       setCodeError(null);
+      setMfaError(null);
     },
   });
   const confirm = useApiMutation({
     mutationFn: (c: string) => authApi.mfaEnrollConfirm({ code: c }),
+    sensitive: true,
+    onError: setMfaError,
     success: "Two-factor authentication enabled",
     silentError: true,
     onSuccess: async () => {
       setEnrollment(null);
       setCode("");
+      setMfaError(null);
       await refreshMe();
     },
   });
   const disable = useApiMutation({
     mutationFn: (c: string) => authApi.mfaDisable({ code: c }),
+    sensitive: true,
+    onError: setMfaError,
     success: "Two-factor authentication disabled",
     silentError: true,
     onSuccess: async () => {
       setCode("");
+      setMfaError(null);
       await refreshMe();
     },
   });
@@ -176,6 +187,7 @@ function MfaSection({ me }: { me: Me }) {
       return null;
     }
     setCodeError(null);
+    setMfaError(null);
     return c;
   };
 
@@ -226,7 +238,7 @@ function MfaSection({ me }: { me: Me }) {
               To turn MFA off, confirm with a current code. Your account is then protected by its password
               alone.
             </p>
-            {codeField("Current code", disable.error)}
+            {codeField("Current code", mfaError)}
             <Button type="submit" variant="destructive" loading={disable.isPending} className="self-start">
               Disable two-factor authentication
             </Button>
@@ -269,12 +281,21 @@ function MfaSection({ me }: { me: Me }) {
               </li>
               <li>Enter the 6-digit code the app shows to finish.</li>
             </ol>
-            {codeField("Verification code", confirm.error)}
+            {codeField("Verification code", mfaError)}
             <div className="flex gap-2">
               <Button type="submit" loading={confirm.isPending}>
                 Enable
               </Button>
-              <Button variant="outline" onClick={() => setEnrollment(null)} disabled={confirm.isPending}>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  // Drop the MFA seed from memory when the user backs out.
+                  setEnrollment(null);
+                  setCode("");
+                  setMfaError(null);
+                }}
+                disabled={confirm.isPending}
+              >
                 Cancel
               </Button>
             </div>

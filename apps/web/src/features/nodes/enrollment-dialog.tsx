@@ -95,6 +95,8 @@ function TokenForm({ onCreated, onCancel }: { onCreated: (c: Created) => void; o
   const create = useApiMutation({
     mutationFn: (body: z.input<typeof CreateEnrollmentTokenRequest>) => nodesApi.createEnrollmentToken(body),
     errorTitle: "Could not create enrollment token",
+    // The response holds the one-time secret: it lives only in this dialog's state.
+    sensitive: true,
     invalidate: [qk.nodes.tokens],
     onSuccess: (data) => onCreated(data),
   });

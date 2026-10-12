@@ -1,3 +1,4 @@
+import { ValidationErrorDetails } from "@blockforge/contracts";
 import type { ApiErrorCode } from "@blockforge/contracts";
 
 /** Codes produced by the client itself (no server response, or an unusable one). */
@@ -86,14 +87,18 @@ export function describeError(err: unknown): { title: string; detail: string | n
   return { title: "Something went wrong", detail: null };
 }
 
-/** Field-level validation messages, when the server returned them in `details`. */
+/**
+ * Field-level messages from a `VALIDATION_FAILED` error (`ValidationErrorDetails`), keyed by the
+ * top-level field of the dot-joined path ("gameplay.maxPlayers" → "gameplay"; "" → "form").
+ */
 export function fieldErrorsFrom(err: unknown): Record<string, string> {
   if (!isApiError(err) || err.code !== "VALIDATION_FAILED") return {};
+  const parsed = ValidationErrorDetails.safeParse(err.details);
+  if (!parsed.success) return {};
   const out: Record<string, string> = {};
-  const details = err.details as { issues?: Array<{ path?: unknown[]; message?: string }> } | undefined;
-  for (const issue of details?.issues ?? []) {
-    const key = Array.isArray(issue.path) && issue.path.length ? String(issue.path[0]) : null;
-    if (key && issue.message && !out[key]) out[key] = issue.message;
+  for (const issue of parsed.data.issues) {
+    const key = issue.path.split(".")[0] || "form";
+    out[key] ??= issue.message;
   }
   return out;
 }

@@ -17,10 +17,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { SpacerRow, VirtualTable, useVirtualRows } from "@/components/ui/virtual-table";
 import { StatusBadge, USER_STATUS_META, statusMeta } from "@/components/ui/status";
 import {
   SortableHead,
-  Table,
   TableBody,
   TableCell,
   TableHead,
@@ -89,6 +89,7 @@ export function UsersPage({
   const all = useMemo(() => users.data?.pages.flatMap((p) => p.items) ?? [], [users.data]);
   const filtered = useMemo(() => all.filter((u) => matchesUser(u, q)), [all, q]);
   const { sorted, sort, toggle } = useSort(filtered, accessors, { key: "name", direction: "asc" });
+  const virtual = useVirtualRows(sorted, { estimateSize: 53, getKey: (u) => u.id });
 
   if (!allowed) return <NoPermission what="view users" />;
   const close = () => setDialog(null);
@@ -141,9 +142,9 @@ export function UsersPage({
               <EmptyState icon={Search} title={q ? "No users match your search" : "No users"} compact />
             ) : (
               <>
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
+                <VirtualTable scrollRef={virtual.scrollRef} rowCount={sorted.length}>
+                  <TableHeader className="sticky top-0 z-10 bg-card">
+                    <TableRow className="hover:bg-transparent" aria-rowindex={1}>
                       <SortableHead column="name" sort={sort} onSort={toggle}>
                         User
                       </SortableHead>
@@ -166,78 +167,90 @@ export function UsersPage({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {sorted.map((u) => (
-                      <TableRow key={u.id}>
-                        <TableCell>
-                          <div className="font-medium">
-                            {u.displayName}
-                            {u.id === me.user.id ? (
-                              <span className="ml-1.5 text-xs font-normal text-muted-foreground">(you)</span>
-                            ) : null}
-                          </div>
-                          <div className="text-xs text-muted-foreground">{u.email}</div>
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge meta={statusMeta(USER_STATUS_META, u.status)} />
-                        </TableCell>
-                        <TableCell>
-                          {u.mfaEnabled ? (
-                            <Badge tone="success">
-                              <ShieldCheck aria-hidden /> On
-                            </Badge>
-                          ) : (
-                            <Badge tone="neutral">
-                              <ShieldOff aria-hidden /> Off
-                            </Badge>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <RoleBadges roles={u.roles} />
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          <Timestamp ts={u.lastLoginAt} />
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          <Timestamp ts={u.createdAt} />
-                        </TableCell>
-                        {canManage ? (
-                          <TableCell className="text-right">
-                            <DropdownMenu modal={false}>
-                              <DropdownMenuTrigger asChild>
-                                <Button
-                                  size="icon-sm"
-                                  variant="ghost"
-                                  aria-label={`Actions for ${u.displayName}`}
-                                >
-                                  <EllipsisVertical aria-hidden />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem onSelect={() => setDialog({ kind: "edit", user: u })}>
-                                  <Pencil aria-hidden /> Edit
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onSelect={() => setDialog({ kind: "roles", user: u })}>
-                                  <ShieldCheck aria-hidden /> Manage roles
-                                </DropdownMenuItem>
-                                <DropdownMenuItem onSelect={() => setDialog({ kind: "password", user: u })}>
-                                  <KeyRound aria-hidden /> Reset password
-                                </DropdownMenuItem>
-                                {u.mfaEnabled ? (
-                                  <DropdownMenuItem
-                                    destructive
-                                    onSelect={() => setDialog({ kind: "mfa", user: u })}
-                                  >
-                                    <ShieldOff aria-hidden /> Reset MFA
-                                  </DropdownMenuItem>
-                                ) : null}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
+                    <SpacerRow height={virtual.padTop} colSpan={canManage ? 7 : 6} />
+                    {virtual.items.map((vi) => {
+                      const u = sorted[vi.index]!;
+                      return (
+                        <TableRow
+                          key={vi.key}
+                          ref={virtual.virtualizer.measureElement}
+                          data-index={vi.index}
+                          aria-rowindex={vi.index + 2}
+                        >
+                          <TableCell>
+                            <div className="font-medium">
+                              {u.displayName}
+                              {u.id === me.user.id ? (
+                                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                                  (you)
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="text-xs text-muted-foreground">{u.email}</div>
                           </TableCell>
-                        ) : null}
-                      </TableRow>
-                    ))}
+                          <TableCell>
+                            <StatusBadge meta={statusMeta(USER_STATUS_META, u.status)} />
+                          </TableCell>
+                          <TableCell>
+                            {u.mfaEnabled ? (
+                              <Badge tone="success">
+                                <ShieldCheck aria-hidden /> On
+                              </Badge>
+                            ) : (
+                              <Badge tone="neutral">
+                                <ShieldOff aria-hidden /> Off
+                              </Badge>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <RoleBadges roles={u.roles} />
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            <Timestamp ts={u.lastLoginAt} />
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            <Timestamp ts={u.createdAt} />
+                          </TableCell>
+                          {canManage ? (
+                            <TableCell className="text-right">
+                              <DropdownMenu modal={false}>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    size="icon-sm"
+                                    variant="ghost"
+                                    aria-label={`Actions for ${u.displayName}`}
+                                  >
+                                    <EllipsisVertical aria-hidden />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem onSelect={() => setDialog({ kind: "edit", user: u })}>
+                                    <Pencil aria-hidden /> Edit
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onSelect={() => setDialog({ kind: "roles", user: u })}>
+                                    <ShieldCheck aria-hidden /> Manage roles
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onSelect={() => setDialog({ kind: "password", user: u })}>
+                                    <KeyRound aria-hidden /> Reset password
+                                  </DropdownMenuItem>
+                                  {u.mfaEnabled ? (
+                                    <DropdownMenuItem
+                                      destructive
+                                      onSelect={() => setDialog({ kind: "mfa", user: u })}
+                                    >
+                                      <ShieldOff aria-hidden /> Reset MFA
+                                    </DropdownMenuItem>
+                                  ) : null}
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </TableCell>
+                          ) : null}
+                        </TableRow>
+                      );
+                    })}
+                    <SpacerRow height={virtual.padBottom} colSpan={canManage ? 7 : 6} />
                   </TableBody>
-                </Table>
+                </VirtualTable>
                 {users.hasNextPage ? (
                   <div className="flex justify-center border-t p-2">
                     <Button
@@ -272,6 +285,7 @@ export function UsersPage({
           />
           <ResetMfaDialog
             user={dialog?.kind === "mfa" ? dialog.user : null}
+            me={me}
             onOpenChange={(o) => !o && close()}
           />
           <RoleBindingsDialog

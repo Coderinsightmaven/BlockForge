@@ -1,3 +1,4 @@
+import { ALERT_RULE_KINDS } from "@blockforge/contracts";
 import type { AlertRule } from "@blockforge/contracts";
 
 export type AlertRuleKind = AlertRule["kind"];
@@ -5,21 +6,23 @@ export type RuleScope = AlertRule["scopeType"];
 
 export interface RuleKindMeta {
   label: string;
+  /** From the contract (`ALERT_RULE_KINDS`): what the evaluator actually checks. */
   description: string;
-  /** null = the rule has no numeric threshold. */
+  /** null = the rule takes no threshold (contract unit `null`; the API requires `threshold: null`). */
   threshold: { label: string; hint: string; default: number; min: number; max: number } | null;
   scopes: RuleScope[];
   defaultFor: number;
 }
 
-/**
- * Threshold semantics per kind as presented to users. NOTE: the contract does not yet document
- * units/direction; these assume percentages (see contract change requests).
- */
-export const RULE_KINDS: Record<AlertRuleKind, RuleKindMeta> = {
+type ThresholdUi = NonNullable<RuleKindMeta["threshold"]>;
+
+/** Presentation only; semantics (description, whether a threshold exists) come from the contract. */
+const UI: Record<
+  AlertRuleKind,
+  { label: string; threshold?: ThresholdUi; scopes: RuleScope[]; defaultFor: number }
+> = {
   "node.cpu.high": {
     label: "Node CPU high",
-    description: "Host CPU utilisation stays above the threshold.",
     threshold: {
       label: "CPU usage above (%)",
       hint: "Whole-host utilisation, 0–100.",
@@ -32,10 +35,9 @@ export const RULE_KINDS: Record<AlertRuleKind, RuleKindMeta> = {
   },
   "node.memory.high": {
     label: "Node memory high",
-    description: "Host memory in use stays above the threshold.",
     threshold: {
       label: "Memory used above (%)",
-      hint: "Used ÷ total physical memory.",
+      hint: "(total − available) ÷ total, so reclaimable cache does not count as used.",
       default: 90,
       min: 1,
       max: 100,
@@ -45,10 +47,9 @@ export const RULE_KINDS: Record<AlertRuleKind, RuleKindMeta> = {
   },
   "node.disk.low": {
     label: "Node disk space low",
-    description: "Free space on a node filesystem drops below the threshold.",
     threshold: {
       label: "Free space below (%)",
-      hint: "Evaluated per filesystem.",
+      hint: "Fires when any filesystem has less than this share free (10 = under 10 % free).",
       default: 10,
       min: 1,
       max: 99,
@@ -56,26 +57,13 @@ export const RULE_KINDS: Record<AlertRuleKind, RuleKindMeta> = {
     scopes: ["global", "node"],
     defaultFor: 60,
   },
-  "node.unreachable": {
-    label: "Node unreachable",
-    description: "The agent stops sending heartbeats.",
-    threshold: null,
-    scopes: ["global", "node"],
-    defaultFor: 60,
-  },
-  "server.crashed": {
-    label: "Server crashed",
-    description: "A Minecraft server process exits unexpectedly.",
-    threshold: null,
-    scopes: ["global", "node", "server"],
-    defaultFor: 0,
-  },
+  "node.unreachable": { label: "Node unreachable", scopes: ["global", "node"], defaultFor: 60 },
+  "server.crashed": { label: "Server crashed", scopes: ["global", "node", "server"], defaultFor: 0 },
   "server.memory.high": {
     label: "Server memory high",
-    description: "A server's container memory approaches its limit.",
     threshold: {
       label: "Memory above (% of limit)",
-      hint: "Container memory ÷ configured limit.",
+      hint: "Container memory ÷ its configured limit.",
       default: 90,
       min: 1,
       max: 100,
@@ -85,19 +73,33 @@ export const RULE_KINDS: Record<AlertRuleKind, RuleKindMeta> = {
   },
   "server.heap.high": {
     label: "Java heap high",
-    description: "JVM heap usage approaches the maximum heap.",
-    threshold: { label: "Heap above (% of max)", hint: "Heap used ÷ -Xmx.", default: 90, min: 1, max: 100 },
+    threshold: {
+      label: "Heap above (% of max)",
+      hint: "Heap used ÷ heap max (-Xmx).",
+      default: 90,
+      min: 1,
+      max: 100,
+    },
     scopes: ["global", "node", "server"],
     defaultFor: 300,
   },
-  "job.failed": {
-    label: "Job failed",
-    description: "A background job (provisioning, backup, update…) fails.",
-    threshold: null,
-    scopes: ["global", "node", "server"],
-    defaultFor: 0,
-  },
+  "job.failed": { label: "Job failed", scopes: ["global", "node", "server"], defaultFor: 0 },
 };
+
+export const RULE_KINDS = Object.fromEntries(
+  (Object.keys(UI) as AlertRuleKind[]).map((kind) => {
+    const contract = ALERT_RULE_KINDS[kind];
+    const ui = UI[kind];
+    const meta: RuleKindMeta = {
+      label: ui.label,
+      description: contract.description,
+      threshold: contract.unit === null ? null : (ui.threshold ?? null),
+      scopes: ui.scopes,
+      defaultFor: ui.defaultFor,
+    };
+    return [kind, meta];
+  }),
+) as Record<AlertRuleKind, RuleKindMeta>;
 
 export function ruleKindMeta(kind: string): RuleKindMeta {
   return (

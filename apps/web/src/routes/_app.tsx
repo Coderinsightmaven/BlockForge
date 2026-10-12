@@ -1,24 +1,33 @@
-import { Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect } from "react";
+import { Outlet, createFileRoute, useRouter } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 import { isApiError } from "@/lib/api/errors";
-import { authRedirectFor, requireSession } from "@/lib/auth";
+import { requireSession } from "@/lib/auth";
 import { meQuery } from "@/lib/queries";
+import { createSessionEndHandler, navigateToAuthPage } from "@/lib/session";
 import { useMe } from "@/lib/use-me";
 import { AppShell } from "@/components/shell/app-shell";
 
-/** Sends the user to login/MFA when a background refresh of `me` finds the session gone. */
+/**
+ * Sends the user to login/MFA when a background refresh of `me` finds the session gone (that
+ * request skips the API client's global auth handler, so it is handled here the same way).
+ */
 function SessionWatch() {
-  const navigate = useNavigate();
-  const href = useRouterState({ select: (s) => s.location.href });
+  const router = useRouter();
+  const queryClient = useQueryClient();
   const { error } = useQuery(meQuery);
+  const onSessionEnd = useMemo(
+    () =>
+      createSessionEndHandler({
+        queryClient,
+        location: () => router.state.location,
+        navigate: (target) => navigateToAuthPage(router, target),
+      }),
+    [queryClient, router],
+  );
   useEffect(() => {
-    if (!isApiError(error)) return;
-    const target = authRedirectFor(error.code, href);
-    if (!target) return;
-    if (target.to === "/setup") void navigate({ to: "/setup" });
-    else void navigate({ to: target.to, search: { redirect: target.redirect } });
-  }, [error, href, navigate]);
+    if (isApiError(error)) onSessionEnd(error.code);
+  }, [error, onSessionEnd]);
   return null;
 }
 

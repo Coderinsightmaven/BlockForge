@@ -2,62 +2,10 @@ import { act, render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NODE_ID } from "@/test/fixtures";
-import { RealtimeClient, backoffDelay } from "./client";
-import type { RealtimeEvent, WebSocketLike } from "./client";
+import { makeClient } from "@/test/fake-socket";
+import { backoffDelay } from "./client";
+import type { RealtimeEvent } from "./client";
 import { RealtimeProvider, useRealtimeTopic } from "./provider";
-
-/** In-memory WebSocket double: tests drive open/message/close explicitly. */
-class FakeSocket implements WebSocketLike {
-  readyState = 0;
-  sent: Array<Record<string, unknown>> = [];
-  closedWith: number | null = null;
-  onopen: ((ev: unknown) => void) | null = null;
-  onclose: ((ev: { code: number; reason: string }) => void) | null = null;
-  onerror: ((ev: unknown) => void) | null = null;
-  onmessage: ((ev: { data: unknown }) => void) | null = null;
-  constructor(readonly url: string) {}
-  send(data: string) {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
-  }
-  close(code = 1000) {
-    this.readyState = 3;
-    this.closedWith = code;
-  }
-  // test helpers
-  open() {
-    this.readyState = 1;
-    this.onopen?.({});
-  }
-  receive(frame: unknown) {
-    this.onmessage?.({ data: typeof frame === "string" ? frame : JSON.stringify(frame) });
-  }
-  drop(code = 1006) {
-    this.readyState = 3;
-    this.onclose?.({ code, reason: "" });
-  }
-  ops() {
-    return this.sent.map((f) => (f.topic ? `${String(f.op)}:${String(f.topic)}` : String(f.op)));
-  }
-}
-
-function makeClient(opts: Partial<ConstructorParameters<typeof RealtimeClient>[0]> = {}) {
-  const sockets: FakeSocket[] = [];
-  const client = new RealtimeClient({
-    url: "ws://test/api/v1/realtime",
-    createSocket: (url) => {
-      const s = new FakeSocket(url);
-      sockets.push(s);
-      return s;
-    },
-    random: () => 0.5,
-    backoff: { initialMs: 1000, maxMs: 8000, factor: 2 },
-    heartbeatIntervalMs: 25_000,
-    heartbeatTimeoutMs: 60_000,
-    ...opts,
-  });
-  const last = () => sockets[sockets.length - 1]!;
-  return { client, sockets, last };
-}
 
 const NODE_TOPIC = `node:${NODE_ID}`;
 
@@ -216,6 +164,74 @@ describe("RealtimeClient reconnect", () => {
     last().drop();
     client.reconnectNow();
     expect(sockets).toHaveLength(2);
+  });
+
+  it("never stacks sockets: repeated reconnectNow() while connecting is a no-op, replaced sockets are closed and muted", () => {
+    const { client, sockets } = makeClient();
+    const seen: number[] = [];
+    client.subscribe("overview", (e) => seen.push(e.ts));
+    client.start();
+    sockets[0]!.open();
+    sockets[0]!.drop();
+    client.reconnectNow(); // backoff skipped → socket 1 (CONNECTING)
+    client.reconnectNow(); // still connecting: no second socket
+    client.reconnectNow();
+    expect(sockets).toHaveLength(2);
+
+    // Force a replacement while socket 1 is still connecting (e.g. a failed health check).
+    client.forceReconnect();
+    expect(sockets).toHaveLength(3);
+    expect(sockets[1]!.closedWith).toBe(4000);
+
+    // A late open / frame from the replaced socket must not count.
+    sockets[1]!.readyState = 1;
+    sockets[1]!.onopen?.({});
+    sockets[1]!.receive({ op: "event", topic: "overview", type: "overview.updated", ts: 1, data: null });
+    expect(seen).toEqual([]);
+    expect(client.getStatus().state).not.toBe("open");
+
+    sockets[2]!.open();
+    sockets[2]!.receive({ op: "event", topic: "overview", type: "overview.updated", ts: 2, data: null });
+    expect(seen).toEqual([2]);
+    expect(sockets[2]!.ops()).toEqual(["subscribe:overview"]);
+  });
+
+  it("checkHealth() replaces a socket that is not open", () => {
+    const { client, sockets } = makeClient();
+    client.start();
+    sockets[0]!.open();
+    sockets[0]!.drop(); // waiting out the backoff
+    client.checkHealth();
+    expect(sockets).toHaveLength(2);
+    client.checkHealth(); // connecting counts as not open after sleep → replaced
+    expect(sockets[1]!.closedWith).toBe(4000);
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("checkHealth() probes an OPEN socket and reconnects when nothing answers within 5 s", () => {
+    const { client, sockets } = makeClient();
+    client.start();
+    sockets[0]!.open();
+    client.checkHealth();
+    expect(sockets[0]!.ops()).toEqual(["ping"]);
+    vi.advanceTimersByTime(4999);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sockets[0]!.closedWith).toBe(4000);
+    expect(sockets).toHaveLength(2);
+  });
+
+  it("checkHealth() keeps a socket that answers the probe", () => {
+    const { client, sockets } = makeClient();
+    client.start();
+    sockets[0]!.open();
+    client.checkHealth();
+    vi.advanceTimersByTime(200);
+    sockets[0]!.receive({ op: "pong", ts: 1 });
+    vi.advanceTimersByTime(10_000);
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.closedWith).toBeNull();
+    expect(client.getStatus().state).toBe("open");
   });
 
   it("pings while healthy and drops a silent (half-open) socket", () => {

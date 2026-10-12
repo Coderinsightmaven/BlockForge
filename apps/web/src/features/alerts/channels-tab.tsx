@@ -112,6 +112,8 @@ function ChannelDialog({
       channel ? alertsApi.updateChannel(channel.id, b) : alertsApi.createChannel(b),
     success: channel ? "Channel saved" : "Channel created",
     errorTitle: channel ? "Could not save channel" : "Could not create channel",
+    // The body may carry the webhook URL (a secret).
+    sensitive: true,
     invalidate: [qk.alerts.channels],
     onSuccess: () => {
       setUrl("");

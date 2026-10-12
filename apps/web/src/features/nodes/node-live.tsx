@@ -155,14 +155,20 @@ export function MemoryTile({ sample }: { sample: NodeMetricSample | null }) {
       </Card>
     );
   }
-  const cached = m.cachedBytes ?? 0;
-  const buffers = m.buffersBytes ?? 0;
-  const free = Math.max(0, m.totalBytes - m.usedBytes - cached - buffers);
-  const segments = [
-    { key: "used", label: "Used", bytes: m.usedBytes, color: "var(--chart-1)" },
+  // "Free" can only be derived when the agent reports both cache and buffers; otherwise the
+  // unaccounted remainder stays an unlabelled empty track instead of an invented number.
+  const hasBreakdown = m.cachedBytes !== undefined && m.buffersBytes !== undefined;
+  const free = hasBreakdown
+    ? Math.max(0, m.totalBytes - m.usedBytes - (m.cachedBytes ?? 0) - (m.buffersBytes ?? 0))
+    : undefined;
+  const parts = [
+    { key: "used", label: "Used", bytes: m.usedBytes as number | undefined, color: "var(--chart-1)" },
     { key: "buffers", label: "Buffers", bytes: m.buffersBytes, color: "var(--chart-3)" },
     { key: "cached", label: "Cached", bytes: m.cachedBytes, color: "var(--chart-7)" },
-    { key: "free", label: "Free", bytes: free, color: "var(--muted)" },
+  ];
+  const barSegments = [
+    ...parts.filter((p) => p.bytes !== undefined),
+    ...(free !== undefined ? [{ key: "free", label: "Free", bytes: free, color: "var(--muted)" }] : []),
   ];
   return (
     <Card>
@@ -175,11 +181,11 @@ export function MemoryTile({ sample }: { sample: NodeMetricSample | null }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <div
-          className="flex h-3 w-full gap-0.5 overflow-hidden rounded-full"
+          className="flex h-3 w-full gap-0.5 overflow-hidden rounded-full bg-muted"
           role="img"
           aria-label={`Memory: ${formatBytes(m.usedBytes)} used of ${formatBytes(m.totalBytes)}`}
         >
-          {segments.map((s) =>
+          {barSegments.map((s) =>
             s.bytes ? (
               <div
                 key={s.key}
@@ -190,14 +196,20 @@ export function MemoryTile({ sample }: { sample: NodeMetricSample | null }) {
           )}
         </div>
         <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {segments.slice(0, 3).map((s) => (
+          {parts.map((s) => (
             <div key={s.key} className="flex flex-col">
               <dt className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span aria-hidden className="size-2 rounded-[2px]" style={{ background: s.color }} />
+                {s.bytes !== undefined ? (
+                  <span aria-hidden className="size-2 rounded-[2px]" style={{ background: s.color }} />
+                ) : null}
                 {s.label}
               </dt>
-              <dd className="text-sm font-semibold tabular">
-                {s.bytes === undefined ? "—" : formatBytes(s.bytes)}
+              <dd
+                className={
+                  s.bytes === undefined ? "text-sm text-muted-foreground" : "text-sm font-semibold tabular"
+                }
+              >
+                {s.bytes === undefined ? "Not reported" : formatBytes(s.bytes)}
               </dd>
             </div>
           ))}
@@ -207,6 +219,11 @@ export function MemoryTile({ sample }: { sample: NodeMetricSample | null }) {
             info="Memory the kernel can hand to new processes without swapping: free memory plus reclaimable cache."
           />
         </dl>
+        {!hasBreakdown ? (
+          <p className="text-xs text-muted-foreground">
+            This agent does not report cache and buffers, so free memory is not derived; use Available.
+          </p>
+        ) : null}
         <div className="flex flex-col gap-1">
           <div className="flex items-center justify-between text-xs">
             <span className="flex items-center gap-1 text-muted-foreground">

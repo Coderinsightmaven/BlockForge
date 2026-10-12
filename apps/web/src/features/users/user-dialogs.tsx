@@ -92,6 +92,7 @@ export function CreateUserDialog({
     mutationFn: (body: z.input<typeof CreateUserRequest>) => usersApi.create(body),
     success: (u) => `User ${u.email} created`,
     errorTitle: "Could not create user",
+    sensitive: true,
     invalidate: [qk.users.all],
     onSuccess: () => onOpenChange(false),
   });
@@ -208,7 +209,8 @@ export function EditUserDialog({
     mutationFn: (body: z.input<typeof UpdateUserRequest>) => usersApi.update(user!.id, body),
     success: "User saved",
     errorTitle: "Could not save user",
-    invalidate: [qk.users.all],
+    // Editing yourself changes your own session's Me (name, status).
+    invalidate: user?.id === me.user.id ? [qk.users.all, qk.auth.me] : [qk.users.all],
     onSuccess: () => onOpenChange(false),
   });
   const self = user?.id === me.user.id;
@@ -289,6 +291,7 @@ export function ResetPasswordDialog({
     mutationFn: (pw: string) => usersApi.resetPassword(user!.id, { password: pw }),
     success: "Password reset; the user's sessions were signed out",
     errorTitle: "Could not reset password",
+    sensitive: true,
     onSuccess: () => onOpenChange(false),
   });
   const submit = (e: FormEvent) => {
@@ -343,16 +346,18 @@ export function ResetPasswordDialog({
 
 export function ResetMfaDialog({
   user,
+  me,
   onOpenChange,
 }: {
   user: User | null;
+  me: Me;
   onOpenChange: (o: boolean) => void;
 }) {
   const reset = useApiMutation({
     mutationFn: () => usersApi.resetMfa(user!.id),
     success: "Two-factor authentication reset",
     errorTitle: "Could not reset MFA",
-    invalidate: [qk.users.all],
+    invalidate: user?.id === me.user.id ? [qk.users.all, qk.auth.me] : [qk.users.all],
     onSuccess: () => onOpenChange(false),
   });
   return (
@@ -400,6 +405,8 @@ export function RoleBindingsDialog({
   const onUser = (u: User) => {
     setCurrent(u);
     void queryClient.invalidateQueries({ queryKey: qk.users.all });
+    // Changing your own roles changes your permissions: refresh Me so the UI gates update.
+    if (u.id === me.user.id) void queryClient.invalidateQueries({ queryKey: qk.auth.me });
   };
   const add = useApiMutation({
     mutationFn: () =>
