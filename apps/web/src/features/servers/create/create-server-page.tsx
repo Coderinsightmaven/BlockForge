@@ -24,6 +24,7 @@ import {
 import { qk } from "@/lib/query-keys";
 import { upsertServerInCache } from "@/lib/server-cache";
 import { cn } from "@/lib/utils";
+import { useVariableValidation } from "@/lib/variable-validation";
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
@@ -534,6 +535,8 @@ function EggConfigure({
   ctx: WizardContext;
 }) {
   const baseId = useId();
+  // Loads the egg rule engine for this step's validation (cheap checks only until it arrives).
+  useVariableValidation();
   const vars = [...template.variables].sort((a, b) => a.sortOrder - b.sortOrder);
   return (
     <div className="flex flex-col gap-5">

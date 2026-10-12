@@ -1,7 +1,7 @@
 import { CreateServerRequest, Slug, softwareKind } from "@blockforge/contracts";
 import type { ServerSoftware, TemplateSummary } from "@blockforge/contracts";
 import type { z } from "zod";
-import { validateVariableValue } from "@/lib/variable-rules";
+import { validateVariable } from "@/lib/variable-validation";
 
 export type WizardStep = "template" | "configure" | "placement" | "resources" | "review";
 export const WIZARD_STEPS: WizardStep[] = ["template", "configure", "placement", "resources", "review"];
@@ -216,7 +216,7 @@ export function validateStep(
       for (const v of template.variables) {
         if (!variableEditable(v, ctx)) continue;
         const value = s.variables[v.envName] ?? v.defaultValue;
-        const err = validateVariableValue(v, value);
+        const err = validateVariable(v, value);
         if (err) e[`var.${v.envName}`] = err;
       }
     }

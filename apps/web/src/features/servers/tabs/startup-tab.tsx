@@ -8,7 +8,7 @@ import { useApiMutation } from "@/lib/mutations";
 import { serverStartupQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { serverActionable } from "@/lib/server-permissions";
-import { unsupportedRules, validateVariableValue } from "@/lib/variable-rules";
+import { useVariableValidation } from "@/lib/variable-validation";
 import { ErrorState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -49,12 +49,15 @@ function VariableCard({
       queryClient.setQueryData(qk.server(server.id).startup, startup);
     },
   });
+  // Full rule engine loads lazily; until then only required/length are checked (the server
+  // validates every value anyway, so saving never waits for it).
+  const rules = useVariableValidation();
   const submit = () => {
-    const err = validateVariableValue(variable, value);
+    const err = rules.validate(variable, value);
     setError(err);
     if (!err) save.mutate(value);
   };
-  const unchecked = unsupportedRules(variable.rules);
+  const unchecked = rules.unsupported(variable.rules);
   return (
     <Card className="flex flex-col">
       <CardHeader className="pb-1">

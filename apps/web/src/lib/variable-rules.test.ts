@@ -1,18 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { inputForRules, unsupportedRules, validateVariableValue } from "./variable-rules";
+import { parseRules } from "@blockforge/eggs";
+import { parseRuleString } from "./rule-syntax";
+import { inputForRules } from "./variable-rules";
+import {
+  cheapVariableCheck,
+  loadVariableRules,
+  unsupportedVariableRules,
+  validateVariable,
+  variableRulesReady,
+} from "./variable-validation";
 
 /*
  * The rule engine itself is `@blockforge/eggs` (tested there against real eggs). These tests pin
- * the behaviour the web relies on: the same verdicts the server will give, and the input picker.
+ * the behaviour the web relies on: the same verdicts the server will give once the lazily loaded
+ * engine is ready, certain-only checks before that, and the input picker.
  */
 const v = (rules: string) => ({ name: "Value", envName: "VALUE", rules });
 
-describe("validateVariableValue (shared @blockforge/eggs rules)", () => {
-  const ok = (rules: string, value: string) =>
-    expect(validateVariableValue(v(rules), value), `${rules} ← ${value}`).toBeNull();
-  const bad = (rules: string, value: string) =>
-    expect(validateVariableValue(v(rules), value), `${rules} ← ${value}`).not.toBeNull();
+describe("before the rule engine has loaded", () => {
+  it("runs only required / maximum-length checks, with the engine's messages", () => {
+    expect(variableRulesReady()).toBe(false);
+    expect(validateVariable(v("required|string"), "  ")).toBe("Value is required.");
+    expect(validateVariable(v("string|max:3"), "abcd")).toBe("Value may not be greater than 3 characters.");
+    // Everything else waits for the engine (the server validates on submit anyway).
+    expect(validateVariable(v("required|integer|between:1,255"), "999")).toBeNull();
+    expect(validateVariable(v("alpha_dash"), "my world")).toBeNull();
+    expect(validateVariable(v("required|regex:/^(true|false)$/"), "maybe")).toBeNull();
+    expect(unsupportedVariableRules("required|starts_with:x")).toEqual([]);
+    // `max` is a numeric bound for numbers, not a length.
+    expect(cheapVariableCheck(v("integer|max:5"), "123456")).toBeNull();
+  });
+});
 
+describe("validateVariable (shared @blockforge/eggs rules, once loaded)", () => {
+  const ok = (rules: string, value: string) =>
+    expect(validateVariable(v(rules), value), `${rules} ← ${value}`).toBeNull();
+  const bad = (rules: string, value: string) =>
+    expect(validateVariable(v(rules), value), `${rules} ← ${value}`).not.toBeNull();
+
+  it("loads once", async () => {
+    const a = loadVariableRules();
+    expect(loadVariableRules()).toBe(a);
+    await a;
+    expect(variableRulesReady()).toBe(true);
+  });
   it("required / optional", () => {
     bad("required|string", "");
     bad("required|string", "   ");
@@ -37,13 +68,53 @@ describe("validateVariableValue (shared @blockforge/eggs rules)", () => {
     bad("regex:/^[a-z0-9_]+\\.jar$/", "../evil.sh");
   });
   it("names the variable in messages", () => {
-    expect(validateVariableValue({ name: "Max players", envName: "MAX", rules: "required" }, "")).toMatch(
+    expect(validateVariable({ name: "Max players", envName: "MAX", rules: "required" }, "")).toMatch(
       /Max players/,
     );
   });
   it("reports unsupported rules instead of silently enforcing them", () => {
     ok("required|starts_with:x", "abc");
-    expect(unsupportedRules("required|starts_with:x|string")).toEqual(["starts_with"]);
+    expect(unsupportedVariableRules("required|starts_with:x|string")).toEqual(["starts_with"]);
+  });
+  it("cheap checks agree with the engine wherever they report", () => {
+    const cases: Array<[string, string]> = [
+      ["required|string", ""],
+      ["required|string|max:20", " "],
+      ["nullable|string|max:3", "abcd"],
+      ["max:2", "ééé"],
+      ["required|max:64", "x".repeat(65)],
+    ];
+    for (const [rules, value] of cases) {
+      const cheap = cheapVariableCheck(v(rules), value);
+      expect(cheap, rules).not.toBeNull();
+      expect(validateVariable(v(rules), value), rules).toBe(cheap);
+    }
+  });
+});
+
+describe("rule-string parsing parity with @blockforge/eggs", () => {
+  it("reads rule strings exactly like the engine", () => {
+    const corpus = [
+      "required|string|max:20",
+      "required|integer|between:1,255",
+      "nullable|in:a,b,c",
+      'in:"a,b",c,"d""e"," f "',
+      'in:"x\\"y",z',
+      "int|bool|Required",
+      "required|regex:/^(true|false)$/",
+      "regex:/^(a|b|c)$/i|max:5",
+      "regex:#^[a-z|]+$#|string",
+      "required|regex:/^(unclosed|max:3",
+      "not_regex:/^(x|y)$/|string",
+      "|required||max:3|",
+      "between:1,64|numeric",
+      "alpha_dash|starts_with:x,y",
+    ];
+    for (const rules of corpus) {
+      expect(parseRuleString(rules), rules).toEqual(
+        parseRules(rules).map((r) => ({ name: r.name, params: r.params })),
+      );
+    }
   });
 });
 

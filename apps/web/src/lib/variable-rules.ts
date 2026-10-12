@@ -1,32 +1,10 @@
-import {
-  parseRules,
-  unsupportedRules as eggsUnsupportedRules,
-  validateVariableValue as eggsValidate,
-} from "@blockforge/eggs";
-import type { TemplateVariable } from "@blockforge/contracts";
+import { parseRuleString } from "./rule-syntax";
 
 /*
- * Egg variable rules (Laravel rule strings). Validation is the shared `@blockforge/eggs`
- * implementation — the same code the control plane uses — so the browser gives instant feedback
- * with identical results; the server still re-validates every value.
+ * Picking an input for an egg variable from its rule string. Validation lives in
+ * `variable-validation.ts` (the shared `@blockforge/eggs` engine, loaded lazily); this module stays
+ * dependency-free so the wizard and the Startup tab render without it.
  */
-
-export type RuleVariable = Pick<TemplateVariable, "name" | "envName" | "rules">;
-
-/** First error message for `value`, or null when it satisfies every supported rule. */
-export function validateVariableValue(variable: RuleVariable, value: string): string | null {
-  try {
-    return eggsValidate(variable, value);
-  } catch (err) {
-    // A rule the library cannot evaluate (e.g. an invalid regex): leave it to the server.
-    return err instanceof Error && err.name === "RuleError" ? err.message : null;
-  }
-}
-
-/** Rule names in the string that are not enforced (reported at import; skipped client-side). */
-export function unsupportedRules(rules: string): string[] {
-  return eggsUnsupportedRules(rules);
-}
 
 export type VariableInput =
   | { kind: "select"; options: string[]; optional: boolean }
@@ -36,7 +14,7 @@ export type VariableInput =
 
 /** The input that best fits a rule string (select for `in:`, switch for `boolean`, …). */
 export function inputForRules(rules: string): VariableInput {
-  const parsed = parseRules(rules);
+  const parsed = parseRuleString(rules);
   const get = (n: string) => parsed.find((r) => r.name === n);
   const inRule = get("in");
   if (inRule && inRule.params.length > 0)

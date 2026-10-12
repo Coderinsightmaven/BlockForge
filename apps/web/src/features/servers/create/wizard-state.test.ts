@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { TemplateSummary } from "@blockforge/contracts";
 import { NODE_ID, TEMPLATE_ID } from "@/test/fixtures";
 import {
@@ -13,6 +13,10 @@ import {
   validateWizard,
 } from "./wizard-state";
 import type { WizardState } from "./wizard-state";
+import { loadVariableRules } from "@/lib/variable-validation";
+
+// Egg variable checks use the full (lazily loaded) rule engine.
+beforeAll(() => loadVariableRules());
 
 const minecraftTemplate: TemplateSummary = {
   id: TEMPLATE_ID,
