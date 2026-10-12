@@ -1,3 +1,5 @@
+import { isForbiddenKey } from "./safe.js";
+
 /**
  * Source-preserving JSON editor: a small recursive-descent parser records the source range of
  * every value, so scalar edits replace only that range and new keys are inserted after the last
@@ -153,6 +155,7 @@ function render(value: unknown, indent: string, unit: string, eol: string): stri
  * be made at the source level (e.g. the path runs through a scalar or a missing list element).
  */
 export function jsonSetInSource(text: string, path: readonly (string | number)[], value: unknown): string | null {
+  if (path.some((seg) => typeof seg === "string" && isForbiddenKey(seg))) throw new JsonSourceError("forbidden path segment", 0);
   const root = parseJsonSource(text);
   const eol = /\r\n/.test(text) ? "\r\n" : "\n";
   const { node, parent, depth } = find(root, path);

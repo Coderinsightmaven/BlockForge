@@ -12,6 +12,7 @@ import {
 import { DEFAULT_AGENT_IMAGE_ALLOWLIST, imageAllowed, parseImageRef } from "./images.js";
 import { isKnownConfigPlaceholder, placeholderKeys } from "./placeholders.js";
 import { unsupportedRules } from "./rules.js";
+import { defineOwn, isForbiddenKey } from "./safe.js";
 
 /**
  * Egg import (Pterodactyl `EggImporterService`/`EggParserService`, Pelican `EggImporterService`).
@@ -233,21 +234,31 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
         continue;
       }
       for (const [key, value] of Object.entries(spec["find"])) {
+        // Keys become object paths in the config writers: refuse prototype-polluting segments.
+        const badSeg = key.split(/[.[\]]/).find((seg) => isForbiddenKey(seg));
+        if (badSeg !== undefined) {
+          issue("error", "CONFIG_KEY_FORBIDDEN", `${path}: key "${key}" contains the forbidden segment "${badSeg}".`, `${p}.find`);
+          continue;
+        }
         const s = str(value);
         if (s !== null) {
-          find[key] = s;
+          defineOwn(find, key, s);
           if (typeof value !== "string") issue("info", "CONFIG_VALUE_STRINGIFIED", `${path}: value of "${key}" is stored as the string "${s}".`, `${p}.find`);
         } else if (isObj(value)) {
           const m: Record<string, string> = {};
           for (const [k, v] of Object.entries(value)) {
+            if (isForbiddenKey(k)) {
+              issue("error", "CONFIG_KEY_FORBIDDEN", `${path}: condition "${k}" under "${key}" is not allowed.`, `${p}.find`);
+              continue;
+            }
             const vs = str(v);
             if (vs === null) {
               issue("warning", "CONFIG_VALUE_UNSUPPORTED", `${path}: nested value under "${key}" → "${k}" is not a string; ignored.`, `${p}.find`);
               continue;
             }
-            m[k] = vs;
+            defineOwn(m, k, vs);
           }
-          find[key] = m;
+          defineOwn(find, key, m);
         } else {
           issue("warning", "CONFIG_VALUE_UNSUPPORTED", `${path}: value of "${key}" is not a string or map; ignored.`, `${p}.find`);
         }
@@ -368,6 +379,10 @@ export function parseEgg(raw: unknown, opts: ParseEggOptions): TemplateImportPre
     const envName = (str(rv["env_variable"]) ?? "").trim();
     if (!EnvVarName.safeParse(envName).success) {
       issue("error", "VARIABLE_NAME_INVALID", `Variable name "${envName}" is not a valid environment variable name.`, `${p}.env_variable`);
+      return;
+    }
+    if (isForbiddenKey(envName)) {
+      issue("error", "VARIABLE_NAME_INVALID", `Variable name "${envName}" is not allowed.`, `${p}.env_variable`);
       return;
     }
     if ((RESERVED_ENV_VARS as readonly string[]).includes(envName.toUpperCase())) {

@@ -1,4 +1,5 @@
 import type { Template } from "@blockforge/contracts";
+import { defineOwn, hasOwn } from "./safe.js";
 
 /**
  * Exports a template as a PTDL_v2 egg, shaped like Pterodactyl's `EggExporterService`
@@ -14,12 +15,12 @@ export function exportEgg(
   opts: { exportedAt?: Date } = {},
 ): Record<string, unknown> {
   const files: Record<string, { parser: string; find: Record<string, unknown> }> = {};
-  for (const f of template.configFiles) files[f.path] = { parser: f.parser, find: f.find };
+  for (const f of template.configFiles) defineOwn(files, f.path, { parser: f.parser, find: f.find });
   const done = template.startupDone.length === 1 ? template.startupDone[0]! : template.startupDone;
   const stop =
     template.stop.type === "command" ? template.stop.command : template.stop.signal === "SIGINT" ? "^C" : `^${template.stop.signal}`;
   const dockerImages: Record<string, string> = {};
-  for (const im of template.dockerImages) dockerImages[dockerImages[im.label] === undefined ? im.label : `${im.label} (${im.image})`] = im.image;
+  for (const im of template.dockerImages) defineOwn(dockerImages, hasOwn(dockerImages, im.label) ? `${im.label} (${im.image})` : im.label, im.image);
   const pretty = (v: unknown) => JSON.stringify(v, null, 4);
   return {
     _comment: "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY BLOCKFORGE (PTERODACTYL-COMPATIBLE PTDL_v2 EGG)",

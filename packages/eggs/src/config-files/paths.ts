@@ -12,6 +12,8 @@
  * The changed concrete paths are recorded so source-preserving writers can replay them.
  */
 
+import { defineOwn, getOwn, hasOwn, isForbiddenKey, nullProtoObject } from "../safe.js";
+
 export type Seg = string | number;
 export type Path = Seg[];
 
@@ -39,7 +41,10 @@ export function parsePath(match: string): Path {
   for (const part of match.split(".")) {
     const m = /^([^[\]]*)((?:\[\d+\])*)$/.exec(part);
     if (!m) throw new PathSyntaxError(`invalid path segment "${part}" in "${match}"`);
-    if (m[1] !== "") out.push(m[1]!);
+    if (m[1] !== "") {
+      if (isForbiddenKey(m[1]!)) throw new PathSyntaxError(`path segment "${m[1]}" is not allowed in "${match}"`);
+      out.push(m[1]!);
+    }
     else if (m[2] === "") throw new PathSyntaxError(`empty path segment in "${match}"`);
     for (const idx of m[2]!.matchAll(/\[(\d+)\]/g)) out.push(Number(idx[1]));
   }
@@ -73,43 +78,51 @@ function getAt(root: unknown, path: Path): { found: boolean; value: unknown } {
       if (!Array.isArray(cur) || seg >= cur.length) return { found: false, value: undefined };
       cur = cur[seg];
     } else {
-      if (!isObj(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return { found: false, value: undefined };
-      cur = cur[seg];
+      // Own properties only; forbidden keys are never addressed (defence in depth).
+      if (isForbiddenKey(seg) || !isObj(cur) || !hasOwn(cur, seg)) return { found: false, value: undefined };
+      cur = getOwn(cur, seg);
     }
   }
   return { found: true, value: cur };
 }
 
 /** Sets a value creating missing mappings; returns false (with a reason) when impossible. */
+/**
+ * Sets a value creating missing mappings (null-prototype containers); returns a reason when
+ * impossible. Only own data properties are read or defined — never the `__proto__` setter or an
+ * inherited property — and forbidden keys are refused outright.
+ */
 function setAt(root: Container, path: Path, value: unknown): string | null {
   let cur: unknown = root;
+  const fresh = (next: Seg | undefined) => (typeof next === "number" ? [] : nullProtoObject());
   for (let i = 0; i < path.length; i++) {
     const seg = path[i]!;
     const last = i === path.length - 1;
     const nextSeg = path[i + 1];
     if (typeof seg === "number") {
       if (!Array.isArray(cur)) return `"${path.slice(0, i).join(".")}" is not a list`;
-      if (seg > cur.length || (seg === cur.length && seg !== 0)) return `list index ${seg} does not exist`;
+      if (!Number.isSafeInteger(seg) || seg < 0 || seg > cur.length || (seg === cur.length && seg !== 0)) return `list index ${seg} does not exist`;
       if (last) {
         cur[seg] = value;
         return null;
       }
-      if (cur[seg] === undefined || cur[seg] === null) cur[seg] = typeof nextSeg === "number" ? [] : {};
+      if (cur[seg] === undefined || cur[seg] === null) cur[seg] = fresh(nextSeg);
       cur = cur[seg];
       continue;
     }
+    if (isForbiddenKey(seg)) return `path segment "${seg}" is not allowed`;
     if (!isObj(cur)) return `"${path.slice(0, i).join(".") || "(root)"}" is not a mapping`;
     if (last) {
-      cur[seg] = value;
+      defineOwn(cur, seg, value);
       return null;
     }
-    const child = cur[seg];
+    const child = getOwn(cur, seg);
     if (child === undefined || child === null) {
-      cur[seg] = typeof nextSeg === "number" ? [] : {};
+      defineOwn(cur, seg, fresh(nextSeg));
     } else if (typeof child !== "object") {
       return `"${path.slice(0, i + 1).join(".")}" is a scalar, cannot set "${path.join(".")}"`;
     }
-    cur = cur[seg];
+    cur = getOwn(cur, seg);
   }
   return null;
 }
@@ -122,7 +135,8 @@ export function expandWildcards(root: unknown, path: Path): Path[] {
   const rest = path.slice(star + 1);
   const { found, value } = getAt(root, prefix);
   if (!found || value === null || typeof value !== "object") return [];
-  const keys: Seg[] = Array.isArray(value) ? value.map((_, i) => i) : Object.keys(value);
+  // Own keys only, never forbidden ones (a config file may contain an own "__proto__" key).
+  const keys: Seg[] = Array.isArray(value) ? value.map((_, i) => i) : Object.keys(value).filter((k) => !isForbiddenKey(k));
   return keys.flatMap((k) => expandWildcards(root, [...prefix, k, ...rest]));
 }
 

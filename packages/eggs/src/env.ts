@@ -1,4 +1,5 @@
 import type { Template } from "@blockforge/contracts";
+import { defineOwn, hasOwn, isForbiddenKey } from "./safe.js";
 
 /**
  * Environment of an egg workload. Mirrors Pterodactyl (`EnvironmentService` + Wings): every
@@ -33,8 +34,9 @@ export function memoryMiB(memoryLimitBytes: number): number {
 export function buildEggEnvironment(input: EggEnvironmentInput): Record<string, string> {
   const env: Record<string, string> = {};
   for (const v of input.template.variables) {
-    const value = Object.prototype.hasOwnProperty.call(input.values, v.envName) ? input.values[v.envName]! : v.defaultValue;
-    env[v.envName] = value;
+    const value = hasOwn(input.values, v.envName) ? input.values[v.envName]! : v.defaultValue;
+    if (isForbiddenKey(v.envName)) throw new EggEnvironmentError(`variable name ${v.envName} is not allowed`);
+    defineOwn(env, v.envName, value);
   }
   Object.assign(env, {
     STARTUP: input.template.startup,

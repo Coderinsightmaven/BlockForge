@@ -1,3 +1,4 @@
+import { isForbiddenKey } from "./safe.js";
 import { type Document, isCollection, isMap, isPair, isScalar, isSeq, parseDocument, type Node, type Pair, type Scalar, type YAMLMap } from "yaml";
 
 /**
@@ -325,6 +326,8 @@ export function yamlSetMany(text: string | null, edits: readonly { path: YamlPat
   let changed = false;
   for (const e of edits) {
     if (e.path.length === 0) throw new YamlEditError("empty YAML path");
+    const bad = e.path.find((seg) => typeof seg === "string" && isForbiddenKey(seg));
+    if (bad !== undefined) throw new YamlEditError(`YAML path segment "${String(bad)}" is not allowed`);
     const doc = ed.doc();
     if (doc.contents !== null && !isMap(doc.contents) && !(isScalar(doc.contents) && doc.contents.value === null)) {
       throw new YamlEditError("top-level YAML node is not a mapping");
