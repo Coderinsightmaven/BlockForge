@@ -1,0 +1,39 @@
+{
+  "t": "result",
+  "id": "00000000-0000-4000-8000-000000000012",
+  "ts": 1760000000000,
+  "ok": true,
+  "data": {
+    "jars": [
+      {
+        "ok": true,
+        "path": "plugins/LuckPerms-Bukkit-5.5.17.jar",
+        "sizeBytes": 1503210,
+        "mtime": 1759913600000,
+        "sha512": "e262a4f6bcecec3d33d40f4353f154e01c22572c8c673409a26db573bc89aa55f6af9fa1fee77e3d8e229c350f5c5baed70b4056b8f835d45845cb2acae768b1",
+        "entries": [
+          {
+            "name": "plugin.yml",
+            "content": "name: LuckPerms\nversion: 5.5.17\ndescription: A permissions plugin <b>bold?</b>\nauthor: Luck\nmain: me.lucko.luckperms.bukkit.loader.BukkitLoaderPlugin\napi-version: '1.13'\nfolia-supported: true\n",
+            "size": 214,
+            "truncated": false
+          },
+          {
+            "name": "META-INF/MANIFEST.MF",
+            "content": "Manifest-Version: 1.0\r\nImplementation-Version: 5.5.17\r\n�\r\n",
+            "size": 58,
+            "truncated": false
+          }
+        ],
+        "missing": [
+          "paper-plugin.yml"
+        ]
+      },
+      {
+        "ok": false,
+        "path": "plugins/notes.jar",
+        "error": "NOT_A_ZIP"
+      }
+    ]
+  }
+}

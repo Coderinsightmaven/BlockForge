@@ -1,0 +1,5 @@
+{
+  "t": "cmd",
+  "body": "{\"id\":\"00000000-0000-4000-8000-000000000013\",\"nodeId\":\"6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c\",\"type\":\"jar.readEntries\",\"issuedAt\":1760000000000,\"expiresAt\":1760000300000,\"payload\":{\"workloadId\":\"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\",\"paths\":[\"plugins/LuckPerms-Bukkit-5.5.17.jar\"],\"entries\":[\"../../plugin.yml\"],\"maxEntryBytes\":262144,\"maxJarBytes\":268435456}}",
+  "sig": "_3qHo4gKrJR7iheZv3Nd-qVK3ArWjPdYMmYJDCDRsVSJF1XH5it9lrHbcl9MoXjextkqyatSXQcm_xke_0A0BA"
+}

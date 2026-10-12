@@ -197,6 +197,39 @@ paths, NUL bytes, Windows drive letters and device names) and refuses anything o
 | `workload.install` | install container, see above | `{exitCode, durationMs, timedOut, logTail}` |
 | `node.ports` | `{}` | `{tcp: number[], udp: number[]}` listening on the host |
 | `fs.copy` · `fs.compress` · `fs.chmod` · `fs.find` | see `commands.ts` | |
+| `fs.hash` | `{workloadId, denylist?, paths (1–512 RelativePath), algorithms (1–3 unique of sha1/sha256/sha512), maxBytesPerFile (≤ 2 GiB), maxTotalBytes (≤ 64 GiB, default 16 GiB)}` | `{files: FsHashEntry[]}` — one per path, request order |
+| `jar.readEntries` | `{workloadId, denylist?, paths (1–256), entries (1–32 unique ZipEntryName), maxEntryBytes (≤ 256 KiB), maxJarBytes (≤ 2 GiB), maxTotalBytes (≤ 8 MiB, default 4 MiB), hash (≤ 2 unique of sha1/sha512, default [])}` | `{jars: JarReadResult[]}` — one per path, request order |
+
+**Extension scans (`fs.hash`, `jar.readEntries`, Phase 4b).** Both are read-only (not `Mutating`), carry no
+secrets (no `COMMAND_REDACTIONS` entry; results contain file text and are never persisted) and report
+**per-file** outcomes — one bad path never fails the command; whole-command errors are only payload
+`VALIDATION_FAILED`, `NOT_FOUND` (no data dir) and `INTERNAL`. `path` in each result echoes the requested string
+verbatim. Files are opened through the `os.Root` sandbox **without following symlinks** (a symlink, directory,
+FIFO, socket or device is `NOT_REGULAR`); the denylist applies as for other fs commands (`PATH_FORBIDDEN`).
+`sizeBytes`/`mtime` (epoch ms, as `FileEntry.modifiedAt`) come from fstat of the opened file; a file whose size
+changes while it is read is `IO_ERROR`. Digests are lowercase hex, present exactly for the requested algorithms.
+* `fs.hash`: files larger than `maxBytesPerFile` → `TOO_LARGE` (not read). Files are hashed in request order;
+  once the bytes hashed by the command would exceed `maxTotalBytes`, the rest are `BUDGET_EXCEEDED` (the first
+  file is always attempted, so retrying the remainder always makes progress).
+* `jar.readEntries`: reads selected zip/jar entries without extracting. The **central directory is
+  authoritative** (as `java.util.zip.ZipFile`/`JarFile`, which the loaders use); Zip64 is accepted; more than
+  65 536 records or a central directory over 16 MiB → `TOO_LARGE` (`JAR_READ_LIMITS`); a file over
+  `maxJarBytes` → `TOO_LARGE`; no valid central directory, encrypted or malformed data, a compression method
+  other than stored/deflate in a requested entry, or a CRC mismatch on a fully read entry → `NOT_A_ZIP`; a
+  requested name present more than once → `AMBIGUOUS_ENTRY` (a loader and BlockForge could read different
+  copies). Names match case-sensitively and exactly; absent names are listed in `missing`. Decompression stops
+  after `maxEntryBytes` bytes per entry (zip bombs cost at most that). `content` is untrusted text: UTF-8 with
+  invalid sequences and control characters other than TAB/LF/CR replaced by U+FFFD, cut at a code point so its
+  **JSON-encoded** length is ≤ `maxEntryBytes` (`truncated: true` when anything was cut; the agent must not
+  HTML-escape, i.e. Go `Encoder.SetEscapeHTML(false)`). `size` is the central directory's declared uncompressed
+  size (informational, never used for allocation). Budget: jars are processed in request order and the running
+  total of JSON-encoded `content` lengths must stay ≤ `maxTotalBytes`; the first jar that would cross it and
+  every later jar are `BUDGET_EXCEEDED` — except the first jar of a command, which is always returned
+  (≤ 32 × 256 KiB = 8 MiB of content, well below the 16 MiB frame). Optional `hash` digests the whole file in the
+  same command (whole-file read in addition to the entry reads).
+* Go parity work: array uniqueness (`algorithms`, `entries`, `hash`) and the `ZipEntryName` refinements need
+  validator support; fixtures `cmd-fs-hash.json`, `cmd-jar-read-entries.json`,
+  `cmd-reject-jar-entry-traversal.json` (→ invalid payload), `result-fs-hash.json`, `result-jar-read-entries.json`.
 
 `WorkloadSpec` (see `packages/contracts/src/agent/workload.ts`):
 

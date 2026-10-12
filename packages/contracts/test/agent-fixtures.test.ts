@@ -72,6 +72,9 @@ describe("agent protocol fixtures", () => {
     ["cmd-backup-create.json", "ok"],
     ["cmd-backup-restore-url.json", "ok"],
     ["cmd-backup-upload.json", "ok"],
+    ["cmd-fs-hash.json", "ok"],
+    ["cmd-jar-read-entries.json", "ok"],
+    ["cmd-reject-jar-entry-traversal.json", "invalid-payload"],
   ])("%s → %s", (file, expected) => {
     expect(verifyCommand(load(file), keys.now)).toBe(expected);
   });
@@ -89,6 +92,8 @@ describe("agent protocol fixtures", () => {
     "event-workload-state.json",
     "logs.json",
     "metrics.json",
+    "result-fs-hash.json",
+    "result-jar-read-entries.json",
   ])("agent frame %s parses", (file) => {
     const result = AgentFrame.safeParse(load(file));
     expect(result.success, JSON.stringify(result.error?.issues)).toBe(true);
@@ -101,6 +106,30 @@ describe("agent protocol fixtures", () => {
     const message = Buffer.from(`${ROTATION_PROOF_PREFIX}${keys.nodeId}:${frame.id}`, "utf8");
     expect(verify(null, message, rawEd25519(data.publicKey), Buffer.from(data.proof, "base64url"))).toBe(true);
     expect(verify(null, message, rawEd25519(keys.agent.publicKey), Buffer.from(data.proof, "base64url"))).toBe(false);
+  });
+
+  it.each([
+    ["result-fs-hash.json", "fs.hash"],
+    ["result-jar-read-entries.json", "jar.readEntries"],
+  ] as const)("%s data matches the %s result schema", (file, type) => {
+    const frame = AgentFrame.parse(load(file));
+    if (frame.t !== "result" || !frame.ok) throw new Error("expected ok result");
+    const result = AGENT_COMMANDS[type].result.safeParse(frame.data);
+    expect(result.success, JSON.stringify(result.error?.issues)).toBe(true);
+  });
+
+  it("fs.hash / jar.readEntries results carry one entry per requested path, in order", () => {
+    const body = (file: string) => {
+      const frame = ControlPlaneFrame.parse(load(file));
+      if (frame.t !== "cmd") throw new Error("expected a command frame");
+      return CommandBody.parse(JSON.parse(frame.body));
+    };
+    const hashReq = AGENT_COMMANDS["fs.hash"].payload.parse(body("cmd-fs-hash.json").payload);
+    const hashRes = AGENT_COMMANDS["fs.hash"].result.parse((AgentFrame.parse(load("result-fs-hash.json")) as { data: unknown }).data);
+    expect(hashRes.files.map((f) => f.path)).toEqual(hashReq.paths);
+    const jarReq = AGENT_COMMANDS["jar.readEntries"].payload.parse(body("cmd-jar-read-entries.json").payload);
+    const jarRes = AGENT_COMMANDS["jar.readEntries"].result.parse((AgentFrame.parse(load("result-jar-read-entries.json")) as { data: unknown }).data);
+    expect(jarRes.jars.map((j) => j.path)).toEqual(jarReq.paths);
   });
 
   it("welcome frame parses", () => {

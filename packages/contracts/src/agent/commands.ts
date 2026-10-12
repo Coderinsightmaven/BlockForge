@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { Bytes, Port } from "../common.js";
+import { Bytes, EpochMs, Port, Sha1Hex, Sha256Hex, Sha512Hex, isUniqueArray } from "../common.js";
 import { NodeFacts } from "./facts.js";
 import { SlpStatus } from "./metrics.js";
 import { FileEntry, LogLine, WorkloadSpec, WorkloadStatus } from "./workload.js";
@@ -36,6 +36,110 @@ export const Checksum = z.object({
   value: z.string().regex(/^[a-f0-9]{40,128}$/),
 });
 export type Checksum = z.infer<typeof Checksum>;
+
+/**
+ * Name of an entry inside a zip/jar, as stored in the central directory: forward slashes, ≤ 255 UTF-16
+ * code units, no leading `/`, no empty / `.` / `..` segments (so no trailing slash: directories are never
+ * read), no NUL, backslash or other control characters. Matched case-sensitively and exactly.
+ */
+export const ZipEntryName = z
+  .string()
+  .min(1)
+  .max(255)
+  // eslint-disable-next-line no-control-regex
+  .refine((n) => !/[\u0000-\u001f\u007f-\u009f\\]/.test(n), "no control characters or backslashes")
+  .refine((n) => !n.startsWith("/"), "must be relative")
+  .refine((n) => n.split("/").every((seg) => seg !== "" && seg !== "." && seg !== ".."), "no empty, '.' or '..' segments");
+export type ZipEntryName = z.infer<typeof ZipEntryName>;
+
+/**
+ * Per-file outcome of `fs.hash`. `path` echoes the requested string verbatim; results are in request order
+ * (one per requested path). Digests are present exactly for the requested algorithms. `mtime` is epoch ms
+ * like `FileEntry.modifiedAt`; `sizeBytes`/`mtime` come from the opened file (fstat), and a file that
+ * changes size while it is read is reported as `IO_ERROR`.
+ */
+export const FsHashEntry = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    path: z.string().max(1024),
+    sizeBytes: Bytes,
+    mtime: EpochMs,
+    sha1: Sha1Hex.optional(),
+    sha256: Sha256Hex.optional(),
+    sha512: Sha512Hex.optional(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    path: z.string().max(1024),
+    /**
+     * `NOT_REGULAR`: directory, symlink (never followed), FIFO, socket or device. `TOO_LARGE`: larger than
+     * `maxBytesPerFile`. `PATH_FORBIDDEN`: denylist or sandbox violation. `BUDGET_EXCEEDED`: not hashed
+     * because `maxTotalBytes` was reached — retry it in another command.
+     */
+    error: z.enum(["NOT_FOUND", "NOT_REGULAR", "TOO_LARGE", "PATH_FORBIDDEN", "IO_ERROR", "BUDGET_EXCEEDED"]),
+  }),
+]);
+export type FsHashEntry = z.infer<typeof FsHashEntry>;
+
+/**
+ * One entry read by `jar.readEntries`. `content` is untrusted text: the first decompressed bytes decoded
+ * as UTF-8, with invalid sequences and control characters other than TAB/LF/CR replaced by U+FFFD, cut at a
+ * code point boundary so that its JSON-encoded length stays ≤ `maxEntryBytes` (`truncated` when anything
+ * was cut). `size` is the uncompressed size declared by the central directory (untrusted, informational).
+ */
+export const JarEntryContent = z.object({
+  name: z.string().max(255),
+  content: z.string().max(256 * 1024),
+  size: Bytes,
+  truncated: z.boolean(),
+});
+export type JarEntryContent = z.infer<typeof JarEntryContent>;
+
+/** Per-jar outcome of `jar.readEntries`; `path` echoes the request verbatim, results in request order. */
+export const JarReadResult = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    path: z.string().max(1024),
+    sizeBytes: Bytes,
+    mtime: EpochMs,
+    sha1: Sha1Hex.optional(),
+    sha512: Sha512Hex.optional(),
+    /** Requested entries that exist, in request order. */
+    entries: z.array(JarEntryContent).max(32),
+    /** Requested entry names that are not in the central directory. */
+    missing: z.array(z.string().max(255)).max(32),
+  }),
+  z.object({
+    ok: z.literal(false),
+    path: z.string().max(1024),
+    /**
+     * `NOT_A_ZIP`: no valid central directory, malformed/encrypted data or an unsupported compression method
+     * (only stored and deflate) in a requested entry, or a CRC mismatch. `AMBIGUOUS_ENTRY`: a requested name
+     * occurs more than once in the central directory (a loader and BlockForge could read different copies).
+     * `TOO_LARGE`: file larger than `maxJarBytes`, or a central directory over 65 536 records / 16 MiB.
+     * `BUDGET_EXCEEDED`: skipped because `maxTotalBytes` was reached — retry it in another command.
+     */
+    error: z.enum([
+      "NOT_FOUND",
+      "NOT_REGULAR",
+      "TOO_LARGE",
+      "NOT_A_ZIP",
+      "AMBIGUOUS_ENTRY",
+      "PATH_FORBIDDEN",
+      "IO_ERROR",
+      "BUDGET_EXCEEDED",
+    ]),
+  }),
+]);
+export type JarReadResult = z.infer<typeof JarReadResult>;
+
+/** Bounds of the jar reader (agent side; documented here so both sides agree). */
+export const JAR_READ_LIMITS = {
+  maxCentralDirectoryRecords: 65_536,
+  maxCentralDirectoryBytes: 16 * 1024 * 1024,
+  maxEntryBytes: 256 * 1024,
+  maxTotalBytes: 8 * 1024 * 1024,
+} as const;
 
 /** The complete command catalogue: payload and result schema per command type. */
 export const AGENT_COMMANDS = {
@@ -251,6 +355,52 @@ export const AGENT_COMMANDS = {
       maxEntries: z.number().int().min(1).max(1_000_000),
     }),
     result: z.object({ entries: z.number().int(), bytes: Bytes }),
+  },
+  /**
+   * Hashes regular files without following symlinks (a symlink is `NOT_REGULAR`; the open is no-follow and
+   * the walk uses the same `os.Root` sandbox and denylist semantics as the other fs commands). Per-file
+   * failures are reported per entry and never fail the command. Files are hashed in request order; once
+   * the bytes hashed by this command would exceed `maxTotalBytes`, the remaining files are answered with
+   * `BUDGET_EXCEEDED` (the first file is always attempted, so a retry always makes progress).
+   * Not mutating, not sensitive (paths only).
+   */
+  "fs.hash": {
+    payload: DenyRef.extend({
+      paths: z.array(RelativePath).min(1).max(512),
+      algorithms: z.array(z.enum(["sha1", "sha256", "sha512"])).min(1).max(3).refine(isUniqueArray, "duplicate algorithm"),
+      maxBytesPerFile: Bytes.min(1).max(2 * 1024 ** 3),
+      maxTotalBytes: Bytes.min(1)
+        .max(64 * 1024 ** 3)
+        .default(16 * 1024 ** 3),
+    }),
+    result: z.object({ files: z.array(FsHashEntry).max(512) }),
+  },
+  /**
+   * Reads selected entries of zip/jar files without extracting anything (plugin/mod metadata such as
+   * `plugin.yml`, `fabric.mod.json`, `META-INF/mods.toml`). The central directory is authoritative (as for
+   * `java.util.zip.ZipFile`); it is bounded by `JAR_READ_LIMITS`. Decompression of an entry stops after
+   * `maxEntryBytes` (zip bombs cost at most that much per entry). Jars are processed in request order; the
+   * running total of JSON-encoded `content` lengths must stay ≤ `maxTotalBytes`: the first jar whose entries
+   * would cross it — and every jar after it — is answered with `BUDGET_EXCEEDED` (the first jar of a command
+   * is always returned, so a retry always makes progress; with ≤ 32 × 256 KiB of content the frame stays far
+   * below 16 MiB). Optional `hash` digests the whole file in the same command. Symlinks are not followed.
+   * Not mutating, not sensitive (paths and entry names only; results contain file text and are not persisted).
+   */
+  "jar.readEntries": {
+    payload: DenyRef.extend({
+      paths: z.array(RelativePath).min(1).max(256),
+      entries: z.array(ZipEntryName).min(1).max(32).refine(isUniqueArray, "duplicate entry name"),
+      maxEntryBytes: z.number().int().min(1).max(JAR_READ_LIMITS.maxEntryBytes),
+      maxJarBytes: Bytes.min(1).max(2 * 1024 ** 3),
+      maxTotalBytes: z
+        .number()
+        .int()
+        .min(1)
+        .max(JAR_READ_LIMITS.maxTotalBytes)
+        .default(4 * 1024 * 1024),
+      hash: z.array(z.enum(["sha1", "sha512"])).max(2).refine(isUniqueArray, "duplicate algorithm").default([]),
+    }),
+    result: z.object({ jars: z.array(JarReadResult).max(256) }),
   },
   "fs.transfer.push": {
     payload: DenyRef.extend({ path: MutableRelativePath, transferId: z.uuid() }),

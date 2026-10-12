@@ -2,7 +2,9 @@
 
 Base path `/api/v1`. JSON bodies validated with the zod schemas named below (from
 `@blockforge/contracts`). Errors always use `ApiError` with an `x-request-id` header;
-`VALIDATION_FAILED` errors carry `details: ValidationErrorDetails` (`{issues:[{path, message}]}`).
+`VALIDATION_FAILED` errors carry `details: ValidationErrorDetails` (`{issues:[{path, message}]}`);
+`RATE_LIMITED` (429) errors carry `RateLimitedErrorDetails` (`{retryAfterMs, retryAfterSeconds?, upstream?}`) plus a
+`Retry-After` header.
 Alert rule thresholds are interpreted per `ALERT_RULE_KINDS`. Realtime payloads follow
 `REALTIME_EVENT_PAYLOADS`.
 State-changing requests (POST/PUT/PATCH/DELETE) require the `x-blockforge-csrf` header
@@ -12,7 +14,7 @@ pagination (`?limit=&cursor=` → `{items, nextCursor}`) unless noted. Timestamp
 Permission column = what the route checks (scope resolved from the target resource).
 
 **Idempotency.** Job-creating routes (`POST /servers`, `POST /servers/:id/actions`,
-`DELETE /servers/:id`, backup/restore/network-apply routes) accept an optional
+`DELETE /servers/:id`, backup/restore/network-apply routes, extension install/apply-updates/scan/rollback) accept an optional
 `Idempotency-Key` header (1–128 printable chars). The key is scoped to the user and route;
 a repeat within 24 h with the same body returns the original status + body (and the same
 `jobId`); the same key with a different body returns `409 CONFLICT`. The web client sends a
@@ -228,6 +230,106 @@ Every other route accepts `Authorization: Bearer bfk_…` (no CSRF). Key request
 (password, MFA, SSH keys, API keys) and `/auth/*` refuse API keys. `allowedIps` is matched against the
 client IP as seen through `TRUST_PROXY`. Rate limit: 120 requests/min per key (configurable).
 
+## Plugins & mods (Phase 4b) — see `api/extensions.ts`
+Reads use `EXTENSIONS_READ_PERMISSION` (today `servers.extensions.manage`; a separate `servers.extensions.view`
+is proposed — the constant is the single switch). Mutations need `servers.extensions.manage`. Vanilla and
+non-Minecraft servers have no install dir: the list answers `installDir: null`, every other route 422
+`PRECONDITION_FAILED` (`details.reason: "unsupported_software"`).
+
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/servers/:id/extensions` | → `ExtensionList` (not paginated, ≤ 4096 items) | read |
+| GET | `/servers/:id/extensions/:extensionId` | → `InstalledExtension` | read |
+| POST | `/servers/:id/extensions/scan` | `ScanExtensionsRequest` → `ExtensionJobResponse` (202, idempotent) | servers.extensions.manage |
+| PATCH | `/servers/:id/extensions/:extensionId` | `UpdateExtensionRequest` `{enabled}` → `UpdateExtensionResponse` (renames `x.jar` ⇄ `x.jar.disabled`) | servers.extensions.manage |
+| DELETE | `/servers/:id/extensions/:extensionId` | → `RemoveExtensionResponse` (synchronous) | servers.extensions.manage |
+| GET | `/servers/:id/extensions/modrinth/search` | `ModrinthSearchQuery` → `ModrinthSearchResult` | read |
+| GET | `/servers/:id/extensions/modrinth/projects/:project` | `:project` = id or slug → `ModrinthProjectResponse` | read |
+| POST | `/servers/:id/extensions/modrinth/plan` | `ModrinthPlanRequest` → `ModrinthInstallPlan` (read-only) | read |
+| POST | `/servers/:id/extensions/modrinth/install` | `ModrinthInstallRequest` → `ExtensionJobResponse` (202, idempotent); plan drift → 409 | servers.extensions.manage |
+| GET | `/servers/:id/extensions/updates` | `ExtensionUpdatesQuery` → `ExtensionUpdatesResponse` | read |
+| POST | `/servers/:id/extensions/updates/apply` | `ApplyExtensionUpdatesRequest` → `ExtensionJobResponse` (202, idempotent) | servers.extensions.manage |
+| POST | `/servers/:id/extensions/uploads` | `ExtensionUploadRequest` → `ExtensionUploadResponse` (`TransferUrlResponse` + `uploadId`) | servers.extensions.manage |
+| POST | `/servers/:id/extensions/uploads/:uploadId/complete` | `CompleteExtensionUploadRequest` → `CompleteExtensionUploadResponse` | servers.extensions.manage |
+| GET | `/servers/:id/extensions/history` | `ExtensionHistoryQuery` → `Page<ExtensionHistoryEntry>` (newest first) | read |
+| POST | `/servers/:id/extensions/history/:entryId/rollback` | → `ExtensionJobResponse` (202, idempotent) | servers.extensions.manage |
+| GET · PUT | `/settings/extensions.uploads` | generic settings wrapper, value `ExtensionUploadSettings` | settings.manage |
+
+* **Scans.** `fs.list` of the install dir → `selectExtensionFiles` → `fs.hash` (sha1 + sha512) and
+  `jar.readEntries` (`EXTENSION_METADATA_ENTRIES`, 256 KiB each) only for files whose size or mtime changed
+  (`full: true` re-reads everything) → Modrinth identification by SHA-512. A file renamed outside BlockForge
+  keeps its row when its SHA-512 matches a vanished row of the same scan. Scans run automatically after every
+  extension job and when the list is first opened (`scan.status: "never"`).
+* **Install with re-plan.** The UI shows `POST …/plan` and sends the plan's files as `expect`. At install time
+  the control plane plans again; if the fresh plan is not installable or its (projectId, versionId, action) set
+  differs from `expect` → 409 `CONFLICT` with `ModrinthPlanChangedDetails` `{reason: "plan_changed", plan}` and
+  nothing is touched. The job fetches every file with `artifact.fetch` (SHA-512 checksum, Modrinth CDN, artifact
+  cache), then deletes/keeps the `replaces` files, then rescans. Failure after some files: already fetched new
+  files are removed again and replaced files restored (history entries `status: "failed"`).
+* **Idempotency.** Install, apply updates, scan and rollback accept `Idempotency-Key` exactly like the backup
+  routes (same 24 h replay, 409 `CONFLICT` with `details.reason` `in_progress` / `key_reused`). Upload
+  completion is idempotent per `uploadId`. One extension job per server at a time (409 `CONFLICT`,
+  `details.reason: "extension_job_running"`); none while the server is provisioning, reinstalling, restoring,
+  migrating or deleting (409 `INVALID_STATE`).
+* **`restartRequired`** is true whenever the server is not `stopped`/`crashed`: plugins and mods load only at
+  start; BlockForge never hot-reloads (`/reload`) and never restarts the server on its own.
+* **Uploads.** `POST …/uploads` (refused with 422 `uploads_disabled` when `extensions.uploads.allowed` is false)
+  returns a single-use transfer URL; the bytes land in `.blockforge/extensions/uploads/<uploadId>.jar.part` in the
+  data root (outside `plugins/`/`mods/`, so no loader reads it; excluded from backups). `…/complete` checks the
+  size, hashes and reads the staged jar (`fs.hash`, `jar.readEntries`), evaluates compatibility, then renames it to
+  `<installDir>/<filename>`. Refusals carry `ExtensionUploadRejectedDetails`: 422 `PRECONDITION_FAILED` for
+  `not_a_jar` / `no_metadata` (policy `requireMetadata`) / `incompatible` (without `allowIncompatible`) /
+  `size_mismatch` / `uploads_disabled`, 409 `CONFLICT` for `exists`. Unfinished uploads are deleted after 1 h. The
+  policy is not a security boundary against holders of `servers.files.write`/SFTP (their jars show up as
+  `source: "unknown"`).
+* **History & rollback.** Every mutation writes an `ExtensionHistoryEntry` (also failed ones). Rollback restores
+  the entry's `from` (or removes `to` when `from` is null): Modrinth versions are re-fetched by version id with
+  their SHA-512 (artifact cache first); upload/unknown files come from the keep area
+  `.blockforge/extensions/kept/<historyEntryId>.jar` in the data root — removals and replacements move the old
+  jar there instead of deleting it; its SHA-512 is re-checked with `fs.hash` before it is moved back
+  (mismatch/missing → `rollback.reason: "file_unavailable"`). Kept files are pruned after 30 days / beyond 20
+  per server. Only the newest succeeded entry of a path can be rolled back (`superseded`); enable/disable are
+  undone with PATCH. Unavailable → 409 `CONFLICT` with `ExtensionRollbackUnavailableDetails`.
+* **Modrinth limits.** All Modrinth calls go through one shared client + `ModrinthRateLimiter` (per control-plane
+  process, honouring `X-Ratelimit-*`, ≤ 2 s internal wait). Exhausted → 429 `RATE_LIMITED` with
+  `RateLimitedErrorDetails` `{retryAfterMs, upstream: "modrinth"}` and `Retry-After`; other upstream failures →
+  502 `UPSTREAM_ERROR`; unknown project/version → 404 `NOT_FOUND`. Responses are cached (10 min TTL).
+* Realtime: `extensions.updated` on `server:<id>` (`ExtensionsUpdatedEvent`: scan status + changed ids or
+  `null` = refetch the list); job progress on `job:<id>`.
+
+## Players (Phase 4b) — see `api/players.ts`
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/servers/:id/players` | → `PlayersOverview` | servers.players.view |
+| POST | `/servers/:id/players/actions` | `PlayerActionRequest` → `PlayerActionResult` | servers.players.manage (+ servers.console.send for `op`/`deop`) |
+| GET | `/servers/:id/players/lookup` | `PlayerLookupQuery` `?name=` → `PlayerLookupResponse` | servers.players.view |
+| GET | `/servers/:id/players/sessions` | `PlayerSessionQuery` → `Page<PlayerSession>` (newest first) | servers.players.view |
+
+* **Overview.** Online players from the console `list uuids` (running server, `source: "list"`) or the latest
+  SLP sample (`"slp"`, may be partial); lists from `whitelist.json`, `ops.json`, `banned-players.json`,
+  `banned-ips.json`, flags from `server.properties`. Invalid entries/unreadable files are reported in
+  `listErrors` (never a 500); lists over 10 000 entries are cut (`truncated`). `availableActions` lists what the
+  UI may offer for the current software and state (empty for Velocity).
+* **Actions.** Running server → library console command (validated name/IPv4, sanitised single-line reason
+  ≤ 200), sent with `workload.console`, then the server's own feedback line is awaited (≤ 5 s) →
+  `applied: "console"` with `feedback`. Stopped server → atomic JSON/properties edit with `ifMatchSha256`
+  (UUID from Mojang in online mode, offline UUID otherwise) → `applied: "file"` with a fresh `overview`.
+  Errors: `kick`/`whitelist-reload` on a stopped server, or `expiresAt`/`op.level`/`op.bypassesPlayerLimit`
+  on a running one (vanilla commands cannot express them) → 409 `INVALID_STATE` (`details.reason`
+  `not_running` / `requires_stopped`); no recognised feedback → 504 `UPSTREAM_ERROR`
+  `{reason: "no_feedback", sent: true}` (outcome unknown); unknown premium name → 404; Mojang throttling → 429
+  `RATE_LIMITED` (`upstream: "mojang"`); Velocity/non-Minecraft → 422 `PRECONDITION_FAILED`
+  (`unsupported_software`). Bodies are strict (unknown keys → 400). IP bans are IPv4 only (the server never
+  matches IPv6 bans).
+* **Operator escalation.** `op`/`deop` hand out arbitrary in-game command rights, so they also require
+  `servers.console.send` (already operator-equivalent); the built-in moderator role cannot op.
+* **Sessions** come from the server's join/leave console events (only lines from the server's own logger).
+  Sessions left open when the server stops/crashes, or when the player is missing from the next `list`, are
+  closed then with `leaveReason: null`. Retention 90 days. Player counts over time are the existing metric series
+  `server.players` / `global.players` (`GET /metrics/range`); no extra route.
+* Realtime: `player.joined` / `player.left` on `server:<id>`, delivered only to subscribers holding
+  `servers.players.view` on that server (per-event filter on top of the topic's `servers.view`).
+
 ## Agent endpoints (agent auth, not cookie auth)
 `POST /agent/v1/enroll`, `GET /agent/v1/connect` (WS), `POST|GET /agent/v1/transfers/:id`,
 `POST /agent/v1/sftp/auth` (`SftpAuthRequest` → `SftpAuthResponse` | 401) — see `agent-protocol.md`.
@@ -237,6 +339,7 @@ client IP as seen through `TRUST_PROXY`. Rate limit: 120 requests/min per key (c
 public URL. Frames per `packages/contracts/src/realtime.ts`. Authorisation per topic:
 `overview`/`nodes`/`servers` → monitoring.view (events filtered by scope); `alerts` →
 alerts.view (each incident filtered against the user's scope for its subject);
-`node:<id>` → nodes.view; `server:<id>` → servers.view; `console:<id>` →
+`node:<id>` → nodes.view; `server:<id>` → servers.view (`player.*` events additionally
+servers.players.view, filtered per subscriber); `console:<id>` →
 servers.console.view; `job:<id>` → jobs.view on the job target. Server buffers at most
 1 MiB per client; slow clients are disconnected with close code 4008 and must reconnect.

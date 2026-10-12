@@ -20,6 +20,14 @@ export type EpochMs = z.infer<typeof EpochMs>;
 export const Bytes = z.number().int().nonnegative();
 export const Port = z.number().int().min(1).max(65535);
 
+/** Lowercase hex digests. */
+export const Sha1Hex = z.string().regex(/^[a-f0-9]{40}$/, "lowercase hex SHA-1");
+export const Sha256Hex = z.string().regex(/^[a-f0-9]{64}$/, "lowercase hex SHA-256");
+export const Sha512Hex = z.string().regex(/^[a-f0-9]{128}$/, "lowercase hex SHA-512");
+
+/** True when an array has no duplicate (primitive) values. */
+export const isUniqueArray = (values: readonly unknown[]): boolean => new Set(values).size === values.length;
+
 /** Consistent error body for every non-2xx REST response. */
 export const ApiErrorCode = z.enum([
   "VALIDATION_FAILED",
@@ -55,6 +63,19 @@ export const ApiError = z.object({
   }),
 });
 export type ApiError = z.infer<typeof ApiError>;
+
+/**
+ * `details` of a `RATE_LIMITED` (HTTP 429) error; the response also carries a `Retry-After` header (whole
+ * seconds, rounded up). `upstream` is set when an external service (Modrinth, Mojang) is rate-limiting the
+ * control plane, rather than the control plane limiting the caller. `retryAfterSeconds` is the older field
+ * of the per-key/login limiter, kept for compatibility (= ceil(retryAfterMs / 1000)).
+ */
+export const RateLimitedErrorDetails = z.object({
+  retryAfterMs: z.number().int().positive(),
+  retryAfterSeconds: z.number().int().positive().optional(),
+  upstream: z.enum(["modrinth", "mojang"]).optional(),
+});
+export type RateLimitedErrorDetails = z.infer<typeof RateLimitedErrorDetails>;
 
 /** `details` of a `VALIDATION_FAILED` error. `path` is dot-joined (e.g. "gameplay.maxPlayers"); "" = whole body. */
 export const ValidationErrorDetails = z.object({

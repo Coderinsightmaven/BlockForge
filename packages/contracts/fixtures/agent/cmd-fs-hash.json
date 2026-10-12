@@ -1,0 +1,5 @@
+{
+  "t": "cmd",
+  "body": "{\"id\":\"00000000-0000-4000-8000-000000000011\",\"nodeId\":\"6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c\",\"type\":\"fs.hash\",\"issuedAt\":1760000000000,\"expiresAt\":1760000300000,\"payload\":{\"workloadId\":\"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\",\"paths\":[\"plugins/LuckPerms-Bukkit-5.5.17.jar\",\"plugins/Vault.jar.disabled\",\"plugins/missing.jar\",\"plugins/link.jar\"],\"algorithms\":[\"sha1\",\"sha512\"],\"maxBytesPerFile\":268435456,\"maxTotalBytes\":17179869184}}",
+  "sig": "b5xHy8Dac7YHsDLKjJPFNyKQjIbadWji3zbWNyf_J3qOmELP93q2h7ZS9bcD6nQSbfiDZUwUWbTV74vu8LqzAA"
+}

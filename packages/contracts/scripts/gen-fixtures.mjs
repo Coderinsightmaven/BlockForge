@@ -1,6 +1,6 @@
 // Regenerates the golden agent-protocol fixtures shared by the TS and Go test suites.
 // Deterministic: fixed test-only keys, fixed timestamps and IDs. Run: node scripts/gen-fixtures.mjs
-import { createPrivateKey, createPublicKey, sign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -279,6 +279,87 @@ write(
       { partNumber: 2, url: "https://s3.example.com/bucket/k?partNumber=2&uploadId=u&X-Amz-Signature=2" },
     ],
     deleteLocal: true,
+  }),
+);
+
+// Phase 4b: extension scans (hash files, read jar metadata entries without extracting).
+const digest = (alg, text) => createHash(alg).update(text).digest("hex");
+const LP_JAR = "plugins/LuckPerms-Bukkit-5.5.17.jar";
+const VAULT_JAR = "plugins/Vault.jar.disabled";
+write(
+  "cmd-fs-hash.json",
+  cmd("00000000-0000-4000-8000-000000000011", "fs.hash", {
+    workloadId: WORKLOAD_ID,
+    paths: [LP_JAR, VAULT_JAR, "plugins/missing.jar", "plugins/link.jar"],
+    algorithms: ["sha1", "sha512"],
+    maxBytesPerFile: 268435456,
+    maxTotalBytes: 17179869184,
+  }),
+);
+write("result-fs-hash.json", {
+  t: "result",
+  id: "00000000-0000-4000-8000-000000000011",
+  ts: T0,
+  ok: true,
+  data: {
+    files: [
+      { ok: true, path: LP_JAR, sizeBytes: 1503210, mtime: T0 - 86400000, sha1: digest("sha1", "luckperms"), sha512: digest("sha512", "luckperms") },
+      { ok: true, path: VAULT_JAR, sizeBytes: 47923, mtime: T0 - 172800000, sha1: digest("sha1", "vault"), sha512: digest("sha512", "vault") },
+      { ok: false, path: "plugins/missing.jar", error: "NOT_FOUND" },
+      { ok: false, path: "plugins/link.jar", error: "NOT_REGULAR" },
+    ],
+  },
+});
+write(
+  "cmd-jar-read-entries.json",
+  cmd("00000000-0000-4000-8000-000000000012", "jar.readEntries", {
+    workloadId: WORKLOAD_ID,
+    paths: [LP_JAR, "plugins/notes.jar"],
+    entries: ["paper-plugin.yml", "plugin.yml", "META-INF/MANIFEST.MF"],
+    maxEntryBytes: 262144,
+    maxJarBytes: 268435456,
+    maxTotalBytes: 4194304,
+    hash: ["sha512"],
+  }),
+);
+write("result-jar-read-entries.json", {
+  t: "result",
+  id: "00000000-0000-4000-8000-000000000012",
+  ts: T0,
+  ok: true,
+  data: {
+    jars: [
+      {
+        ok: true,
+        path: LP_JAR,
+        sizeBytes: 1503210,
+        mtime: T0 - 86400000,
+        sha512: digest("sha512", "luckperms"),
+        entries: [
+          {
+            name: "plugin.yml",
+            content:
+              "name: LuckPerms\nversion: 5.5.17\ndescription: A permissions plugin <b>bold?</b>\nauthor: Luck\nmain: me.lucko.luckperms.bukkit.loader.BukkitLoaderPlugin\napi-version: '1.13'\nfolia-supported: true\n",
+            size: 214,
+            truncated: false,
+          },
+          { name: "META-INF/MANIFEST.MF", content: "Manifest-Version: 1.0\r\nImplementation-Version: 5.5.17\r\n�\r\n", size: 58, truncated: false },
+        ],
+        missing: ["paper-plugin.yml"],
+      },
+      { ok: false, path: "plugins/notes.jar", error: "NOT_A_ZIP" },
+    ],
+  },
+});
+// Signed and for this node, but an entry name escapes the archive root → payload validation must reject it.
+write(
+  "cmd-reject-jar-entry-traversal.json",
+  cmd("00000000-0000-4000-8000-000000000013", "jar.readEntries", {
+    workloadId: WORKLOAD_ID,
+    paths: [LP_JAR],
+    entries: ["../../plugin.yml"],
+    maxEntryBytes: 262144,
+    maxJarBytes: 268435456,
   }),
 );
 

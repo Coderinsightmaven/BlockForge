@@ -6,6 +6,8 @@ import { AlertIncident, Job, JobLogLine, OverviewSummary } from "./api/operation
 import { Server } from "./api/servers.js";
 import { Backup } from "./api/backups.js";
 import { Schedule } from "./api/schedules.js";
+import { ExtensionsUpdatedEvent } from "./api/extensions.js";
+import { PlayerJoinedEvent, PlayerLeftEvent } from "./api/players.js";
 
 /**
  * UI realtime channel: WSS /api/v1/realtime (session cookie auth; Origin checked).
@@ -51,6 +53,9 @@ export const RealtimeEventType = z.enum([
   "backup.deleted",
   "schedule.updated",
   "schedule.deleted",
+  "extensions.updated",
+  "player.joined",
+  "player.left",
 ]);
 export type RealtimeEventType = z.infer<typeof RealtimeEventType>;
 
@@ -96,4 +101,10 @@ export const REALTIME_EVENT_PAYLOADS = {
   "schedule.updated": Schedule,
   /** Published on `server:<id>`. */
   "schedule.deleted": z.object({ serverId: z.uuid(), scheduleId: z.uuid() }),
+  /** Published on `server:<id>`: invalidation of the extension list / scan status (ids, not DTOs). */
+  "extensions.updated": ExtensionsUpdatedEvent,
+  /** Published on `server:<id>`; delivered only to subscribers with `servers.players.view` on the server. */
+  "player.joined": PlayerJoinedEvent,
+  /** Published on `server:<id>`; delivered only to subscribers with `servers.players.view` on the server. */
+  "player.left": PlayerLeftEvent,
 } as const satisfies Record<RealtimeEventType, z.ZodType>;

@@ -1,0 +1,36 @@
+{
+  "t": "result",
+  "id": "00000000-0000-4000-8000-000000000011",
+  "ts": 1760000000000,
+  "ok": true,
+  "data": {
+    "files": [
+      {
+        "ok": true,
+        "path": "plugins/LuckPerms-Bukkit-5.5.17.jar",
+        "sizeBytes": 1503210,
+        "mtime": 1759913600000,
+        "sha1": "23729c5644f9ac15d11128ce7cf613622859c7e3",
+        "sha512": "e262a4f6bcecec3d33d40f4353f154e01c22572c8c673409a26db573bc89aa55f6af9fa1fee77e3d8e229c350f5c5baed70b4056b8f835d45845cb2acae768b1"
+      },
+      {
+        "ok": true,
+        "path": "plugins/Vault.jar.disabled",
+        "sizeBytes": 47923,
+        "mtime": 1759827200000,
+        "sha1": "a64c89f2592b4dcccad86640cb7e063cc91e171e",
+        "sha512": "c2a0da16a2faf9431fc362c100ca9abbff0c1002d3b3aece6702313f51b2c0cc47907c1932b5e4e3ed34e854e35a06b625778da80e56097f3238603f6b625e88"
+      },
+      {
+        "ok": false,
+        "path": "plugins/missing.jar",
+        "error": "NOT_FOUND"
+      },
+      {
+        "ok": false,
+        "path": "plugins/link.jar",
+        "error": "NOT_REGULAR"
+      }
+    ]
+  }
+}

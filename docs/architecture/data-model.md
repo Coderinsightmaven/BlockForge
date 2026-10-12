@@ -46,8 +46,8 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | `servers` | `id, name, slug unique, kind (game/proxy), node_id → nodes RESTRICT, software (vanilla/paper/purpur/fabric/forge/neoforge/folia/spigot/velocity), minecraft_version, build_id, java_major, state (lifecycle), desired_state (running/stopped), active_operation null, active_job_id null, memory_limit_bytes, heap_max_bytes, cpu_limit_millicores, storage_quota_bytes, port, host_ip, query_port null, rcon_enabled, jvm_args text[], startup (manual/auto), restart_policy jsonb, timezone, location, last_started_at, last_crash_at, last_exit_code, version` | `state` transitions are validated against the contracts state machine. |
 | `server_config_revisions` | `id, server_id CASCADE, file_path, content (text), sha256, source (generated/user/rollback/observed), created_by null, created_at, applied_at null, health (unknown/healthy/failed)` unique(server_id, file_path, sha256) | Revision history + last-known-good. |
 | `software_builds` | `id, software, minecraft_version, build, channel, download_url, checksum_algorithm, checksum, java_major, released_at, metadata jsonb, fetched_at` unique(software, minecraft_version, build) | Cache of authoritative catalogue data. |
-| `installed_extensions` | `id, server_id CASCADE, kind (plugin/mod/datapack), source (modrinth/upload/url), project_id, version_id, name, filename, sha256, enabled, installed_at, installed_by` | Phase 4. |
-| `extension_history` | `id, server_id CASCADE, action (install/update/remove/rollback/enable/disable), from_version, to_version, actor, at, job_id` | Phase 4. |
+| `installed_extensions` | Phase 0 placeholder, reshaped in Phase 4b (see below). | |
+| `extension_history` | Phase 0 placeholder, reshaped in Phase 4b (see below). | |
 | `worlds` | `id, server_id CASCADE, name, dimension_dirs text[], seed null, size_bytes, measured_at` | Phase 4. |
 
 ### Phase 3 additions (servers)
@@ -68,6 +68,19 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | `schedule_runs` | `id, schedule_id → schedules CASCADE, trigger, status, reason, tasks jsonb, started_at, finished_at` | Retention 30 d / last 100 per schedule. |
 | `api_tokens` (changes) | `+ permissions text[] null (null = all), allowed_ips text[], last_used_ip, prefix`; `token_hash` = sha256(secret) | Revocation = row delete (audited). |
 | `settings['backups.storage']` | JSON without the secret; S3 secret key in `secrets` (scope global, name `backups.s3.secretAccessKey`) | |
+
+### Phase 4b additions (plugins & mods, players)
+The Phase 0 placeholder tables `installed_extensions` / `extension_history` are empty and unused; the migration
+may drop and recreate them. Shapes mirror `packages/contracts/src/api/extensions.ts` / `players.ts`.
+
+| Table | Key columns | Notes |
+|-------|-------------|-------|
+| `installed_extensions` | `id, server_id → servers CASCADE, kind (plugin/mod), source (modrinth/upload/unknown), path, filename, enabled, size_bytes, mtime timestamptz, sha512 null, sha1 null, metadata jsonb ([] default, ExtensionMetadataView[]), compatibility jsonb null, modrinth jsonb null (ModrinthRef), modrinth_project_id text null, installed_at null, installed_by → users SET NULL, first_seen_at, last_seen_at` unique(server_id, path); index(server_id, modrinth_project_id) | One row per jar in `plugins/`/`mods/` (incl. `.jar.disabled`). Enable/disable updates `path` in place (same id). Scans upsert by path and delete rows whose file vanished (a vanished row whose sha512 reappears under a new path in the same scan keeps its id). `installed_*` set only for BlockForge installs/uploads. jsonb columns are untrusted text, capped as in the contracts. |
+| `extension_scans` | `server_id → servers CASCADE primary, status (never/running/completed/failed), job_id → jobs SET NULL, started_at, scanned_at null, error null` | Separate from `servers` so scans do not bump `servers.version`. |
+| `extension_history` | `id, server_id → servers CASCADE, extension_id → installed_extensions SET NULL, action (install/update/remove/rollback/enable/disable/upload), status (succeeded/failed), extension_name, path, from jsonb null, to jsonb null (ExtensionFileSnapshot), actor_type (user/api_token/schedule/system), actor_id uuid null, actor_name null, at, job_id → jobs SET NULL, error null, kept_path null, kept_sha512 null, kept_until null` index(server_id, at desc) | `kept_*` = the replaced/removed jar moved to `.blockforge/extensions/kept/<id>.jar` in the data root (restorable by rollback; pruned after 30 d / beyond 20 per server, then `kept_path` is cleared). Retention of rows: 1 year. |
+| `extension_uploads` | `id, server_id → servers CASCADE, filename, size_bytes, staging_path, created_by → users SET NULL, created_at, expires_at, completed_at null` index(expires_at) where completed_at is null | Staging file `.blockforge/extensions/uploads/<id>.jar.part`; expired rows and their files are removed after 1 h. |
+| `player_sessions` | `id, server_id → servers CASCADE, name, uuid null, joined_at, left_at null, leave_reason null (≤ 256, untrusted)` index(server_id, joined_at desc); index(server_id, lower(name)); partial index(server_id) where left_at is null | From console join/leave events; open sessions are closed on stop/crash or when missing from `list`. Retention 90 days. |
+| `settings['extensions.uploads']` | `ExtensionUploadSettings` `{allowed, requireMetadata}` (default `{true, true}`) | Generic `/settings/:key` route. |
 
 ## Networks (Velocity)
 
