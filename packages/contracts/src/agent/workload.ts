@@ -38,6 +38,11 @@ export type WorkloadStop = z.infer<typeof WorkloadStop>;
 
 export const WorkloadSpec = z.object({
   workloadId: z.uuid(),
+  /**
+   * The *game*, not the runtime: `minecraft` / `velocity` enable Server List Ping status sampling and
+   * port discovery (server.properties / velocity.toml), also for egg workloads (`entrypoint: "image"`)
+   * whose template game is minecraft-java / minecraft-proxy. `generic` = no game-specific probing.
+   */
   kind: z.enum(["minecraft", "velocity", "generic"]),
   /**
    * Image reference. The schema only checks shape; *authorisation* is the agent's own allowlist

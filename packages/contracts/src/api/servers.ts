@@ -170,6 +170,12 @@ export const EggOptions = z.object({
    * non-editable ones, as Pterodactyl administrators can).
    */
   variables: z.record(EnvVarName, z.string().max(8192)).default({}),
+  /**
+   * Required (true) when the template has the `eula` feature (Minecraft eggs). The control plane then
+   * writes `eula.txt` (`eula=true`) before the first start; Pterodactyl instead prompts after the server
+   * refuses to start.
+   */
+  acceptEula: z.boolean().default(false),
 });
 export type EggOptions = z.infer<typeof EggOptions>;
 
