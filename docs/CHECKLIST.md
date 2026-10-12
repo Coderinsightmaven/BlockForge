@@ -147,8 +147,10 @@ Contracts: `api/backups.ts`, `api/schedules.ts`, identity `ApiKey*`, agent `back
 `docs/development/test-node.md`). Cross-model reviews: agent backups (6/6 fixed, d265046), web Phase 4a (11/11
 fixed, 8394357), control plane Phase 4a (all 20 + Grok 4b #1 save-all wait fixed and tested; record updated), Minecraft 4b libs (Grok: 14/14 fixed, f97f67b;
 re-review pending, `docs/reviews/2026-10-12-minecraft-phase4b-libs.md`).
-Phase 4b: contracts done (4e1a456), agent commands done (3125c66), control-plane routes done (simulated agent + recorded fixtures), web UI for Plugins & Mods
-and Players committed (86b92a4); real-agent E2E pending; cross-model reviews queued (agent jar reader: Codex; libs fix re-review: Grok); then Phase 5 (databases).
+Phase 4b: contracts (4e1a456), agent commands (3125c66), control plane (f8d514d) and web UI (86b92a4, 5819cee) done.
+Players verified live on the test node (console path on Paper, file path on stopped Vanilla); Plugins & Mods live run waits for
+the agent deploy after its review. Cross-model reviews queued (agent jar reader: Codex; libs fix re-review: Grok; Phase 4b
+control plane + web); then Phase 5 (databases).
 Web route budget enforced in CI (`bundle:check`); app shell 252.2 KiB (command palette + enrollment dialog load on first use); tightest routes:
 `/nodes/$nodeId` 287.1 KiB, `/settings` 287.0 KiB, `/servers/$serverId` 281.5 KiB (console-first: every other tab, the job widgets, the EULA banner and the kill
 confirmation are on-demand chunks; tab chunks prefetch on hover/focus of their trigger).
