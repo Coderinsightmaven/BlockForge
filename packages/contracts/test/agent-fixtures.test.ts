@@ -32,6 +32,8 @@ function verifyCommand(frameJson: unknown, now: number) {
   const body = CommandBody.parse(JSON.parse(frame.body));
   if (body.nodeId !== keys.nodeId) return "wrong-node";
   if (now > body.expiresAt + AGENT_LIMITS.commandExpiryGraceMs) return "expired";
+  if (body.issuedAt > body.expiresAt) return "lifetime";
+  if (body.issuedAt > now + AGENT_LIMITS.tokenClockSkewMs) return "future";
   if (body.expiresAt - body.issuedAt > AGENT_LIMITS.commandMaxLifetimeMs) return "lifetime";
   const parsed = AGENT_COMMANDS[body.type].payload.safeParse(body.payload);
   if (!parsed.success) return "invalid-payload";
@@ -63,6 +65,7 @@ describe("agent protocol fixtures", () => {
     ["cmd-reject-wrong-key.json", "bad-signature"],
     ["cmd-reject-lifetime.json", "lifetime"],
     ["cmd-reject-root-delete.json", "invalid-payload"],
+    ["cmd-reject-reversed-timestamps.json", "lifetime"],
     ["cmd-credentials-rotate.json", "ok"],
   ])("%s → %s", (file, expected) => {
     expect(verifyCommand(load(file), keys.now)).toBe(expected);

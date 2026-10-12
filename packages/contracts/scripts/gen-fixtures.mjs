@@ -157,6 +157,19 @@ write(
   cmd("00000000-0000-4000-8000-000000000008", "workload.kill", { workloadId: WORKLOAD_ID }, { expiresIn: 3600000 }),
 );
 
+// issuedAt after expiresAt (negative lifetime) must be rejected even though expiry is in the future.
+{
+  const body = JSON.stringify({
+    id: "00000000-0000-4000-8000-00000000000b",
+    nodeId: NODE_ID,
+    type: "workload.kill",
+    issuedAt: T0 + 3_600_000,
+    expiresAt: T0 + 60_000,
+    payload: { workloadId: WORKLOAD_ID },
+  });
+  write("cmd-reject-reversed-timestamps.json", { t: "cmd", body, sig: b64u(sign(null, Buffer.from(body, "utf8"), cp.priv)) });
+}
+
 // Signature and node are valid, but the payload targets the data root → payload validation must reject it.
 write(
   "cmd-reject-root-delete.json",

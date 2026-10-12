@@ -101,8 +101,8 @@ Endpoints: `GET /agent/v1/connect` (WebSocket upgrade), `POST /agent/v1/transfer
 
 The signature covers the exact `body` string, so no canonical-JSON scheme is needed.
 Agent checks, in order: signature valid for the pinned control-plane key → `nodeId` equals
-its own → `now <= expiresAt + 30000` → `expiresAt - issuedAt <= 900000` → `id` not in the
-seen-set → payload validates. A duplicate `id` re-sends the cached result if the command
+its own → `now <= expiresAt + 30000` → `issuedAt <= expiresAt` → `issuedAt <= now + 30000`
+→ `expiresAt - issuedAt <= 900000` (overflow-safe) → `id` not in the seen-set → payload validates. A duplicate `id` re-sends the cached result if the command
 finished (results cached 15 min) or is ignored while still running (idempotent retry). Failed
 checks are answered with `result` + error code `COMMAND_REJECTED` (or `VALIDATION_FAILED` for
 payloads) and logged locally.
