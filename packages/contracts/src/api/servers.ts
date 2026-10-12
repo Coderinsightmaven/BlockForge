@@ -90,7 +90,12 @@ export const GameplaySettings = z
   .partial();
 export type GameplaySettings = z.infer<typeof GameplaySettings>;
 
-export const CreateServerRequest = z.object({
+export const PROXY_SOFTWARE: readonly ServerSoftware[] = ["velocity"];
+export const softwareKind = (software: ServerSoftware): ServerKind =>
+  PROXY_SOFTWARE.includes(software) ? "proxy" : "game";
+
+/** Unrefined shape (use for `.partial()`/`.pick()`); validate requests with `CreateServerRequest`. */
+export const CreateServerBase = z.object({
   name: DisplayName,
   slug: Slug,
   kind: ServerKind.default("game"),
@@ -127,6 +132,14 @@ export const CreateServerRequest = z.object({
       z.object({ mode: z.literal("upload"), transferId: Id }),
     ])
     .default({ mode: "generate" }),
+});
+export const CreateServerRequest = CreateServerBase.superRefine((req, ctx) => {
+  if (softwareKind(req.software) !== req.kind) {
+    ctx.addIssue({ code: "custom", path: ["kind"], message: `${req.software} requires kind "${softwareKind(req.software)}"` });
+  }
+  if (req.heapMaxBytes !== undefined && req.heapMaxBytes >= req.memoryLimitBytes) {
+    ctx.addIssue({ code: "custom", path: ["heapMaxBytes"], message: "heap must be smaller than the memory limit" });
+  }
 });
 export type CreateServerRequest = z.infer<typeof CreateServerRequest>;
 

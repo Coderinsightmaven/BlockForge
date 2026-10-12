@@ -11,6 +11,7 @@ import {
   ControlPlaneFrame,
   EnrollRequest,
   EnrollResponse,
+  ROTATION_PROOF_PREFIX,
 } from "../src/index.js";
 
 const dir = join(import.meta.dirname, "..", "fixtures", "agent");
@@ -61,6 +62,8 @@ describe("agent protocol fixtures", () => {
     ["cmd-reject-wrong-node.json", "wrong-node"],
     ["cmd-reject-wrong-key.json", "bad-signature"],
     ["cmd-reject-lifetime.json", "lifetime"],
+    ["cmd-reject-root-delete.json", "invalid-payload"],
+    ["cmd-credentials-rotate.json", "ok"],
   ])("%s → %s", (file, expected) => {
     expect(verifyCommand(load(file), keys.now)).toBe(expected);
   });
@@ -81,6 +84,15 @@ describe("agent protocol fixtures", () => {
   ])("agent frame %s parses", (file) => {
     const result = AgentFrame.safeParse(load(file));
     expect(result.success, JSON.stringify(result.error?.issues)).toBe(true);
+  });
+
+  it("rotation proof verifies with the next key over prefix + nodeId + commandId", () => {
+    const frame = AgentFrame.parse(load("result-credentials-rotate.json"));
+    if (frame.t !== "result" || !frame.ok) throw new Error("expected ok result");
+    const data = AGENT_COMMANDS["credentials.rotate"].result.parse(frame.data);
+    const message = Buffer.from(`${ROTATION_PROOF_PREFIX}${keys.nodeId}:${frame.id}`, "utf8");
+    expect(verify(null, message, rawEd25519(data.publicKey), Buffer.from(data.proof, "base64url"))).toBe(true);
+    expect(verify(null, message, rawEd25519(keys.agent.publicKey), Buffer.from(data.proof, "base64url"))).toBe(false);
   });
 
   it("welcome frame parses", () => {

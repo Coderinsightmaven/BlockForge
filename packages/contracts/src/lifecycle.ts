@@ -31,12 +31,12 @@ export const SERVER_TRANSITIONS: Record<ServerState, readonly ServerState[]> = {
   stopping: ["stopped", "crashed", "unreachable"],
   stopped: ["starting", "updating", "backing_up", "restoring", "migrating", "deleting", "unreachable", "running"],
   crashed: ["starting", "stopped", "updating", "backing_up", "restoring", "migrating", "deleting", "unreachable"],
-  updating: ["stopped", "starting", "crashed"],
-  backing_up: ["running", "degraded", "stopped", "crashed"],
-  restoring: ["stopped", "starting", "crashed"],
-  migrating: ["stopped", "starting", "crashed"],
+  updating: ["stopped", "starting", "crashed", "unreachable"],
+  backing_up: ["running", "degraded", "stopped", "crashed", "unreachable"],
+  restoring: ["stopped", "starting", "crashed", "unreachable"],
+  migrating: ["stopped", "starting", "crashed", "unreachable"],
   unreachable: ["running", "degraded", "starting", "stopping", "stopped", "crashed"],
-  deleting: ["stopped", "crashed"],
+  deleting: ["stopped", "crashed", "unreachable"],
 };
 
 export function canTransition(from: ServerState, to: ServerState): boolean {
@@ -80,7 +80,8 @@ export const OPERATION_ALLOWED_FROM: Record<ServerOperation, readonly ServerStat
   backup: ["running", "degraded", "stopped", "crashed"],
   restore: ["stopped", "crashed"],
   migrate: ["stopped", "crashed"],
-  delete: ["stopped", "crashed", "provision_failed"],
+  /** `provisioning` only once its job is no longer active (e.g. an abandoned provision). */
+  delete: ["stopped", "crashed", "provision_failed", "provisioning", "unreachable"],
 };
 
 export function canStartOperation(

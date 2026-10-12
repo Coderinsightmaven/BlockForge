@@ -1,0 +1,5 @@
+{
+  "t": "cmd",
+  "body": "{\"id\":\"00000000-0000-4000-8000-000000000009\",\"nodeId\":\"6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c\",\"type\":\"fs.delete\",\"issuedAt\":1760000000000,\"expiresAt\":1760000300000,\"payload\":{\"workloadId\":\"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d\",\"path\":\"./\",\"recursive\":true}}",
+  "sig": "qt5ycp3YyUhVPfNVWaLgde5KR1Kw3A693jtw1v63SN3ORLzKbFgl6jmbqZ5Y55PJH6nOdG2paTzvE5CGX7MEDw"
+}

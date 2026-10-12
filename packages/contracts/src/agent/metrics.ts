@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { Bytes, EpochMs } from "../common.js";
 
-const Pct = z.number().min(0);
+/** Host-level percentage, 0–100. Agents clamp sampling jitter (e.g. 100.4) before sending. */
+const Pct = z.number().min(0).max(100);
 const Rate = z.number().min(0);
 
 /**
@@ -100,7 +101,8 @@ export const WorkloadMetricSample = z.object({
   workloadId: z.uuid(),
   ts: EpochMs,
   running: z.boolean(),
-  cpuPct: Pct.optional(),
+  /** Relative to one core (200 = two full cores), like `docker stats`. */
+  cpuPct: z.number().min(0).optional(),
   cpuThrottledPeriodsTotal: z.number().int().nonnegative().optional(),
   memoryUsageBytes: Bytes.optional(),
   memoryLimitBytes: Bytes.optional(),

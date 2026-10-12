@@ -157,6 +157,27 @@ write(
   cmd("00000000-0000-4000-8000-000000000008", "workload.kill", { workloadId: WORKLOAD_ID }, { expiresIn: 3600000 }),
 );
 
+// Signature and node are valid, but the payload targets the data root → payload validation must reject it.
+write(
+  "cmd-reject-root-delete.json",
+  cmd("00000000-0000-4000-8000-000000000009", "fs.delete", { workloadId: WORKLOAD_ID, path: "./", recursive: true }),
+);
+
+// Staged credential rotation: the agent proves possession of the next key.
+const nextAgent = keyFromSeed("0303030303030303030303030303030303030303030303030303030303030303");
+const ROTATE_CMD_ID = "00000000-0000-4000-8000-00000000000a";
+write("cmd-credentials-rotate.json", cmd(ROTATE_CMD_ID, "credentials.rotate", {}));
+write("result-credentials-rotate.json", {
+  t: "result",
+  id: ROTATE_CMD_ID,
+  ts: T0,
+  ok: true,
+  data: {
+    publicKey: nextAgent.publicKey,
+    proof: b64u(sign(null, Buffer.from(`blockforge-rotate:${NODE_ID}:${ROTATE_CMD_ID}`, "utf8"), nextAgent.priv)),
+  },
+});
+
 write("welcome.json", { t: "welcome", nodeId: NODE_ID, serverTime: T0, approved: true, heartbeatIntervalMs: 15000, metricsIntervalMs: 5000 });
 
 const status = {

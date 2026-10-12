@@ -33,6 +33,7 @@ export const PERMISSIONS = {
   "servers.delete": ["global", "node", "network", "server"],
   "servers.control": ["global", "node", "network", "server"],
   "servers.console.view": ["global", "node", "network", "server"],
+  /** Operator-equivalent: arbitrary Minecraft commands (incl. /op). Grant only to trusted administrators. */
   "servers.console.send": ["global", "node", "network", "server"],
   "servers.config.view": ["global", "node", "network", "server"],
   "servers.config.edit": ["global", "node", "network", "server"],
@@ -125,12 +126,12 @@ export const BUILTIN_ROLES = {
   },
   moderator: {
     name: "Moderator",
-    description: "Watches servers and manages players; no configuration or file access.",
+    description:
+      "Watches servers and manages players through structured actions (kick, ban, whitelist); no raw console input, configuration or file access.",
     permissions: [
       "monitoring.view",
       "servers.view",
       "servers.console.view",
-      "servers.console.send",
       "servers.players.view",
       "servers.players.manage",
     ],

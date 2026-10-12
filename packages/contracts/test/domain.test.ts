@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_COMMANDS,
+  CreateServerRequest,
+  MutableRelativePath,
+  NodeMetricSample,
+  redactCommandPayload,
+  WorkloadMetricSample,
   ALL_PERMISSIONS,
   BUILTIN_ROLES,
   canStartOperation,
@@ -63,6 +69,65 @@ describe("RelativePath", () => {
       expect(RelativePath.safeParse(p).success).toBe(false);
     },
   );
+});
+
+describe("mutation paths", () => {
+  it.each(["", ".", "./", ".\\", "./."])("MutableRelativePath rejects data-root path %j", (p) => {
+    expect(MutableRelativePath.safeParse(p).success).toBe(false);
+  });
+  it("MutableRelativePath accepts a nested file", () => {
+    expect(MutableRelativePath.safeParse("plugins/a.jar").success).toBe(true);
+  });
+  it("fs.delete payload cannot target the root", () => {
+    const wid = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+    expect(AGENT_COMMANDS["fs.delete"].payload.safeParse({ workloadId: wid, path: ".", recursive: true }).success).toBe(false);
+    expect(AGENT_COMMANDS["fs.list"].payload.safeParse({ workloadId: wid, path: "" }).success).toBe(true);
+  });
+});
+
+describe("command payload redaction", () => {
+  it("redacts file content, env values and signed URL queries", () => {
+    expect(redactCommandPayload("fs.write", { path: "a", content: "secret" })).toEqual({ path: "a", content: "[REDACTED]" });
+    expect(redactCommandPayload("workload.ensure", { env: { TOKEN: "x", TZ: "UTC" } })).toEqual({
+      env: { TOKEN: "[REDACTED]", TZ: "[REDACTED]" },
+    });
+    expect(redactCommandPayload("artifact.fetch", { url: "https://h.example/a.jar?sig=abc" })).toEqual({
+      url: "https://h.example/a.jar?[REDACTED]",
+    });
+    expect(redactCommandPayload("workload.start", { workloadId: "x" })).toEqual({ workloadId: "x" });
+  });
+});
+
+describe("CreateServerRequest", () => {
+  const base = {
+    name: "Lobby",
+    slug: "lobby",
+    placement: { mode: "auto" },
+    software: "paper",
+    minecraftVersion: "1.21.8",
+    memoryLimitBytes: 4 * 1024 ** 3,
+    acceptEula: true,
+  } as const;
+  it("accepts a consistent game server", () => {
+    expect(CreateServerRequest.safeParse(base).success).toBe(true);
+  });
+  it("rejects kind/software mismatches and heap ≥ limit", () => {
+    expect(CreateServerRequest.safeParse({ ...base, kind: "proxy" }).success).toBe(false);
+    expect(CreateServerRequest.safeParse({ ...base, software: "velocity" }).success).toBe(false);
+    expect(CreateServerRequest.safeParse({ ...base, software: "velocity", kind: "proxy" }).success).toBe(true);
+    expect(CreateServerRequest.safeParse({ ...base, heapMaxBytes: 4 * 1024 ** 3 }).success).toBe(false);
+  });
+  it("moderators cannot send raw console commands", () => {
+    expect(BUILTIN_ROLES.moderator.permissions as readonly string[]).not.toContain("servers.console.send");
+  });
+});
+
+describe("node metric percentages", () => {
+  it("rejects host CPU above 100 but allows multi-core workload CPU", () => {
+    const node = { ts: 1, cpu: { usagePct: 100.5 }, memory: { totalBytes: 1, usedBytes: 1, availableBytes: 0 }, filesystems: [], diskIo: [], network: [] };
+    expect(NodeMetricSample.safeParse(node).success).toBe(false);
+    expect(WorkloadMetricSample.safeParse({ workloadId: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", ts: 1, running: true, cpuPct: 350 }).success).toBe(true);
+  });
 });
 
 describe("realtime topics", () => {

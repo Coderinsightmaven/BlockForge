@@ -21,7 +21,12 @@ export const AGENT_LIMITS = {
   logLineMaxBytes: 8192,
   logLinesPerSecond: 200,
   logBurstLines: 2000,
+  /** A `pending` rotated credential that never authenticates expires after this. */
+  credentialRotationPendingTtlMs: 900_000,
 } as const;
+
+/** Hosts an agent may reach over plain HTTP with `--insecure-allow-http` (development only). */
+export const INSECURE_HTTP_ALLOWED_HOSTS = ["localhost", "127.0.0.1", "::1", "host.docker.internal"] as const;
 
 export const AgentErrorCode = z.enum([
   "VALIDATION_FAILED",

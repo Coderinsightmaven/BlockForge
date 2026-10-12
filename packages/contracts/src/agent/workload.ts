@@ -30,7 +30,16 @@ export const WorkloadNetwork = z.object({
 export const WorkloadSpec = z.object({
   workloadId: z.uuid(),
   kind: z.enum(["minecraft", "velocity"]),
-  image: z.string().min(1).max(255),
+  /**
+   * Image reference. The schema only checks shape; *authorisation* is the agent's own allowlist
+   * (agent-protocol.md §6), never this schema.
+   */
+  image: z
+    .string()
+    .max(255)
+    .regex(
+      /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/,
+    ),
   command: z.array(Arg).min(1).max(256),
   env: z.record(EnvKey, z.string().max(4096)).default({}),
   memoryLimitBytes: Bytes.min(128 * 1024 * 1024),

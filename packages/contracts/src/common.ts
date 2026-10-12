@@ -65,5 +65,7 @@ export type Page<T> = { items: T[]; nextCursor: string | null };
 /** Header the SPA must send on every state-changing request. */
 export const CSRF_HEADER = "x-blockforge-csrf";
 export const REQUEST_ID_HEADER = "x-request-id";
+/** Optional on job-creating POST/DELETE routes; a replay within 24 h returns the original response. */
+export const IDEMPOTENCY_HEADER = "idempotency-key";
 export const SESSION_COOKIE = "bf_session";
 export const CSRF_COOKIE = "bf_csrf";

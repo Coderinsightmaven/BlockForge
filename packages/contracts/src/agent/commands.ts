@@ -15,6 +15,10 @@ export const RelativePath = z
   .refine((p) => !/^([/\\]|[a-zA-Z]:)/.test(p), "must be relative")
   .refine((p) => !p.split(/[/\\]/).includes(".."), "must not contain '..'");
 
+const isRootPath = (p: string) => p.split(/[/\\]/).every((seg) => seg === "" || seg === ".");
+/** A relative path that must not resolve to the data root itself ("", ".", "./", …). Used by every mutation. */
+export const MutableRelativePath = RelativePath.refine((p) => !isRootPath(p), "must not target the data root");
+
 const WorkloadRef = z.object({ workloadId: z.uuid() });
 const Empty = z.object({});
 
@@ -83,7 +87,7 @@ export const AGENT_COMMANDS = {
   },
   "fs.write": {
     payload: WorkloadRef.extend({
-      path: RelativePath,
+      path: MutableRelativePath,
       content: z.string().max(7 * 1024 * 1024),
       encoding: z.enum(["utf8", "base64"]),
       /** sha256 the current file must have; null = file must not exist; omitted = unconditional. */
@@ -92,9 +96,9 @@ export const AGENT_COMMANDS = {
     }),
     result: z.object({ sha256: z.string(), size: Bytes }),
   },
-  "fs.mkdir": { payload: WorkloadRef.extend({ path: RelativePath }), result: Empty },
-  "fs.rename": { payload: WorkloadRef.extend({ from: RelativePath, to: RelativePath }), result: Empty },
-  "fs.delete": { payload: WorkloadRef.extend({ path: RelativePath, recursive: z.boolean() }), result: Empty },
+  "fs.mkdir": { payload: WorkloadRef.extend({ path: MutableRelativePath }), result: Empty },
+  "fs.rename": { payload: WorkloadRef.extend({ from: MutableRelativePath, to: MutableRelativePath }), result: Empty },
+  "fs.delete": { payload: WorkloadRef.extend({ path: MutableRelativePath, recursive: z.boolean() }), result: Empty },
   "fs.du": {
     payload: WorkloadRef.extend({
       path: RelativePath,
@@ -109,7 +113,7 @@ export const AGENT_COMMANDS = {
   },
   "fs.extract": {
     payload: WorkloadRef.extend({
-      archivePath: RelativePath,
+      archivePath: MutableRelativePath,
       destPath: RelativePath,
       maxTotalBytes: Bytes.max(64 * 1024 ** 3),
       maxEntries: z.number().int().min(1).max(1_000_000),
@@ -117,23 +121,33 @@ export const AGENT_COMMANDS = {
     result: z.object({ entries: z.number().int(), bytes: Bytes }),
   },
   "fs.transfer.push": {
-    payload: WorkloadRef.extend({ path: RelativePath, transferId: z.uuid() }),
+    payload: WorkloadRef.extend({ path: MutableRelativePath, transferId: z.uuid() }),
     result: z.object({ bytes: Bytes, sha256: z.string() }),
   },
   "fs.transfer.pull": {
-    payload: WorkloadRef.extend({ path: RelativePath, transferId: z.uuid(), maxBytes: Bytes }),
+    payload: WorkloadRef.extend({ path: MutableRelativePath, transferId: z.uuid(), maxBytes: Bytes }),
     result: z.object({ bytes: Bytes, sha256: z.string() }),
   },
   "artifact.fetch": {
     payload: WorkloadRef.extend({
       url: z.url({ protocol: /^https$/ }),
-      destPath: RelativePath,
+      destPath: MutableRelativePath,
       checksum: Checksum.nullable(),
       maxBytes: Bytes.max(2 * 1024 ** 3),
     }),
     result: z.object({ bytes: Bytes, sha256: z.string() }),
   },
-  "credentials.rotate": { payload: Empty, result: z.object({ publicKey: z.string() }) },
+  /**
+   * Staged rotation: the agent keeps its current key, generates a next key, and proves possession by
+   * signing `ROTATION_PROOF_PREFIX + nodeId + ":" + commandId` with it. See agent-protocol.md §3.1.
+   */
+  "credentials.rotate": {
+    payload: Empty,
+    result: z.object({
+      publicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      proof: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
+    }),
+  },
 } as const;
 
 export type AgentCommandType = keyof typeof AGENT_COMMANDS;
@@ -141,5 +155,39 @@ export const AGENT_COMMAND_TYPES = Object.keys(AGENT_COMMANDS) as AgentCommandTy
 export type CommandPayload<T extends AgentCommandType> = z.input<(typeof AGENT_COMMANDS)[T]["payload"]>;
 export type CommandResult<T extends AgentCommandType> = z.infer<(typeof AGENT_COMMANDS)[T]["result"]>;
 
-/** Commands that may contain secrets in their payload; payloads are redacted before persisting. */
-export const SENSITIVE_COMMANDS: readonly AgentCommandType[] = ["fs.write"];
+export const ROTATION_PROOF_PREFIX = "blockforge-rotate:";
+
+/**
+ * Payload fields that may carry secrets. They are redacted (field level) before a payload is persisted
+ * in `agent_commands`, job input, audit details or logs. URLs keep scheme/host/path but lose query + fragment.
+ */
+export const COMMAND_REDACTIONS: Partial<Record<AgentCommandType, readonly string[]>> = {
+  "fs.write": ["content"],
+  "workload.ensure": ["env"],
+  "artifact.fetch": ["url"],
+};
+export const SENSITIVE_COMMANDS = Object.keys(COMMAND_REDACTIONS) as AgentCommandType[];
+export const REDACTED = "[REDACTED]";
+
+export function redactCommandPayload(type: AgentCommandType, payload: unknown): unknown {
+  const fields = COMMAND_REDACTIONS[type];
+  if (!fields || typeof payload !== "object" || payload === null) return payload;
+  const copy: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+  for (const field of fields) {
+    if (!(field in copy)) continue;
+    const value = copy[field];
+    if (field === "url" && typeof value === "string") {
+      try {
+        const u = new URL(value);
+        copy[field] = `${u.protocol}//${u.host}${u.pathname}${u.search || u.hash ? "?" + REDACTED : ""}`;
+      } catch {
+        copy[field] = REDACTED;
+      }
+    } else if (field === "env" && value !== null && typeof value === "object") {
+      copy[field] = Object.fromEntries(Object.keys(value).map((k) => [k, REDACTED]));
+    } else {
+      copy[field] = REDACTED;
+    }
+  }
+  return copy;
+}

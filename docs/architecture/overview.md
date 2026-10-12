@@ -46,7 +46,7 @@ tightly scoped arguments and never spawn a shell.
 
 ## 3. Technology decisions (ADR summary)
 
-Full rationale lives in `docs/architecture/adr/`. Summary:
+Rationale is summarised here; a dedicated ADR file is added under `docs/architecture/adr/` whenever a decision is revisited or superseded.
 
 | # | Decision | Why |
 |---|----------|-----|

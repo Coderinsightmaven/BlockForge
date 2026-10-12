@@ -28,7 +28,8 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | Table | Key columns | Notes |
 |-------|-------------|-------|
 | `nodes` | `id, name unique, slug unique, status (pending/active/draining/maintenance/disabled/revoked), connection (online/offline/degraded/unreachable — derived & cached), location, tags text[], public_address, private_address, scheduling_enabled, cpu_allocatable_millicores, memory_allocatable_bytes, storage_allocatable_bytes, overcommit_memory_ratio numeric, facts jsonb, agent_version, last_heartbeat_at, last_connected_at, clock_skew_ms, version` | `facts` is the latest `NodeFacts`. |
-| `node_credentials` | `id, node_id → nodes CASCADE, public_key (b64url), status (active/rotated/revoked), created_at, revoked_at` | Exactly one `active` per node (partial unique index). |
+| `node_credentials` | `id, node_id → nodes CASCADE, public_key (b64url), status (pending/active/rotated/revoked), created_at, expires_at null (pending only), activated_at, revoked_at` | Exactly one `active` and at most one `pending` per node (partial unique indexes). See agent-protocol §3.1. |
+| `agent_auth_jti` | `jti primary, node_id → nodes CASCADE, expires_at` | Durable, replica-shared replay cache for agent tokens; rows deleted after `expires_at`. |
 | `enrollment_tokens` | `id, token_id (16 hex) unique, secret_hash, label, created_by → users SET NULL, expires_at, used_at, used_by_node_id, requires_approval, tags text[], location` | Single use. |
 | `resource_reservations` | `id, node_id → nodes RESTRICT, server_id → servers CASCADE null, kind (server/hold), cpu_millicores, memory_bytes, storage_bytes, expires_at null` | Holds during provisioning expire; server reservations persist while the server exists. |
 | `maintenance_windows` | `id, scope_type, scope_id, starts_at, ends_at, reason, created_by` | |
@@ -49,9 +50,11 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 
 | Table | Key columns | Notes |
 |-------|-------------|-------|
-| `networks` | `id, name, slug unique, description, forwarding_mode (modern/legacy/none/bungeeguard), forwarding_secret_id → secrets RESTRICT, default_server_ids uuid[] (ordered try list), maintenance bool, version` | |
+| `networks` | `id, name, slug unique, description, forwarding_mode (modern/legacy/none/bungeeguard), forwarding_secret_id → secrets RESTRICT, maintenance bool, version` | |
+| `network_try_servers` | `network_id → networks CASCADE, server_id → servers CASCADE, position int` PK(network_id, server_id), unique(network_id, position) | Ordered default/fallback (`try`) list with real FKs; the validator flags an empty list. |
 | `network_members` | `network_id CASCADE, server_id CASCADE, role (proxy/lobby/survival/creative/minigame/limbo/event/other), backend_name (velocity server key), priority int, internal_address, internal_port` PK(network_id, server_id), unique(network_id, backend_name) | A server belongs to ≤ 1 network in v1. |
-| `forced_hosts` | `id, network_id CASCADE, hostname (lowercase, IDNA-normalised), target_server_ids uuid[] ordered, created_by, updated_at` unique(network_id, hostname) | |
+| `forced_hosts` | `id, network_id CASCADE, hostname (lowercase, IDNA-normalised), created_by, updated_at` unique(network_id, hostname) | |
+| `forced_host_targets` | `forced_host_id → forced_hosts CASCADE, server_id → servers CASCADE, position int` PK(forced_host_id, server_id), unique(forced_host_id, position) | Ordered targets with FKs; deleting a backend removes it from every mapping and the validator reports mappings left empty. |
 | `network_config_revisions` | `id, network_id CASCADE, revision int, plan jsonb (desired model), rendered jsonb (file → content/sha), status (draft/validated/applied/failed/rolled_back), validation jsonb, created_by, created_at, applied_at` unique(network_id, revision) | Drafts from the topology editor, diffs, rollback. |
 
 ## Operations
@@ -59,6 +62,7 @@ Implemented in `apps/control-plane/src/db/schema/*.ts` (Drizzle) with SQL migrat
 | Table | Key columns | Notes |
 |-------|-------------|-------|
 | `jobs` | `id, type, status (queued/running/succeeded/failed/cancelled), target_type, target_id, requested_by, idempotency_key unique null, input jsonb (redacted), result jsonb, error jsonb, attempts, created_at, started_at, finished_at` | User-visible durable job record (pg-boss holds queue mechanics). |
+| `idempotency_keys` | `key, user_id → users CASCADE, route, request_hash, response_status, response_body jsonb, created_at` PK(user_id, route, key) | 24 h retention; see api.md Idempotency. |
 | `job_steps` | `id, job_id CASCADE, ordinal, key, label, status (pending/running/succeeded/failed/skipped), message, started_at, finished_at` | Progress UI + resumability. |
 | `job_logs` | `id bigserial, job_id CASCADE, ts, level, message` | Bounded per job (≤ 2000 lines). |
 | `events` | `id bigserial, type, subject_type, subject_id, data jsonb, occurred_at` | Domain event outbox/history; retention 90 d. |

@@ -29,9 +29,13 @@ control-plane master key, backup archives, player personal data (names, UUIDs, I
 ## Key controls
 | Threat | Control |
 |--------|---------|
-| Forged or replayed control-plane commands | Commands signed with the control-plane Ed25519 key pinned at enrollment; per-command `nodeId`, expiry, unique ID; agent seen-set. |
+| Forged or replayed control-plane commands | Commands signed with the control-plane Ed25519 key pinned at enrollment; per-command `nodeId`, expiry, unique ID; fsync'd agent seen-set journal that survives restarts; idempotent command semantics. |
+| Replayed agent tokens | Durable `agent_auth_jti` table shared by all control-plane replicas; 120 s max token lifetime. |
+| Plain-HTTP downgrade | `--insecure-allow-http` only for loopback/`host.docker.internal`; any other http URL is refused. |
 | Stolen enrollment token | Single-use, short expiry, hashed at rest, optional manual approval, audit event on use. |
-| Stolen node key | Per-node revocation; key rotation command; jti replay cache; heartbeat source IP recorded. |
+| Stolen node key | Per-node revocation; staged key rotation with proof of possession and bounded overlap; heartbeat source IP recorded. |
+| Moderator escalation via console | Raw console input (`servers.console.send`) is operator-equivalent and excluded from the Moderator role; moderators use structured player actions. |
+| Wiping a data root | Mutation commands reject root-resolving paths in both the contract schema and the agent. |
 | Command / shell injection | No shell anywhere: agent uses argv + Docker API; console lines validated (no CR/LF/NUL, ≤1024 chars); env keys allowlisted; images allowlisted. |
 | Path traversal / symlink escape / zip-slip | Agent-side sandbox resolver; archive extraction rejects links/absolute/`..`, enforces size & entry limits. |
 | SSRF | Catalogue/plugin downloads restricted to allowlisted HTTPS hosts on both control plane and agent; webhooks block private/link-local/loopback ranges unless an admin allowlists them; redirects re-validated. |

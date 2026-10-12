@@ -39,9 +39,10 @@ POST /agent/v1/enroll
    The agent persists `nodeId`, the control-plane URL and the control-plane signing key
    (pinned) in `<configDir>/agent.json`. Errors: `401 ENROLLMENT_TOKEN_INVALID` (unknown,
    used, expired — deliberately indistinguishable), `400 VALIDATION_FAILED`.
-3. Agents refuse `http://` control-plane URLs unless started with
-   `--insecure-allow-http` (intended for localhost development only). `--ca-file` lets an
-   operator pin a private CA.
+3. Agents refuse `http://` control-plane URLs. `--insecure-allow-http` exists for local
+   development only and is accepted **only** when the URL host is one of
+   `INSECURE_HTTP_ALLOWED_HOSTS` (`localhost`, `127.0.0.1`, `::1`, `host.docker.internal`);
+   any other host is refused even with the flag. `--ca-file` lets an operator pin a private CA.
 
 ## 3. Agent authentication (connect + agent HTTP endpoints)
 
@@ -54,10 +55,29 @@ base64url(JSON) and `sig` is base64url(Ed25519 signature over the ASCII bytes of
   "exp": 1760000060000, "jti": "<16+ random bytes b64url>" }
 ```
 
-Control plane verification: signature valid for the node's **current** public key; node
-not revoked; `aud` matches; `exp - iat <= 120000`; `now` within `[iat - 30000, exp]`;
-`jti` not previously seen (kept until `exp`). Pending (unapproved) nodes may connect but
-receive no commands except `node.facts`.
+Control plane verification: signature valid for one of the node's usable keys (`active`, or
+a `pending` key from an in-progress rotation — see §3.1); node not revoked; `aud` matches;
+`exp - iat <= 120000`; `now` within `[iat - 30000, exp]`; `jti` not previously seen.
+**Replay state is durable and shared**: each accepted `jti` is inserted into the
+`agent_auth_jti` table (primary key `jti`, pruned after `exp`) inside the authentication
+step, so a restart or a second control-plane replica cannot accept the same token again.
+Pending (unapproved) nodes may connect but receive no commands except `node.facts`.
+
+### 3.1 Credential rotation (staged, bounded overlap)
+
+1. Control plane sends `credentials.rotate`. The agent generates a *next* keypair, persists it
+   as `agent.key.next` (the current `agent.key` is untouched) and returns
+   `{publicKey, proof}` where `proof` = Ed25519 signature by the **next** key over the UTF-8
+   string `ROTATION_PROOF_PREFIX + nodeId + ":" + commandId` (`blockforge-rotate:<nodeId>:<cmdId>`).
+2. Control plane verifies the proof and stores the key as a `pending` credential (expires after
+   `credentialRotationPendingTtlMs`, 15 min). Both `active` and `pending` keys authenticate.
+3. After sending the result the agent closes the WebSocket and reconnects authenticating with
+   the next key. On the first successful authentication with the pending key the control plane
+   atomically marks it `active` and the previous key `rotated` (no longer accepted). The agent
+   promotes `agent.key.next` → `agent.key` only after `welcome` is received.
+4. If reconnecting with the next key fails with 401 (e.g. pending key expired), the agent falls
+   back to the current key and discards `agent.key.next`. Rotation never leaves a node with
+   zero usable keys.
 
 Endpoints: `GET /agent/v1/connect` (WebSocket upgrade), `POST /agent/v1/transfers/:id`
 (agent uploads a file stream), `GET /agent/v1/transfers/:id` (agent downloads a stream).
@@ -82,9 +102,17 @@ Endpoints: `GET /agent/v1/connect` (WebSocket upgrade), `POST /agent/v1/transfer
 The signature covers the exact `body` string, so no canonical-JSON scheme is needed.
 Agent checks, in order: signature valid for the pinned control-plane key → `nodeId` equals
 its own → `now <= expiresAt + 30000` → `expiresAt - issuedAt <= 900000` → `id` not in the
-seen-set. A duplicate `id` re-sends the cached result if the command finished (results
-cached 15 min) or is ignored while still running (idempotent retry). Failed checks are
-answered with `result` + error code `COMMAND_REJECTED` and logged locally.
+seen-set → payload validates. A duplicate `id` re-sends the cached result if the command
+finished (results cached 15 min) or is ignored while still running (idempotent retry). Failed
+checks are answered with `result` + error code `COMMAND_REJECTED` (or `VALIDATION_FAILED` for
+payloads) and logged locally.
+
+**Durable seen-set.** Before executing any side effect the agent appends `{id, expiresAt}` to
+an fsync'd journal (`<configDir>/commands.journal`), pruned of expired entries on start-up and
+periodically. After an agent restart, a replayed command whose id is in the journal is rejected
+(`COMMAND_REJECTED`, "duplicate"). In addition, every command is designed so that repeating it
+is harmless (`workload.ensure` by spec hash, `fs.write` with `ifMatchSha256`, start/stop
+converge to a state) — replay protection and idempotency are defence in depth.
 
 ### Agent → control plane
 
@@ -106,6 +134,14 @@ answered with `result` + error code `COMMAND_REJECTED` and logged locally.
 `RUNTIME_ERROR` (Docker failure), `TIMEOUT`, `BUSY`, `INTERNAL`.
 
 ## 6. Command catalogue
+
+Mutation commands (`fs.write`, `fs.mkdir`, `fs.rename`, `fs.delete`, `fs.extract.archivePath`,
+`fs.transfer.*`, `artifact.fetch.destPath`) use `MutableRelativePath`, which rejects any path
+that resolves to the data root itself (`""`, `"."`, `"./"`, …); the agent enforces the same
+rule independently after normalisation. Read-only commands may target the root.
+
+Host percentages (CPU, per-core, iowait, steal, disk busy) are bounded to 0–100 by the schema;
+agents clamp sampling jitter before sending. Workload `cpuPct` is per-core and may exceed 100.
 
 All workload-scoped paths are **relative to the workload data root**
 (`<dataRoot>/servers/<workloadId>/data`). The agent resolves them with symlink-safe
@@ -138,7 +174,7 @@ paths, NUL bytes, Windows drive letters and device names) and refuses anything o
 | `artifact.fetch` | `{workloadId, url, destPath, checksum: {algorithm: "sha1"\|"sha256"\|"sha512", value} \| null, maxBytes}` — HTTPS only, host must be on the agent's allowlist, no redirects to non-allowlisted hosts | `{bytes, sha256}` |
 | `backup.create` | Phase 6 | |
 | `backup.restore` | Phase 6 | |
-| `credentials.rotate` | `{}` — agent generates new key, returns it; old key valid until reconnect | `{publicKey}` |
+| `credentials.rotate` | `{}` — staged rotation, see §3.1 | `{publicKey, proof}` |
 
 `WorkloadSpec` (see `packages/contracts/src/agent/workload.ts`):
 
@@ -154,6 +190,18 @@ paths, NUL bytes, Windows drive letters and device names) and refuses anything o
   restartPolicy: { mode: "never"|"on-failure"|"always", maxRetries, backoffMs },
   jvmProbe: boolean, labels: Record<string,string> }
 ```
+
+**Image authorisation** is enforced by the agent, never by schema validation: the image must
+match an entry of the agent's own `imageAllowlist` (config file, default `eclipse-temurin:*`).
+Matching: an entry `repo:*` matches any tag (not digest) of exactly `repo`; an entry without
+`*` must match the full reference exactly; Docker Hub short names are normalised
+(`eclipse-temurin` ≡ `docker.io/library/eclipse-temurin`). Registries with ports are not
+supported in v1.
+
+**Command history redaction.** `COMMAND_REDACTIONS` lists payload fields that can carry
+secrets (`fs.write.content`, `workload.ensure.env`, `artifact.fetch.url` query/fragment).
+`redactCommandPayload()` is applied before anything is persisted (`agent_commands`, job input,
+audit details) or logged.
 
 Container hardening applied by the agent regardless of spec: run as UID/GID 1000 (or the
 configured unprivileged ID), `no-new-privileges`, drop all capabilities, read-only image

@@ -8,6 +8,13 @@ pagination (`?limit=&cursor=` → `{items, nextCursor}`) unless noted. Timestamp
 
 Permission column = what the route checks (scope resolved from the target resource).
 
+**Idempotency.** Job-creating routes (`POST /servers`, `POST /servers/:id/actions`,
+`DELETE /servers/:id`, backup/restore/network-apply routes) accept an optional
+`Idempotency-Key` header (1–128 printable chars). The key is scoped to the user and route;
+a repeat within 24 h with the same body returns the original status + body (and the same
+`jobId`); the same key with a different body returns `409 CONFLICT`. The web client sends a
+fresh key per user action and reuses it on automatic retries.
+
 ## Health (no auth)
 | Method | Path | Notes |
 |--------|------|-------|
@@ -111,7 +118,8 @@ Permission column = what the route checks (scope resolved from the target resour
 ## Realtime
 `GET /api/v1/realtime` → WebSocket. Cookie-authenticated; `Origin` must match the configured
 public URL. Frames per `packages/contracts/src/realtime.ts`. Authorisation per topic:
-`overview`/`nodes`/`servers`/`alerts` → monitoring.view (events filtered by scope);
+`overview`/`nodes`/`servers` → monitoring.view (events filtered by scope); `alerts` →
+alerts.view (each incident filtered against the user's scope for its subject);
 `node:<id>` → nodes.view; `server:<id>` → servers.view; `console:<id>` →
 servers.console.view; `job:<id>` → jobs.view on the job target. Server buffers at most
 1 MiB per client; slow clients are disconnected with close code 4008 and must reconnect.
