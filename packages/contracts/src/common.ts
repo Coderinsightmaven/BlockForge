@@ -51,6 +51,12 @@ export const ApiError = z.object({
 });
 export type ApiError = z.infer<typeof ApiError>;
 
+/** `details` of a `VALIDATION_FAILED` error. `path` is dot-joined (e.g. "gameplay.maxPlayers"); "" = whole body. */
+export const ValidationErrorDetails = z.object({
+  issues: z.array(z.object({ path: z.string(), message: z.string() })),
+});
+export type ValidationErrorDetails = z.infer<typeof ValidationErrorDetails>;
+
 /** Cursor pagination request/response. Cursors are opaque strings. */
 export const PageQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -62,7 +68,13 @@ export const page = <T extends z.ZodType>(item: T) =>
   z.object({ items: z.array(item), nextCursor: z.string().nullable() });
 export type Page<T> = { items: T[]; nextCursor: string | null };
 
-/** Header the SPA must send on every state-changing request. */
+/**
+ * Header the SPA must send on every state-changing request once a session exists. The value is the
+ * session-bound CSRF token, available as `Me.csrfToken` (also in `LoginResponse.me`) and mirrored in
+ * the JS-readable `bf_csrf` cookie (SameSite=Strict); the server compares it with the token hash
+ * stored on the session, not merely with the cookie. Pre-session routes (`/auth/login`, `/auth/setup`)
+ * are exempt; they instead require `Content-Type: application/json` and an `Origin` matching PUBLIC_URL.
+ */
 export const CSRF_HEADER = "x-blockforge-csrf";
 export const REQUEST_ID_HEADER = "x-request-id";
 /** Optional on job-creating POST/DELETE routes; a replay within 24 h returns the original response. */

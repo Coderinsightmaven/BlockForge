@@ -1,7 +1,10 @@
 # REST & Realtime API (v1)
 
 Base path `/api/v1`. JSON bodies validated with the zod schemas named below (from
-`@blockforge/contracts`). Errors always use `ApiError` with an `x-request-id` header.
+`@blockforge/contracts`). Errors always use `ApiError` with an `x-request-id` header;
+`VALIDATION_FAILED` errors carry `details: ValidationErrorDetails` (`{issues:[{path, message}]}`).
+Alert rule thresholds are interpreted per `ALERT_RULE_KINDS`. Realtime payloads follow
+`REALTIME_EVENT_PAYLOADS`.
 State-changing requests (POST/PUT/PATCH/DELETE) require the `x-blockforge-csrf` header
 equal to the `csrfToken` from `GET /auth/me` (bound to the session). Lists use cursor
 pagination (`?limit=&cursor=` → `{items, nextCursor}`) unless noted. Timestamps are epoch ms.
@@ -48,7 +51,7 @@ fresh key per user action and reuses it on automatic retries.
 | DELETE | `/users/:id/roles/:bindingId` | → `User` | users.manage (cannot remove last owner) |
 | GET | `/roles` | → `Role[]` | users.view |
 | GET | `/audit` | `AuditQuery` → `Page<AuditEvent>` | audit.view |
-| GET | `/audit/verify` | → `{valid, checked, firstBrokenId?}` | audit.view |
+| GET | `/audit/verify` | → `AuditVerifyResult` | audit.view |
 
 ## Nodes
 | Method | Path | Body → Response | Permission |
@@ -70,7 +73,7 @@ fresh key per user action and reuses it on automatic retries.
 |--------|------|-----------------|------------|
 | GET | `/overview` | → `OverviewSummary` (scoped to what the user can view) | monitoring.view |
 | GET | `/metrics/range` | `MetricRangeQuery` → `MetricSeriesResult` | monitoring.view on the node/server (global for `global.*`) |
-| GET | `/alerts/incidents` | `?status=&limit=&cursor=` → `Page<AlertIncident>` | alerts.view |
+| GET | `/alerts/incidents` | `?status=&severity=&limit=&cursor=` → `Page<AlertIncident>` | alerts.view |
 | POST | `/alerts/incidents/:id/ack` | → `AlertIncident` | alerts.manage |
 | POST | `/alerts/incidents/:id/resolve` | → `AlertIncident` | alerts.manage |
 | GET | `/alerts/rules` | → `AlertRule[]` | alerts.view |
@@ -79,9 +82,9 @@ fresh key per user action and reuses it on automatic retries.
 | DELETE | `/alerts/rules/:id` | → 204 | alerts.manage |
 | GET | `/notification-channels` | → `NotificationChannel[]` | alerts.manage |
 | POST | `/notification-channels` | `UpsertNotificationChannelRequest` → `NotificationChannel` | alerts.manage |
-| PUT | `/notification-channels/:id` | same | alerts.manage |
+| PUT | `/notification-channels/:id` | same; omitting `config.url` keeps the stored secret URL | alerts.manage |
 | DELETE | `/notification-channels/:id` | → 204 | alerts.manage |
-| POST | `/notification-channels/:id/test` | → `{delivered, error?}` | alerts.manage |
+| POST | `/notification-channels/:id/test` | → `NotificationTestResult` | alerts.manage |
 
 ## Jobs
 | Method | Path | Body → Response | Permission |

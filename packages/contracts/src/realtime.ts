@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { EpochMs } from "./common.js";
+import { NodeMetricSample, WorkloadMetricSample } from "./agent/metrics.js";
+import { Node } from "./api/nodes.js";
+import { AlertIncident, Job, JobLogLine, OverviewSummary } from "./api/operations.js";
+import { Server } from "./api/servers.js";
 
 /**
  * UI realtime channel: WSS /api/v1/realtime (session cookie auth; Origin checked).
@@ -60,3 +64,21 @@ export const ConsoleLinesEvent = z.object({
   dropped: z.number().int().optional(),
 });
 export type ConsoleLinesEvent = z.infer<typeof ConsoleLinesEvent>;
+
+/**
+ * Payload schema per realtime event type. Entity updates carry the full REST DTO (bare, not wrapped)
+ * so clients can patch their caches; metric events carry the raw agent sample with its subject id.
+ * Clients must still treat payloads as hints and fall back to a REST refetch when parsing fails.
+ */
+export const REALTIME_EVENT_PAYLOADS = {
+  "overview.updated": OverviewSummary,
+  "node.updated": Node,
+  "node.metrics": z.object({ nodeId: z.uuid(), sample: NodeMetricSample }),
+  "server.updated": Server,
+  "server.metrics": z.object({ serverId: z.uuid(), sample: WorkloadMetricSample }),
+  "console.lines": ConsoleLinesEvent,
+  "job.updated": Job,
+  "job.log": JobLogLine.extend({ jobId: z.uuid() }),
+  "alert.updated": AlertIncident,
+  "network.updated": z.object({ networkId: z.uuid() }),
+} as const satisfies Record<RealtimeEventType, z.ZodType>;

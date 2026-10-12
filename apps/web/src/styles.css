@@ -1,0 +1,202 @@
+@import "tailwindcss";
+@import "uplot/dist/uPlot.min.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Design tokens. Every colour used by components comes from these variables so the light and
+ * dark themes stay in lock-step. Text colours meet WCAG AA (≥ 4.5:1) on --background and --card;
+ * status colours meet ≥ 3:1 (non-text) and are always paired with an icon + label.
+ * Chart series follow a validated categorical order (adjacent CVD ΔE ≥ 8 in both modes).
+ */
+:root {
+  color-scheme: light;
+  --background: #f5f6f8;
+  --foreground: #0f1419;
+  --card: #ffffff;
+  --card-foreground: #0f1419;
+  --popover: #ffffff;
+  --popover-foreground: #0f1419;
+  --muted: #eef0f3;
+  --muted-foreground: #556070;
+  --accent: #e9edf2;
+  --accent-foreground: #0f1419;
+  --border: #dde2e8;
+  --input: #c9d0d9;
+  --ring: #2563eb;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #eef0f3;
+  --secondary-foreground: #0f1419;
+  --destructive: #c42b2b;
+  --destructive-foreground: #ffffff;
+  --sidebar: #fbfcfd;
+
+  /* Status (icons, dots, meter fills). */
+  --success: #12871a;
+  --warning: #b06f00;
+  --danger: #c42b2b;
+  --info: #2563eb;
+  --neutral: #6b7280;
+
+  /* Chart chrome + categorical series (light steps). */
+  --chart-grid: #e6e8ec;
+  --chart-axis: #c3c8cf;
+  --chart-text: #556070;
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-6: #008300;
+  --chart-7: #6250d6;
+  --chart-8: #e34948;
+  /* Allocation (reservation) vs consumption encodings on capacity meters. */
+  --allocated: #6250d6;
+  --used: #2a78d6;
+}
+
+.dark {
+  color-scheme: dark;
+  --background: #0d0f12;
+  --foreground: #e7e9ec;
+  --card: #15181d;
+  --card-foreground: #e7e9ec;
+  --popover: #181c22;
+  --popover-foreground: #e7e9ec;
+  --muted: #1e2229;
+  --muted-foreground: #9ba4b0;
+  --accent: #232832;
+  --accent-foreground: #e7e9ec;
+  --border: #272c35;
+  --input: #343a45;
+  --ring: #5b9bf0;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #1e2229;
+  --secondary-foreground: #e7e9ec;
+  --destructive: #d23c3c;
+  --destructive-foreground: #ffffff;
+  --sidebar: #111419;
+
+  --success: #3fbf4a;
+  --warning: #f0a92a;
+  --danger: #f06a6a;
+  --info: #5b9bf0;
+  --neutral: #8b95a3;
+
+  --chart-grid: #252a32;
+  --chart-axis: #3a404a;
+  --chart-text: #9ba4b0;
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #008300;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+  --allocated: #9085e9;
+  --used: #3987e5;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-neutral: var(--neutral);
+  --color-allocated: var(--allocated);
+  --color-used: var(--used);
+  --color-tone: var(--tone, var(--neutral));
+
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+}
+
+/* Tone helpers: set --tone once, then use `text-tone`, `bg-tone/10`, `border-tone/30`. */
+.tone-success {
+  --tone: var(--success);
+}
+.tone-warning {
+  --tone: var(--warning);
+}
+.tone-danger {
+  --tone: var(--danger);
+}
+.tone-info {
+  --tone: var(--info);
+}
+.tone-neutral {
+  --tone: var(--neutral);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* uPlot: recessive chrome that follows the theme. Legend is rendered by React. */
+.uplot {
+  font-family: var(--font-sans);
+}
+.uplot .u-legend {
+  display: none;
+}
+.u-select {
+  background: color-mix(in oklab, var(--primary) 14%, transparent);
+}

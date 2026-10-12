@@ -151,6 +151,40 @@ export const AlertRuleKind = z.enum([
   "server.heap.high",
   "job.failed",
 ]);
+/**
+ * Meaning of `AlertRule.threshold` per kind (the evaluator and the UI must agree on these).
+ * `null` unit = the rule takes no threshold (it must be `null`).
+ */
+export const ALERT_RULE_KINDS = {
+  "node.cpu.high": { unit: "percent", subject: "node", description: "Host CPU usage above threshold % for forSeconds" },
+  "node.memory.high": {
+    unit: "percent",
+    subject: "node",
+    description: "Host memory used ((total − available) / total) above threshold % for forSeconds",
+  },
+  "node.disk.low": {
+    unit: "percent",
+    subject: "node",
+    description: "Free space on any filesystem below threshold % (e.g. 10 = fires when < 10% free)",
+  },
+  "node.unreachable": { unit: null, subject: "node", description: "Node has not sent a heartbeat for forSeconds" },
+  "server.crashed": { unit: null, subject: "server", description: "Server process exited unexpectedly" },
+  "server.memory.high": {
+    unit: "percent",
+    subject: "server",
+    description: "Container memory usage above threshold % of its limit for forSeconds",
+  },
+  "server.heap.high": {
+    unit: "percent",
+    subject: "server",
+    description: "JVM heap used above threshold % of heap max for forSeconds",
+  },
+  "job.failed": { unit: null, subject: "job", description: "A background job failed" },
+} as const satisfies Record<
+  z.infer<typeof AlertRuleKind>,
+  { unit: "percent" | null; subject: "node" | "server" | "job"; description: string }
+>;
+
 export const AlertRule = z.object({
   id: Id,
   name: z.string(),
@@ -196,6 +230,22 @@ export const NotificationChannel = z.object({
   config: z.record(z.string(), z.unknown()),
   createdAt: EpochMs,
 });
+/** `POST /notification-channels/:id/test` response. `error` never contains the webhook URL. */
+export const NotificationTestResult = z.object({ delivered: z.boolean(), error: z.string().nullable() });
+export type NotificationTestResult = z.infer<typeof NotificationTestResult>;
+
+/** `GET /audit/verify` response. */
+export const AuditVerifyResult = z.object({
+  valid: z.boolean(),
+  checked: z.number().int().nonnegative(),
+  firstBrokenId: z.string().nullable(),
+});
+export type AuditVerifyResult = z.infer<typeof AuditVerifyResult>;
+
+/**
+ * Create/update a channel. On update, omitting `config.url` keeps the stored (secret) URL; sending
+ * a new `url` replaces it. The URL is write-only and never returned.
+ */
 export const UpsertNotificationChannelRequest = z.object({
   name: z.string().min(1).max(80),
   kind: z.enum(["discord", "webhook", "email"]),
