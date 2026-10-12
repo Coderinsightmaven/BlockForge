@@ -21,8 +21,13 @@ import {
   loadRuntimeContext,
   minecraftProvisioning,
   readFileIfExists,
+  slpExpected,
+  STARTUP_EXIT_CODES,
+  StartupExitError,
   waitForReady,
+  writeEggEula,
   writeMinecraftFiles,
+  type ExitStatus,
   type ServerRuntimeContext,
 } from "./runtime.js";
 import type { ServerStateService } from "./state.js";
@@ -200,8 +205,9 @@ async function runInstall(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, r
 async function configure(deps: ServerJobDeps, ctx: Ctx<{ serverId: string; eulaAcceptedBy?: string | null }>, rt: ServerRuntimeContext, firstInstall: boolean): Promise<void | typeof SKIP_STEP> {
   if (isMinecraftTemplate(rt.template.kind)) {
     if (!firstInstall) return SKIP_STEP;
-    const eula = rt.server.kind === "game" && Boolean(ctx.input.eulaAcceptedBy);
-    const r = await writeMinecraftFiles(deps.gateway, rt, { jobId: ctx.jobId, signal: ctx.signal, acceptedBy: ctx.input.eulaAcceptedBy ?? null, includeEula: eula }).catch((err: unknown) =>
+    const acceptedBy = rt.server.eulaAcceptedBy ?? ctx.input.eulaAcceptedBy ?? null;
+    const eula = rt.server.kind === "game" && Boolean(acceptedBy);
+    const r = await writeMinecraftFiles(deps.gateway, rt, { jobId: ctx.jobId, signal: ctx.signal, acceptedBy, includeEula: eula }).catch((err: unknown) =>
       wrap(err, "writing server configuration"),
     );
     for (const w of r.warnings) await ctx.log("warn", w);
@@ -210,9 +216,12 @@ async function configure(deps: ServerJobDeps, ctx: Ctx<{ serverId: string; eulaA
     await ctx.log("info", `Written: ${r.written.join(", ")}${eula ? " (Mojang EULA accepted at creation)" : ""}`);
     return;
   }
+  // Provisioning and reinstall write eula.txt for Minecraft eggs whose EULA was accepted at creation.
+  const eula = firstInstall ? await writeEggEula(deps.gateway, rt, { jobId: ctx.jobId, signal: ctx.signal }).catch((err: unknown) => wrap(err, "writing eula.txt")) : false;
+  if (eula) await ctx.log("info", `eula.txt written (Mojang EULA accepted at creation by ${rt.server.eulaAcceptedBy})`);
   const r = await applyEggConfigFiles(deps.gateway, rt, { jobId: ctx.jobId, signal: ctx.signal }).catch((err: unknown) => wrap(err, "applying config files"));
   for (const w of r.warnings) await ctx.log("warn", w);
-  if (!r.written.length && !rt.template.configFiles.length) return SKIP_STEP;
+  if (!eula && !r.written.length && !rt.template.configFiles.length) return SKIP_STEP;
   await ctx.log("info", r.written.length ? `Config files updated: ${r.written.join(", ")}` : "Config files already up to date");
 }
 
@@ -231,12 +240,19 @@ async function startWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>
 
 async function awaitReady(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext): Promise<void> {
   const since = Number(ctx.state.startedAt ?? deps.clock.now());
-  const r = await waitForReady(
-    { gateway: deps.gateway, latest: deps.latest, consoleTail: (id) => deps.consoles.tail(id, 5000).lines },
-    rt,
-    { since, timeoutMs: deps.readyTimeoutMs ?? 15 * 60_000, signal: ctx.signal, ...(deps.slpWaitMs !== undefined ? { slpWaitMs: deps.slpWaitMs } : {}) },
-  );
-  if (isMinecraftTemplate(rt.template.kind) && rt.server.software !== "velocity" && !r.slp) {
+  let r: { slp: boolean };
+  try {
+    r = await waitForReady(
+      { gateway: deps.gateway, latest: deps.latest, consoleTail: (id) => deps.consoles.tail(id, 5000).lines },
+      rt,
+      { since, timeoutMs: deps.readyTimeoutMs ?? 15 * 60_000, signal: ctx.signal, ...(deps.slpWaitMs !== undefined ? { slpWaitMs: deps.slpWaitMs } : {}) },
+    );
+  } catch (err) {
+    // Persisted with the job state (also on failure) so finalize can record it on the server.
+    if (err instanceof StartupExitError) ctx.state.exit = err.exit;
+    throw err;
+  }
+  if (slpExpected(rt) && !r.slp) {
     await ctx.log("warn", "The server reported ready but no Server List Ping answer arrived (status may be disabled)");
   }
   await deps.state.transition(rt.server.id, "running", { lastStartedAt: new Date(deps.clock.now()) }, { reason: "ready" });
@@ -250,13 +266,18 @@ async function awaitReady(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, r
   ctx.state.gameRules = [];
 }
 
-async function stopWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext, timeoutMs: number): Promise<void> {
+/** Exit bookkeeping columns for a workload status (every crash/exit transition records them). */
+export function exitColumns(st: Pick<WorkloadStatus, "exitCode" | "oomKilled"> | ExitStatus | null | undefined): { lastExitCode: number | null; lastOomKilled: boolean } {
+  return { lastExitCode: st?.exitCode ?? null, lastOomKilled: Boolean(st?.oomKilled) };
+}
+
+async function stopWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext, timeoutMs: number): Promise<WorkloadStatus | null> {
   await requireNode(deps, rt);
   try {
-    await send(deps).send(rt.server.nodeId, "workload.stop", { workloadId: rt.server.id, timeoutMs }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: timeoutMs + 30_000 });
+    return await send(deps).send(rt.server.nodeId, "workload.stop", { workloadId: rt.server.id, timeoutMs }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: timeoutMs + 30_000 });
   } catch (err) {
-    if (err instanceof AgentCommandError && err.code === "NOT_FOUND") return;
-    wrap(err, "workload.stop");
+    if (err instanceof AgentCommandError && err.code === "NOT_FOUND") return null;
+    return wrap(err, "workload.stop");
   }
 }
 
@@ -276,8 +297,17 @@ export async function settleFromRuntime(deps: ServerJobDeps, serverId: string, f
   } catch {
     st = undefined;
   }
-  const to: ServerState = !st ? fallback : st.state === "running" ? "running" : st.state === "restarting" ? "crashed" : (st.exitCode ?? 0) !== 0 ? "crashed" : "stopped";
-  if (!(await deps.state.transition(serverId, to, {}, { reason: "settle" }))) await deps.state.transition(serverId, fallback, {}, { reason: "settle" });
+  const to: ServerState = !st ? fallback : st.state === "running" ? "running" : st.state === "restarting" ? "crashed" : (st.exitCode ?? 0) !== 0 || st.oomKilled ? "crashed" : "stopped";
+  const exited = st && st.state !== "running";
+  const extra = exited ? { ...exitColumns(st), ...(to === "crashed" ? { lastCrashAt: new Date(deps.clock.now()) } : {}) } : {};
+  if (!(await deps.state.transition(serverId, to, extra, { reason: "settle" }))) await deps.state.transition(serverId, fallback, {}, { reason: "settle" });
+}
+
+/** The exit status `awaitReady` stored in the job state when the server exited during start-up. */
+function startupExit(state: Record<string, unknown>): ExitStatus | null {
+  const e = state.exit as Partial<ExitStatus> | undefined;
+  if (!e || typeof e !== "object") return null;
+  return { exitCode: typeof e.exitCode === "number" ? e.exitCode : null, oomKilled: e.oomKilled === true };
 }
 
 async function convertHold(deps: ServerJobDeps, serverId: string): Promise<void> {
@@ -330,12 +360,13 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         await deps.bus.publish({ type: "server.installed", subjectType: "server", subjectId: id, data: { jobId: f.jobId } });
         await deps.bus.publish({ type: "server.provision.completed", subjectType: "server", subjectId: id, data: { jobId: f.jobId } });
       } else {
-        const crashed = f.error?.code === "CRASHED";
+        const crashed = STARTUP_EXIT_CODES.has(f.error?.code ?? "");
+        const exit = startupExit(f.state);
         const [row] = await deps.db.select({ state: servers.state }).from(servers).where(eq(servers.id, id));
         if (row?.state === "starting") {
           await deps.db.update(servers).set({ installedAt: new Date(deps.clock.now()) }).where(eq(servers.id, id));
-          await deps.state.transition(id, crashed ? "crashed" : "stopped", crashed ? { lastCrashAt: new Date(deps.clock.now()) } : {}, { reason: "provision start failed" });
-          if (crashed) await deps.bus.publish({ type: "server.crashed", subjectType: "server", subjectId: id, data: { during: "provision" } });
+          await deps.state.transition(id, crashed ? "crashed" : "stopped", crashed ? { lastCrashAt: new Date(deps.clock.now()), ...exitColumns(exit) } : {}, { reason: f.error?.message ?? "provision start failed" });
+          if (crashed) await deps.bus.publish({ type: "server.crashed", subjectType: "server", subjectId: id, data: { during: "provision", reason: f.error?.code ?? null, exitCode: exit?.exitCode ?? null, oomKilled: exit?.oomKilled ?? false } });
         } else {
           await deps.state.transition(id, "provision_failed", {}, { reason: f.error?.message ?? f.status });
         }
@@ -383,9 +414,10 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
 
   const failSettle = (fallback: ServerState) => async (f: FinalizeContext<{ serverId: string }>) => {
     if (f.status !== "succeeded") {
-      if (f.error?.code === "CRASHED") {
-        await deps.state.transition(f.input.serverId, "crashed", { lastCrashAt: new Date(deps.clock.now()) }, { reason: "crashed during start" });
-        await deps.bus.publish({ type: "server.crashed", subjectType: "server", subjectId: f.input.serverId, data: { during: "start" } });
+      if (STARTUP_EXIT_CODES.has(f.error?.code ?? "")) {
+        const exit = startupExit(f.state);
+        await deps.state.transition(f.input.serverId, "crashed", { lastCrashAt: new Date(deps.clock.now()), ...exitColumns(exit) }, { reason: f.error?.message ?? "crashed during start" });
+        await deps.bus.publish({ type: "server.crashed", subjectType: "server", subjectId: f.input.serverId, data: { during: "start", reason: f.error?.code ?? null, exitCode: exit?.exitCode ?? null, oomKilled: exit?.oomKilled ?? false } });
       } else await settleFromRuntime(deps, f.input.serverId, fallback);
     }
     await deps.state.end(f.input.serverId, f.jobId);
@@ -414,8 +446,8 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         key: "stop",
         label: "Stop the server",
         run: async (ctx) => {
-          await stopWorkload(deps, ctx, await load(ctx.input.serverId), ctx.input.timeoutMs);
-          await deps.state.transition(ctx.input.serverId, "stopped", {}, { reason: "stopped" });
+          const st = await stopWorkload(deps, ctx, await load(ctx.input.serverId), ctx.input.timeoutMs);
+          await deps.state.transition(ctx.input.serverId, "stopped", st ? exitColumns(st) : {}, { reason: "stopped" });
         },
       },
     ],
@@ -434,8 +466,8 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         run: async (ctx) => {
           const rt = await load(ctx.input.serverId);
           if (rt.server.state !== "stopping") return SKIP_STEP;
-          await stopWorkload(deps, ctx, rt, ctx.input.timeoutMs);
-          await deps.state.transition(ctx.input.serverId, "stopped", {}, { reason: "restart" });
+          const st = await stopWorkload(deps, ctx, rt, ctx.input.timeoutMs);
+          await deps.state.transition(ctx.input.serverId, "stopped", st ? exitColumns(st) : {}, { reason: "restart" });
         },
       },
       { key: "prepare", label: "Prepare the container", run: prepareStart },
@@ -457,10 +489,10 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         run: async (ctx) => {
           const rt = await load(ctx.input.serverId);
           await requireNode(deps, rt);
-          await send(deps)
+          const st = await send(deps)
             .send(rt.server.nodeId, "workload.kill", { workloadId: rt.server.id }, { jobId: ctx.jobId, signal: ctx.signal })
             .catch((err: unknown) => wrap(err, "workload.kill"));
-          await deps.state.transition(ctx.input.serverId, "stopped", {}, { reason: "killed" });
+          await deps.state.transition(ctx.input.serverId, "stopped", exitColumns(st), { reason: "killed" });
         },
       },
     ],

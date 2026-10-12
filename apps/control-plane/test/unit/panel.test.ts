@@ -8,6 +8,7 @@ import { isDenied, isSecretBearing, normalizePath, redactForDisplay } from "../.
 import type { Grant, Principal } from "../../src/rbac/authorize.js";
 import { effectiveServerPermissions, escalation, mergeSubuserPermissions, permissionList, type ServerResource } from "../../src/servers/permissions.js";
 import { transitionalStateFor } from "../../src/servers/state.js";
+import { buildWorkloadSpec, diagnoseStartupExit, eggEulaFile, minecraftGame, slpExpected, type ServerRuntimeContext } from "../../src/servers/runtime.js";
 import { OffsetClock } from "../support/clock.js";
 import { authorizedKey, ed25519Key } from "../support/ssh.js";
 
@@ -193,5 +194,59 @@ describe("catalogue safe fetch", () => {
     await expect(f("https://a.example/big")).rejects.toThrow(/exceeds 16 bytes/);
     hops["https://a.example/declared"] = () => ok("x", { headers: { "content-length": "1000" } });
     await expect(f("https://a.example/declared")).rejects.toThrow(/too large/);
+  });
+});
+
+describe("egg runtime (Minecraft-aware)", () => {
+  const ctxFor = (game: "minecraft-java" | "minecraft-proxy" | "other", over: Record<string, unknown> = {}) =>
+    ({
+      server: { id: SRV, nodeId: NODE, dockerImage: "ghcr.io/pterodactyl/yolks:java_21", memoryLimitBytes: 2 * 1024 ** 3, cpuLimitMillicores: null, restartPolicy: { mode: "on-failure", maxRetries: 3, backoffMs: 10_000 }, software: null, location: null, allocationLimit: 0, timezone: "UTC", ...over },
+      template: {
+        key: "egg",
+        kind: "egg",
+        game,
+        features: game === "minecraft-java" ? ["eula"] : [],
+        startup: "java -jar {{SERVER_JARFILE}}",
+        variables: [{ envName: "SERVER_JARFILE", name: "Jar", description: "", defaultValue: "server.jar", userViewable: true, userEditable: true, rules: "required|string" }],
+        startupDone: [")! For help, type "],
+        stop: { type: "command", command: "stop" },
+        runtime: { dataMountPath: "/home/container", readOnlyRootfs: false },
+        configFiles: [],
+      },
+      allocations: [{ id: "a", nodeId: NODE, ip: "10.0.0.5", port: 25570, isPrimary: true, serverId: SRV }],
+      values: {},
+    }) as unknown as ServerRuntimeContext;
+
+  it("sends the game (not the runtime) as the workload kind and enables the JVM probe for Minecraft eggs", () => {
+    expect(buildWorkloadSpec(ctxFor("minecraft-java"))).toMatchObject({ kind: "minecraft", jvmProbe: true, entrypoint: "image" });
+    expect(buildWorkloadSpec(ctxFor("minecraft-proxy"))).toMatchObject({ kind: "velocity", jvmProbe: true });
+    expect(buildWorkloadSpec(ctxFor("other"))).toMatchObject({ kind: "generic", jvmProbe: false });
+    expect(minecraftGame(ctxFor("minecraft-proxy"))).toBe("proxy");
+    expect(slpExpected(ctxFor("minecraft-java"))).toBe(true);
+    expect(slpExpected(ctxFor("minecraft-proxy"))).toBe(false);
+    expect(slpExpected(ctxFor("other"))).toBe(false);
+  });
+
+  it("diagnoses start-up exits from the console without echoing it", () => {
+    const st = { workloadId: SRV, exists: true, state: "exited" as const, exitCode: 1, restartCount: 0 };
+    const line = (l: string, ts = 2000) => ({ seq: 1, ts, stream: "stdout" as const, line: l });
+    const java = diagnoseStartupExit(
+      ctxFor("minecraft-java"),
+      st,
+      [line("Error: java.lang.UnsupportedClassVersionError: io/papermc/paperclip/Main has been compiled by a more recent version of the Java Runtime (class file version 69.0), this version of the Java Runtime only recognizes class file versions up to 65.0")],
+      1000,
+    );
+    expect(java).toMatchObject({ code: "JAVA_VERSION_MISMATCH", message: "the server needs Java 25 or newer but the image provides Java 21; choose a newer Java image (exit code 1)", exit: { exitCode: 1, oomKilled: false } });
+    expect(diagnoseStartupExit(ctxFor("minecraft-java"), st, [line("[12:00:00] [Server thread/WARN]: **** FAILED TO BIND TO PORT!")], 1000).code).toBe("PORT_BIND_FAILED");
+    // Output of an earlier run, system lines and non-Minecraft eggs are not classified.
+    expect(diagnoseStartupExit(ctxFor("minecraft-java"), st, [line("[12:00:00] [Server thread/WARN]: **** FAILED TO BIND TO PORT!", 500)], 1000).code).toBe("CRASHED");
+    expect(diagnoseStartupExit(ctxFor("other"), st, [line("[12:00:00] [Server thread/WARN]: **** FAILED TO BIND TO PORT!")], 1000).code).toBe("CRASHED");
+    expect(diagnoseStartupExit(ctxFor("other"), { ...st, exitCode: 137, oomKilled: true }, [], 0)).toMatchObject({ code: "OOM_KILLED", exit: { exitCode: 137, oomKilled: true } });
+    expect(diagnoseStartupExit(ctxFor("other"), { ...st, exitCode: undefined }, [], 0).message).toBe("the server exited during start-up");
+  });
+
+  it("formats eula.txt for eggs", () => {
+    expect(eggEulaFile(new Date("2026-10-12T10:00:00.000Z"), "alice")).toBe("#accepted via BlockForge 2026-10-12T10:00:00.000Z by alice\neula=true\n");
+    expect(eggEulaFile(new Date(0), "a\nb")).toBe("#accepted via BlockForge 1970-01-01T00:00:00.000Z by a b\neula=true\n");
   });
 });

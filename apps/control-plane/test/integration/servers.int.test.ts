@@ -164,8 +164,9 @@ describe("Minecraft server lifecycle (Paper via the catalogue, simulated node)",
     const created = (await owner.post("/servers", paperRequest(templateId))).json() as { server: Server; jobId: string };
     const job = await waitJob(owner, created.jobId);
     expect(job.status).toBe("failed");
-    expect(job.error).toMatchObject({ code: "CRASHED" });
+    expect(job.error).toMatchObject({ code: "CRASHED", message: "the server exited during start-up (exit code 1)" });
     expect(await serverState(owner, created.server.id)).toBe("crashed");
+    expect(Server.parse((await owner.get(`/servers/${created.server.id}`)).json()).lastExitCode).toBe(1);
 
     // Egg with a failing install script.
     const imported = await owner.post("/templates/import", { egg: eggFixture("ptero-egg-vanilla-minecraft.json"), category: "Minecraft" });
@@ -177,7 +178,7 @@ describe("Minecraft server lifecycle (Paper via the catalogue, simulated node)",
       templateId: imported.json().template.id,
       placement: { mode: "node", nodeId: node.nodeId },
       memoryLimitBytes: 2 * 1024 ** 3,
-      egg: { variables: { VANILLA_VERSION: "1.21.11" } },
+      egg: { variables: { VANILLA_VERSION: "1.21.11" }, acceptEula: true },
     });
     expect(egg.statusCode, egg.body).toBe(202);
     const failed = await waitJob(owner, egg.json().jobId);
@@ -248,6 +249,110 @@ describe("Velocity proxies", () => {
   });
 });
 
+describe("start-up failures", () => {
+  it("names known blockers (EULA, port bind, Java version) and records exit code and OOM kills", async () => {
+    const { t, owner } = await boot();
+    const node = await connectSimNode(t, owner, {
+      agents,
+      sim: { crashOnStart: 0, startupLines: ["[12:00:01] [ServerMain/INFO]: You need to agree to the EULA in order to run the server. Go to eula.txt for more info."] },
+    });
+    const templateId = await templateIdByKey(owner, "minecraft-java");
+    const created = (await owner.post("/servers", paperRequest(templateId))).json() as { server: Server; jobId: string };
+    const job = await waitJob(owner, created.jobId);
+    expect(job.status).toBe("failed");
+    expect(job.error).toMatchObject({ code: "EULA_NOT_ACCEPTED", message: "the server stopped because the Minecraft EULA has not been accepted in eula.txt (exit code 0)" });
+    const s = Server.parse((await owner.get(`/servers/${created.server.id}`)).json());
+    expect(s).toMatchObject({ state: "crashed", lastExitCode: 0 });
+    expect(s.lastCrashAt).not.toBeNull();
+    const { rows: ev } = await testPool().query("SELECT data FROM events WHERE type = 'server.crashed' AND subject_id = $1", [s.id]);
+    expect(ev[0].data).toMatchObject({ during: "provision", reason: "EULA_NOT_ACCEPTED", exitCode: 0, oomKilled: false });
+
+    // Port bind failure on a start.
+    node.sim.options = { crashOnStart: 0, startupLines: ["[12:00:02] [Server thread/WARN]: **** FAILED TO BIND TO PORT!"] };
+    const start = await owner.post(`/servers/${s.id}/actions`, { action: "start" });
+    const failed = await waitJob(owner, start.json().jobId);
+    expect(failed.error).toMatchObject({ code: "PORT_BIND_FAILED" });
+    expect(String((failed.error as { message: string }).message)).toContain("could not bind its port 25565");
+
+    // OOM kill during start-up.
+    node.sim.options = { crashOnStart: 137, oomOnStart: true };
+    const oom = await waitJob(owner, (await owner.post(`/servers/${s.id}/actions`, { action: "start" })).json().jobId);
+    expect(oom.error).toMatchObject({ code: "OOM_KILLED" });
+    const { rows } = await testPool().query("SELECT state, last_exit_code, last_oom_killed FROM servers WHERE id = $1", [s.id]);
+    expect(rows[0]).toEqual({ state: "crashed", last_exit_code: 137, last_oom_killed: true });
+
+    // A normal start, then exits recorded by the reconciler (clean) and by stop/kill.
+    node.sim.options = {};
+    expect((await waitJob(owner, (await owner.post(`/servers/${s.id}/actions`, { action: "start" })).json().jobId)).status).toBe("succeeded");
+    const kill = await waitJob(owner, (await owner.post(`/servers/${s.id}/actions`, { action: "kill" })).json().jobId);
+    expect(kill.status).toBe("succeeded");
+    expect(Server.parse((await owner.get(`/servers/${s.id}`)).json())).toMatchObject({ state: "stopped", lastExitCode: 137 });
+    expect((await waitJob(owner, (await owner.post(`/servers/${s.id}/actions`, { action: "start" })).json().jobId)).status).toBe("succeeded");
+    node.sim.exit(s.id, 0);
+    await poll(async () => (await serverState(owner, s.id)) === "stopped");
+    const { rows: after } = await testPool().query("SELECT last_exit_code, last_oom_killed FROM servers WHERE id = $1", [s.id]);
+    expect(after[0]).toEqual({ last_exit_code: 0, last_oom_killed: false });
+  });
+});
+
+describe("Minecraft eggs", () => {
+  it("requires EULA acceptance, writes eula.txt before the first start and on reinstall, and uses Minecraft readiness + SLP", async () => {
+    const r = await startWithOwner({ background: true, serverJobs: { readyTimeoutMs: 10_000, slpWaitMs: 5000 } });
+    t = r.t;
+    const owner = r.owner;
+    // Velocity-style "Done (…)!" matches the Minecraft readiness parser but not the egg's done string.
+    const node = await connectSimNode(r.t, owner, { agents, sim: { installCreates: { "server.jar": "jar" }, readyLine: "[12:00:00 INFO]: Done (2.5s)!", slpAfterReady: true } });
+    const imported = await owner.post("/templates/import", { egg: eggFixture("ptero-egg-vanilla-minecraft.json"), category: "Minecraft" });
+    const tpl = imported.json().template as { id: string; features: string[]; game: string };
+    expect(tpl).toMatchObject({ game: "minecraft-java" });
+    expect(tpl.features).toContain("eula");
+    const body = { name: "Vanilla", slug: "vanilla", templateId: tpl.id, placement: { mode: "auto" }, memoryLimitBytes: 2 * 1024 ** 3, egg: { variables: { VANILLA_VERSION: "1.21.11" } } };
+
+    const refused = await owner.post("/servers", body);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toMatchObject({ code: "VALIDATION_FAILED", details: { issues: [{ path: "egg.acceptEula" }] } });
+
+    const created = await owner.post("/servers", { ...body, egg: { ...body.egg, acceptEula: true } });
+    expect(created.statusCode, created.body).toBe(202);
+    const id = created.json().server.id as string;
+    const job = await waitJob(owner, created.json().jobId);
+    expect(job.status, JSON.stringify(job)).toBe("succeeded");
+    expect(await serverState(owner, id)).toBe("running");
+
+    const eula = node.sim.read(id, "eula.txt") ?? "";
+    expect(eula).toMatch(/^#accepted via BlockForge \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z by owner\neula=true\n$/);
+    // Written before the server was started.
+    const order = node.agent.commands.map((c) => (c.type === "fs.write" ? `fs.write:${(c.payload as { path: string }).path}` : c.type));
+    expect(order.indexOf("fs.write:eula.txt")).toBeGreaterThan(-1);
+    expect(order.indexOf("fs.write:eula.txt")).toBeLessThan(order.indexOf("workload.start"));
+    const { rows } = await testPool().query("SELECT details FROM audit_events WHERE action = 'server.create' AND target_id = $1", [id]);
+    expect(rows[0].details).toMatchObject({ eulaAccepted: true, eulaAcceptedBy: "owner" });
+    // Ready through the Minecraft parser, then an SLP answer arrived (no "no Server List Ping" warning).
+    const logs = JSON.stringify((await owner.get(`/jobs/${created.json().jobId}/logs`)).json());
+    expect(logs).toContain("eula.txt written");
+    expect(logs).not.toContain("no Server List Ping answer");
+
+    // Plain starts do not rewrite eula.txt; reinstall does.
+    node.sim.put(id, "eula.txt", "eula=false\n");
+    const stop = await owner.post(`/servers/${id}/actions`, { action: "stop" });
+    await waitJob(owner, stop.json().jobId);
+    const start = await owner.post(`/servers/${id}/actions`, { action: "start" });
+    expect((await waitJob(owner, start.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.read(id, "eula.txt")).toBe("eula=false\n");
+    const stop2 = await owner.post(`/servers/${id}/actions`, { action: "stop" });
+    await waitJob(owner, stop2.json().jobId);
+    node.sim.files(id).delete("eula.txt");
+    const re = await owner.post(`/servers/${id}/reinstall`);
+    expect((await waitJob(owner, re.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.read(id, "eula.txt")).toMatch(/by owner\neula=true\n$/);
+
+    // Templates without the eula feature do not need (or write) it.
+    const ts = (await owner.post("/templates/import", { egg: eggFixture("ptero-egg-teamspeak3-server.json"), category: "Voice" })).json().template as { id: string; game: string; features: string[] };
+    expect(ts.game).toBe("other");
+    expect(ts.features).not.toContain("eula");
+  });
+});
+
 describe("egg servers", () => {
   it("installs with the egg script, applies config files before every start and validates variables", async () => {
     const { t, owner } = await boot();
@@ -262,7 +367,7 @@ describe("egg servers", () => {
       templateId: tpl.id,
       placement: { mode: "auto" },
       memoryLimitBytes: 2 * 1024 ** 3,
-      egg: { variables: { SERVER_JARFILE: "../evil.sh" } },
+      egg: { variables: { SERVER_JARFILE: "../evil.sh" }, acceptEula: true },
     });
     expect(bad.statusCode).toBe(400);
     expect(JSON.stringify(bad.json().error.details)).toContain("egg.variables.SERVER_JARFILE");
@@ -273,7 +378,7 @@ describe("egg servers", () => {
       templateId: tpl.id,
       placement: { mode: "auto" },
       memoryLimitBytes: 2 * 1024 ** 3,
-      egg: { dockerImage: "ghcr.io/pterodactyl/yolks:java_21", variables: { VANILLA_VERSION: "1.21.11" } },
+      egg: { dockerImage: "ghcr.io/pterodactyl/yolks:java_21", variables: { VANILLA_VERSION: "1.21.11" }, acceptEula: true },
     });
     expect(created.statusCode, created.body).toBe(202);
     const id = created.json().server.id as string;
@@ -285,7 +390,8 @@ describe("egg servers", () => {
     expect(install).toMatchObject({ image: "ghcr.io/pterodactyl/installers:alpine", entrypoint: "ash" });
     expect(install.env).toMatchObject({ VANILLA_VERSION: "1.21.11", SERVER_JARFILE: "server.jar", SERVER_PORT: "25565", SERVER_MEMORY: "2048" });
     const spec = node.sim.ensured.at(-1)!;
-    expect(spec).toMatchObject({ kind: "generic", image: "ghcr.io/pterodactyl/yolks:java_21", entrypoint: "image" });
+    // The template's game is minecraft-java: SLP status and the JVM probe are enabled for the egg workload.
+    expect(spec).toMatchObject({ kind: "minecraft", jvmProbe: true, image: "ghcr.io/pterodactyl/yolks:java_21", entrypoint: "image" });
     expect(spec.env).toMatchObject({ STARTUP: "java -Xms128M -XX:MaxRAMPercentage=95.0 -jar {{SERVER_JARFILE}}", SERVER_JARFILE: "server.jar" });
     expect(node.sim.read(id, "server.properties")).toMatch(/server-port=25565/);
 

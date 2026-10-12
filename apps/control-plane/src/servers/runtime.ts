@@ -4,6 +4,7 @@ import { applyConfigFileRule, buildEggEnvironment, createDoneMatcher, memoryMiB,
 import {
   buildLaunchSpec,
   buildMinecraftProvisioning,
+  detectLogEvents,
   detectReadiness,
   type JvmPreset,
   type LaunchSpec,
@@ -170,9 +171,12 @@ export type WorkloadSpecInput = CommandPayload<"workload.ensure">;
 export function buildWorkloadSpec(ctx: ServerRuntimeContext, opts: MinecraftProvisionOptions = {}): WorkloadSpecInput {
   if (isMinecraftTemplate(ctx.template.kind)) return minecraftProvisioning(ctx, opts).workload;
   const s = ctx.server;
+  // The agent gates SLP status and port discovery on `kind` (the game, not the runtime), and the JVM
+  // probe works through any yolk entrypoint (JAVA_TOOL_OPTIONS).
+  const game = minecraftGame(ctx);
   return {
     workloadId: s.id,
-    kind: "generic",
+    kind: game === "java" ? "minecraft" : game === "proxy" ? "velocity" : "generic",
     image: s.dockerImage,
     entrypoint: "image",
     command: [],
@@ -187,9 +191,30 @@ export function buildWorkloadSpec(ctx: ServerRuntimeContext, opts: MinecraftProv
     stop: ctx.template.stop,
     stopTimeoutMs: 60_000,
     restartPolicy: s.restartPolicy,
-    jvmProbe: false,
+    jvmProbe: game !== null,
     labels: { "blockforge.server": s.id, "blockforge.template": ctx.template.key },
   };
+}
+
+/** `eula.txt` as written for eggs with the `eula` feature (acceptance recorded at creation). */
+export function eggEulaFile(acceptedAt: Date, acceptedBy: string): string {
+  return `#accepted via BlockForge ${acceptedAt.toISOString()} by ${acceptedBy.replace(/[\r\n]/g, " ")}\neula=true\n`;
+}
+
+/**
+ * Writes eula.txt for an egg server whose template has the `eula` feature and whose EULA was accepted
+ * at creation. Returns false when not applicable.
+ */
+export async function writeEggEula(gateway: AgentGateway, ctx: ServerRuntimeContext, opts: { jobId?: string | null; signal?: AbortSignal }): Promise<boolean> {
+  const s = ctx.server;
+  if (isMinecraftTemplate(ctx.template.kind) || !ctx.template.features.includes("eula") || !s.eulaAcceptedAt || !s.eulaAcceptedBy) return false;
+  await gateway.send(
+    s.nodeId,
+    "fs.write",
+    { workloadId: s.id, path: "eula.txt", content: eggEulaFile(s.eulaAcceptedAt, s.eulaAcceptedBy), encoding: "utf8", createParents: false },
+    { timeoutMs: 30_000, ...opts },
+  );
+  return true;
 }
 
 /** Reads a workload file; null when it does not exist. */
@@ -298,21 +323,113 @@ export interface ReadinessOptions {
  * line (`Done (…)!`) plus a Server List Ping sample from the agent; eggs by their `startupDone`
  * patterns (immediately when the egg defines none). Fails fast when the workload exits.
  */
+/** Minecraft-family game of a server: built-in templates by kind, eggs by the template's `game`. */
+export function minecraftGame(ctx: ServerRuntimeContext): "java" | "proxy" | null {
+  if (ctx.template.kind === "minecraft") return "java";
+  if (ctx.template.kind === "velocity") return "proxy";
+  if (ctx.template.game === "minecraft-java") return "java";
+  if (ctx.template.game === "minecraft-proxy") return "proxy";
+  return null;
+}
+
+/** Whether a Server List Ping answer is expected once the server is ready (Java game servers). */
+export function slpExpected(ctx: ServerRuntimeContext): boolean {
+  return minecraftGame(ctx) === "java" && ctx.server.software !== "velocity";
+}
+
+export interface ExitStatus {
+  exitCode: number | null;
+  oomKilled: boolean;
+}
+
+/** A workload exit during start-up, with the reason when the console shows a known blocker. */
+export class StartupExitError extends JobError {
+  constructor(
+    code: string,
+    message: string,
+    readonly exit: ExitStatus,
+  ) {
+    super(code, message);
+    this.name = "StartupExitError";
+  }
+}
+
+/** Job error codes that mean "the server process exited during start-up" (→ `crashed`). */
+export const STARTUP_EXIT_CODES: ReadonlySet<string> = new Set(["CRASHED", "OOM_KILLED", "EULA_NOT_ACCEPTED", "PORT_BIND_FAILED", "JAVA_VERSION_MISMATCH"]);
+
+/**
+ * Explains an exit during start-up. Minecraft servers often exit cleanly (code 0) on a blocker the
+ * log parsers recognise (EULA not accepted, port bind failure, Java too old); console lines are only
+ * classified, never echoed into the message.
+ */
+export function diagnoseStartupExit(ctx: ServerRuntimeContext, st: WorkloadStatus, lines: readonly ConsoleLine[], since: number): StartupExitError {
+  const exit: ExitStatus = { exitCode: st.exitCode ?? null, oomKilled: Boolean(st.oomKilled) };
+  const code = st.exitCode !== undefined ? ` (exit code ${st.exitCode})` : "";
+  if (exit.oomKilled) {
+    return new StartupExitError("OOM_KILLED", `the server was killed by the out-of-memory killer during start-up (memory limit ${memoryMiB(ctx.server.memoryLimitBytes)} MiB)`, exit);
+  }
+  if (minecraftGame(ctx)) {
+    for (const l of lines) {
+      if (l.ts < since || l.stream === "system") continue;
+      for (const e of detectLogEvents(l.line)) {
+        if (e.type === "eula_required") {
+          return new StartupExitError("EULA_NOT_ACCEPTED", `the server stopped because the Minecraft EULA has not been accepted in eula.txt${code}`, exit);
+        }
+        if (e.type === "port_bind_failed") {
+          const p = primaryAllocationOrNull(ctx);
+          return new StartupExitError(
+            "PORT_BIND_FAILED",
+            `the server could not bind its port${p ? ` ${p.port}` : ""}: it is in use by another process or the server's configuration does not match its allocation${code}`,
+            exit,
+          );
+        }
+        if (e.type === "java_version_mismatch") {
+          const have = e.supportedJava !== null ? `Java ${e.supportedJava}` : "an older Java";
+          return new StartupExitError("JAVA_VERSION_MISMATCH", `the server needs Java ${e.requiredJava} or newer but the image provides ${have}; choose a newer Java image${code}`, exit);
+        }
+      }
+    }
+  }
+  return new StartupExitError("CRASHED", `the server exited during start-up${code}`, exit);
+}
+
+function primaryAllocationOrNull(ctx: ServerRuntimeContext): AllocationRow | null {
+  try {
+    return primaryAllocation(ctx);
+  } catch {
+    return null;
+  }
+}
+
+/** Grace period after an exit for the last console lines to arrive before the exit is diagnosed. */
+const EXIT_DIAGNOSIS_GRACE_MS = 750;
+
+/**
+ * Waits for a started workload to become ready: Minecraft servers (built-in or eggs whose game is
+ * Minecraft) by the Minecraft readiness log line (eggs also by their done strings), other eggs by
+ * their done strings; then, for Java game servers, for a Server List Ping sample. An exit fails with
+ * a {@link StartupExitError}.
+ */
 export async function waitForReady(
   deps: { gateway: AgentGateway; latest: LatestCache; consoleTail: (serverId: string) => ConsoleLine[] },
   ctx: ServerRuntimeContext,
   opts: ReadinessOptions,
 ): Promise<{ slp: boolean }> {
   const serverId = ctx.server.id;
-  const minecraft = isMinecraftTemplate(ctx.template.kind);
-  const matcher = minecraft ? (line: string) => detectReadiness(line) !== null : createDoneMatcher(ctx.template.startupDone);
-  if (!minecraft && ctx.template.startupDone.length === 0) return { slp: false };
+  const game = minecraftGame(ctx);
+  const builtin = isMinecraftTemplate(ctx.template.kind);
+  const done = builtin || ctx.template.startupDone.length === 0 ? null : createDoneMatcher(ctx.template.startupDone);
+  const matcher = (line: string) => (game !== null && detectReadiness(line) !== null) || (done !== null && done(line));
+  if (game === null && done === null) return { slp: false };
   await new Promise<void>((resolve, reject) => {
-    let done = false;
+    let settled = false;
+    let exiting = false;
+    let grace: NodeJS.Timeout | undefined;
     const finish = (err?: Error) => {
-      if (done) return;
-      done = true;
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(grace);
       deps.gateway.off("consoleLines", onLines);
       deps.gateway.off("workloadState", onState);
       opts.signal.removeEventListener("abort", onAbort);
@@ -320,15 +437,18 @@ export async function waitForReady(
       else resolve();
     };
     const check = (lines: readonly ConsoleLine[]) => {
-      if (lines.some((l) => l.ts >= opts.since && l.stream !== "system" && matcher(l.line))) finish();
+      if (!exiting && lines.some((l) => l.ts >= opts.since && l.stream !== "system" && matcher(l.line))) finish();
     };
     const onLines = (id: string, lines: ConsoleLine[]) => {
       if (id === serverId) check(lines);
     };
     const onState = (_nodeId: string, st: WorkloadStatus) => {
-      if (st.workloadId !== serverId) return;
+      if (st.workloadId !== serverId || exiting) return;
       if (st.state === "exited" || st.state === "dead" || st.state === "missing") {
-        finish(new JobError("CRASHED", `the server exited during start-up${st.exitCode !== undefined ? ` (exit code ${st.exitCode})` : ""}`));
+        exiting = true;
+        clearTimeout(timer);
+        grace = setTimeout(() => finish(diagnoseStartupExit(ctx, st, deps.consoleTail(serverId), opts.since)), EXIT_DIAGNOSIS_GRACE_MS);
+        grace.unref();
       }
     };
     const onAbort = () => finish(opts.signal.reason instanceof Error ? opts.signal.reason : new JobError("CANCELLED", "cancelled"));
@@ -347,7 +467,7 @@ export async function waitForReady(
       })
       .catch(() => undefined);
   });
-  if (!minecraft || ctx.server.software === "velocity") return { slp: false };
+  if (!slpExpected(ctx)) return { slp: false };
   const deadline = Date.now() + (opts.slpWaitMs ?? 30_000);
   while (Date.now() < deadline) {
     if (opts.signal.aborted) break;

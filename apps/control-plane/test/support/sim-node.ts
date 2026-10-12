@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import type { CommandBody, FileEntry, WorkloadSpec, WorkloadStatus } from "@blockforge/contracts";
+import type { CommandBody, FileEntry, NodeMetricSample, WorkloadMetricSample, WorkloadSpec, WorkloadStatus } from "@blockforge/contracts";
 import type { AgentCommandType } from "@blockforge/contracts";
-import type { FakeAgent } from "./fake-agent.js";
+import { loadFixture, type FakeAgent } from "./fake-agent.js";
 
 type Entry = { type: "file" | "dir"; data: Buffer; mode: number; mtime: number };
 
@@ -12,6 +12,7 @@ interface SimWorkload {
   startedAt?: number;
   finishedAt?: number;
   restartCount: number;
+  oomKilled?: boolean;
 }
 
 export interface SimOptions {
@@ -19,6 +20,12 @@ export interface SimOptions {
   readyLine?: string | null;
   /** Exit code reported right after `workload.start` (crash during start-up). */
   crashOnStart?: number | null;
+  /** The start-up exit is an OOM kill. */
+  oomOnStart?: boolean;
+  /** Console lines (stdout) printed after `workload.start`, before the ready line or the exit. */
+  startupLines?: string[];
+  /** After the ready line, send a workload metrics sample with Server List Ping status (contracts fixture). */
+  slpAfterReady?: boolean;
   installExitCode?: number;
   /** Files the install container "creates" (path → content). */
   installCreates?: Record<string, string>;
@@ -138,13 +145,17 @@ export class SimNode {
       w.state = "running";
       w.startedAt = Date.now();
       delete w.exitCode;
+      delete w.oomKilled;
       const crash = this.options.crashOnStart;
       const ready = this.options.readyLine === undefined ? DEFAULT_READY_LINE : this.options.readyLine;
+      const startup = this.options.startupLines ?? [];
       setTimeout(() => {
+        if (startup.length) this.agent.logs(id, startup.map((line) => ({ ts: Date.now(), stream: "stdout" as const, line })));
         if (crash !== null && crash !== undefined) {
-          this.exit(id, crash);
+          this.exit(id, crash, true, this.options.oomOnStart ?? false);
         } else if (ready) {
           this.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: ready }]);
+          if (this.options.slpAfterReady) this.sendSlp(id);
         }
       }, 30);
       return this.status(id);
@@ -353,6 +364,7 @@ export class SimNode {
       state: w.state,
       restartCount: w.restartCount,
       image: w.spec.image,
+      ...(w.oomKilled ? { oomKilled: true } : {}),
       ...(w.exitCode !== undefined ? { exitCode: w.exitCode } : {}),
       ...(w.startedAt !== undefined ? { startedAt: w.startedAt } : {}),
       ...(w.finishedAt !== undefined ? { finishedAt: w.finishedAt } : {}),
@@ -360,16 +372,24 @@ export class SimNode {
   }
 
   /** The workload exits (optionally reported as a `workload.state` event, as the agent's Docker watcher does). */
-  exit(workloadId: string, exitCode: number, emit = true): WorkloadStatus {
+  exit(workloadId: string, exitCode: number, emit = true, oomKilled = false): WorkloadStatus {
     const w = this.workloads.get(workloadId);
     if (w) {
       w.state = "exited";
       w.exitCode = exitCode;
+      w.oomKilled = oomKilled;
       w.finishedAt = Date.now();
     }
     const st = this.status(workloadId);
     if (emit) this.agent.send({ t: "event", ts: Date.now(), event: "workload.state", data: st });
     return st;
+  }
+
+  /** A metrics frame whose workload sample carries SLP status (the agent's game probe). */
+  sendSlp(workloadId: string): void {
+    const frame = loadFixture<{ node: NodeMetricSample; workloads: WorkloadMetricSample[] }>("metrics.json");
+    const ts = Date.now();
+    this.agent.metrics({ ...frame.node, ts }, [{ ...frame.workloads[0]!, workloadId, ts }]);
   }
 
   /** Emits a `workload.state` event for the current status. */

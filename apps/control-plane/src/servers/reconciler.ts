@@ -64,7 +64,7 @@ export class ServerReconciler {
         const clean = (st.exitCode ?? 0) === 0 && !oom && st.state !== "missing" && st.state !== "dead";
         if (LIVE.includes(from) && !clean) await this.crash(row.id, st.exitCode ?? null, oom, `workload ${st.state}`);
         else if (from !== "stopped" && from !== "crashed") {
-          await this.state.transition(row.id, "stopped", { lastExitCode: st.exitCode ?? null }, { reason: `workload ${st.state}` });
+          await this.state.transition(row.id, "stopped", { lastExitCode: st.exitCode ?? null, lastOomKilled: oom }, { reason: `workload ${st.state}` });
           if (from === "running" || from === "degraded") await this.db.update(servers).set({ desiredState: "stopped" }).where(eq(servers.id, row.id));
         }
         return;
@@ -79,7 +79,7 @@ export class ServerReconciler {
 
   private async crash(serverId: string, exitCode: number | null, oom: boolean, reason: string): Promise<void> {
     const now = new Date(this.clock.now());
-    if (await this.state.transition(serverId, "crashed", { lastCrashAt: now, lastExitCode: exitCode }, { reason })) {
+    if (await this.state.transition(serverId, "crashed", { lastCrashAt: now, lastExitCode: exitCode, lastOomKilled: oom }, { reason })) {
       await this.bus.publish({ type: "server.crashed", subjectType: "server", subjectId: serverId, data: { exitCode, oomKilled: oom } });
     }
   }

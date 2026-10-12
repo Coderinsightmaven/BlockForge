@@ -15,6 +15,13 @@
       "when": 1791821149508,
       "tag": "0001_phase3_panel",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791826200114,
+      "tag": "0002_phase3_eula_exit",
+      "breakpoints": true
     }
   ]
 }

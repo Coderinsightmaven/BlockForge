@@ -36,7 +36,7 @@ async function setup(): Promise<{ t: TestApp; owner: ApiClient; alice: ApiClient
     startup: "manual",
     placement: { mode: "auto" },
     memoryLimitBytes: 2 * 1024 ** 3,
-    egg: { variables: { VANILLA_VERSION: "1.21.11" } },
+    egg: { variables: { VANILLA_VERSION: "1.21.11" }, acceptEula: true },
   });
   expect(created.statusCode, created.body).toBe(202);
   expect((await waitJob(owner, created.json().jobId)).status).toBe("succeeded");

@@ -68,6 +68,11 @@ export const servers = pgTable(
     lastStartedAt: tsz("last_started_at"),
     lastCrashAt: tsz("last_crash_at"),
     lastExitCode: integer("last_exit_code"),
+    /** The last exit was an OOM kill (recorded with lastExitCode on every crash/exit transition). */
+    lastOomKilled: boolean("last_oom_killed").notNull().default(false),
+    /** Mojang EULA acceptance at creation (Minecraft templates and eggs with the `eula` feature). */
+    eulaAcceptedAt: tsz("eula_accepted_at"),
+    eulaAcceptedBy: text("eula_accepted_by"),
     createdAt: tsz("created_at").notNull().defaultNow(),
     updatedAt: tsz("updated_at").notNull().defaultNow(),
     version: integer("version").notNull().default(1),

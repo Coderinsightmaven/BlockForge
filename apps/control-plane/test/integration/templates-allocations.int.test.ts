@@ -81,7 +81,7 @@ describe("templates", () => {
     const owner = r.owner;
     await connectSimNode(r.t, owner, { agents, sim: { installCreates: { "server.jar": "x" } } });
     const tpl = (await owner.post("/templates/import", { egg: eggFixture("ptero-egg-vanilla-minecraft.json"), category: "Minecraft" })).json().template as { id: string };
-    const created = await owner.post("/servers", { name: "S", slug: "srv-1", templateId: tpl.id, startup: "manual", placement: { mode: "auto" }, memoryLimitBytes: 1024 ** 3, egg: {} });
+    const created = await owner.post("/servers", { name: "S", slug: "srv-1", templateId: tpl.id, startup: "manual", placement: { mode: "auto" }, memoryLimitBytes: 1024 ** 3, egg: { acceptEula: true } });
     expect(created.statusCode, created.body).toBe(202);
     await waitJob(owner, created.json().jobId);
     expect((await owner.delete(`/templates/${tpl.id}`)).statusCode).toBe(409);

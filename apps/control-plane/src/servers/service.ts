@@ -220,7 +220,7 @@ export class ServersService {
         await lockNodeForPlacement(tx, candidate.nodeId);
         const [recheck] = await placementCandidates(tx, this.d.tracker, this.d.clock, { ...req, placement: { mode: "node", nodeId: candidate.nodeId } });
         if (!recheck?.fits) return null;
-        return this.insertServer(tx, after, { serverId, nodeId: candidate.nodeId, req, template, prepared, ownerId, actor, eulaBy: req.minecraft?.acceptEula ? actor.actorName : null });
+        return this.insertServer(tx, after, { serverId, nodeId: candidate.nodeId, req, template, prepared, ownerId, actor, eulaBy: prepared.eulaAccepted ? principal.username : null });
       });
       if (result) {
         chosen = candidate;
@@ -282,6 +282,7 @@ export class ServersService {
         gameplay: mc.gameplay,
         artifactPlan: plan,
         variables: {} as Record<string, string>,
+        eulaAccepted: softwareKind(mc.software) === "game" && mc.acceptEula,
       };
     }
     const egg = req.egg;
@@ -290,6 +291,12 @@ export class ServersService {
     if (!images.length) throw badRequest("The template defines no Docker image");
     const image = egg.dockerImage ?? images[0]!;
     if (!images.includes(image)) throw badRequest("Not one of the template's images", validationDetails("not offered by the template", "egg.dockerImage"));
+    // Minecraft eggs (`eula` feature): acceptance is explicit at creation; eula.txt is then written
+    // during provisioning instead of the server refusing its first start.
+    const needsEula = template.features.includes("eula");
+    if (needsEula && !egg.acceptEula) {
+      throw badRequest("This template requires accepting the Minecraft EULA", validationDetails("the Minecraft EULA must be accepted", "egg.acceptEula"));
+    }
     const admin = roleServerAdminAnywhere(principal);
     const known = new Map(template.variables.map((v) => [v.envName, v]));
     const issues: { path: string; message: string }[] = [];
@@ -317,6 +324,7 @@ export class ServersService {
       gameplay: null,
       artifactPlan: null,
       variables: egg.variables,
+      eulaAccepted: needsEula && egg.acceptEula,
     };
   }
 
@@ -373,6 +381,8 @@ export class ServersService {
       artifactPlan: prepared.artifactPlan,
       startup: req.startup,
       restartPolicy: req.restartPolicy,
+      eulaAcceptedAt: a.eulaBy ? now : null,
+      eulaAcceptedBy: a.eulaBy,
       timezone: req.timezone,
       location: req.location,
       createdAt: now,
@@ -418,6 +428,7 @@ export class ServersService {
           software: prepared.software,
           version: prepared.minecraftVersion,
           eulaAccepted: Boolean(a.eulaBy),
+          ...(a.eulaBy ? { eulaAcceptedBy: a.eulaBy } : {}),
           jobId,
         },
       },
