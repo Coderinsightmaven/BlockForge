@@ -79,7 +79,9 @@ describe.skipIf(!LIVE)("live Modrinth / Mojang smoke tests", () => {
 
   it("Fabric dependencies (Ledger) and Velocity (LuckPerms)", async () => {
     const ledger = await planModrinthInstall(client, { software: "fabric", minecraftVersion: "1.21.1", project: "ledger" });
-    expect(ledger.files.map((f) => f.projectSlug)).toEqual(["fabric-api", "fabric-language-kotlin", "ledger"]);
+    // Modrinth returns dependency entries in no stable order; only "dependencies before dependants" is guaranteed.
+    expect(ledger.files.map((f) => f.projectSlug).sort()).toEqual(["fabric-api", "fabric-language-kotlin", "ledger"]);
+    expect(ledger.files.at(-1)!.projectSlug).toBe("ledger");
     const velocity = await planModrinthInstall(client, { software: "velocity", minecraftVersion: null, project: "luckperms" });
     expect(velocity.files[0]!.destPath).toMatch(/^plugins\/LuckPerms-Velocity-/);
   }, 120_000);

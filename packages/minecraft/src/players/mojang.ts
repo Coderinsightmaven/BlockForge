@@ -37,6 +37,8 @@ export async function lookupMojangProfile(ctx: CatalogContext, name: string): Pr
   // Older API versions answered 204 No Content for unknown names.
   if (text.trim() === "") return null;
   const p = parseJson(text, ProfileSchema, url);
+  // The API matches names case-insensitively; anything else is not the player we asked for.
+  if (p.name.toLowerCase() !== name.toLowerCase()) throw new CatalogError("INVALID_UPSTREAM_RESPONSE", "Mojang returned a different player than requested", { url });
   return { uuid: normalizeUuid(p.id)!, name: p.name, source: "mojang" };
 }
 

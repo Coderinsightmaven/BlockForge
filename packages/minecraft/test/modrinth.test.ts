@@ -233,16 +233,21 @@ describe("Modrinth: install plans (recorded)", () => {
       software: "fabric",
       minecraftVersion: "1.21.1",
       project: "ledger",
-      installed: [
-        { path: "mods/cardboard.jar", projectId: "MLYQ9VGP" },
-        { path: "mods/fabric-api.jar", projectId: "P7dR8mSH" },
-      ],
+      installed: [{ path: "mods/cardboard.jar", projectId: "MLYQ9VGP" }],
     });
     expect(withCardboard.installable).toBe(false);
     expect(withCardboard.warnings).toContainEqual(expect.objectContaining({ code: "INCOMPATIBLE_INSTALLED", level: "error", projectId: "MLYQ9VGP" }));
     expect(withCardboard.warnings.find((w) => w.code === "INCOMPATIBLE_INSTALLED")!.message).toContain("Cardboard");
-    expect(withCardboard.warnings).toContainEqual(expect.objectContaining({ code: "DEPENDENCY_ALREADY_INSTALLED", projectId: "P7dR8mSH" }));
-    expect(withCardboard.files.map((f) => f.projectSlug)).toEqual(["fabric-language-kotlin", "ledger"]);
+
+    // An installed copy of a required dependency that cannot be matched to a Modrinth version blocks the plan (review #5).
+    const unknownCopy = await planModrinthInstall(recorded().client, {
+      software: "fabric",
+      minecraftVersion: "1.21.1",
+      project: "ledger",
+      installed: [{ path: "mods/fabric-api.jar", projectId: "P7dR8mSH" }],
+    });
+    expect(unknownCopy.warnings).toContainEqual(expect.objectContaining({ code: "DEPENDENCY_INSTALLED_UNKNOWN", level: "error", projectId: "P7dR8mSH" }));
+    expect(unknownCopy.installable).toBe(false);
   });
 
   it("Fabric: client-only mods (Iris + Sodium) are flagged", async () => {
@@ -454,7 +459,7 @@ describe("Modrinth: dependency resolution edge cases (synthetic upstream)", () =
       "OPTIONAL_DEPENDENCY:info:OPTL",
       "UNKNOWN_DEPENDENCY_TYPE:info:WEIR",
     ]));
-    expect(plan.optionalDependencies).toEqual([{ projectId: "OPTL", slug: "optl", title: "Title OPTL", requiredBy: "ROOT" }]);
+    expect(plan.optionalDependencies).toEqual([{ projectId: "OPTL", versionId: null, slug: "optl", title: "Title OPTL", requiredBy: "ROOT" }]);
     expect(plan.installable).toBe(false);
     expect(plan.warnings.find((w) => w.code === "DEPENDENCY_UNRESOLVED")!.message).toContain("Title MISS");
 

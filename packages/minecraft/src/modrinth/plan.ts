@@ -1,18 +1,26 @@
 import type { Checksum, ServerSoftware } from "@blockforge/contracts";
 import { CatalogError } from "../errors.js";
 import { assertAllowedUrl } from "../http.js";
-import { assertModrinthId, type ModrinthClient, type UpdateFilter, type VersionType } from "./client.js";
+import { MODRINTH_HOSTS, assertModrinthId, type ModrinthClient, type UpdateFilter, type VersionType } from "./client.js";
 import { isClientOnly, loaderMatch, sideSupport, type ModrinthLoaderProfile, type SideSupport } from "./loaders.js";
 import type { ModrinthFileRaw, ModrinthProjectRaw, ModrinthVersionRaw } from "./schemas.js";
 import { assertGameVersion, requireLoaderProfile } from "./search.js";
 
 /** Largest file the agent's `artifact.fetch` accepts. */
 export const MAX_EXTENSION_FILE_BYTES = 2 * 1024 ** 3;
+/** Dependency entries looked at per version; more is treated as hostile/broken metadata. */
+export const MAX_DEPENDENCIES_PER_VERSION = 64;
 
 export type DependencyType = "required" | "optional" | "incompatible" | "embedded" | "unknown";
 
 export function dependencyType(raw: string): DependencyType {
   return raw === "required" || raw === "optional" || raw === "incompatible" || raw === "embedded" ? raw : "unknown";
+}
+
+/** Upstream text for messages: one line, no control/format characters, bounded. */
+export function displayText(value: string, max = 128): string {
+  const s = value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
 /** Proposed DTO: a version as shown in a version picker. */
@@ -30,7 +38,8 @@ export interface ModrinthVersionSummary {
   loaderMatch: "match" | "warning" | "none";
   gameVersionMatch: boolean;
   dependencies: Array<{ type: DependencyType; projectId: string | null; versionId: string | null; fileName: string | null }>;
-  primaryFile: { filename: string; sizeBytes: number; sha1: string; sha512: string | null } | null;
+  /** Null when the version has no installable primary jar (see `primaryJarFile`). */
+  primaryFile: { filename: string; sizeBytes: number; sha1: string; sha512: string } | null;
 }
 
 export interface CompatibilityTarget {
@@ -42,6 +51,7 @@ export interface CompatibilityTarget {
 export interface VersionCompatibility {
   loader: "match" | "warning" | "none";
   gameVersion: boolean;
+  /** Only `status: "listed"` counts; a missing status is treated as unlisted. */
   listed: boolean;
 }
 
@@ -49,15 +59,27 @@ export function versionCompatibility(v: ModrinthVersionRaw, profile: ModrinthLoa
   return {
     loader: loaderMatch(profile, v.loaders),
     gameVersion: !profile.filterGameVersion || minecraftVersion === null || v.game_versions.includes(minecraftVersion),
-    listed: v.status === undefined || v.status === "listed",
+    listed: v.status === "listed",
   };
 }
 
 const TYPE_RANK: Record<string, number> = { release: 0, beta: 1, alpha: 2 };
 
 /**
- * Best version for the server: compatible loader and game version, listed; prefers a full loader
- * match over a warning match, then releases over betas over alphas, then the newest.
+ * Whether a version may be selected automatically (or honoured as a dependency pin): a loader of
+ * the server software, the server's game version, listed, a known version type, and a release
+ * unless prereleases are allowed.
+ */
+export function isSelectableVersion(v: ModrinthVersionRaw, profile: ModrinthLoaderProfile, minecraftVersion: string | null, allowPrerelease = true): boolean {
+  const c = versionCompatibility(v, profile, minecraftVersion);
+  if (c.loader === "none" || !c.gameVersion || !c.listed) return false;
+  if (TYPE_RANK[v.version_type] === undefined) return false;
+  return allowPrerelease || v.version_type === "release";
+}
+
+/**
+ * Best version for the server among the selectable ones; prefers a full loader match over a
+ * warning match, then releases over betas over alphas, then the newest.
  */
 export function pickModrinthVersion(
   versions: readonly ModrinthVersionRaw[],
@@ -66,12 +88,7 @@ export function pickModrinthVersion(
   opts: { allowPrerelease?: boolean } = {},
 ): ModrinthVersionRaw | null {
   const allowPre = opts.allowPrerelease ?? true;
-  const candidates = versions.filter((v) => {
-    const c = versionCompatibility(v, profile, minecraftVersion);
-    if (c.loader === "none" || !c.gameVersion || !c.listed) return false;
-    if (!allowPre && v.version_type !== "release") return false;
-    return TYPE_RANK[v.version_type] !== undefined;
-  });
+  const candidates = versions.filter((v) => isSelectableVersion(v, profile, minecraftVersion, allowPre));
   const time = (v: ModrinthVersionRaw) => {
     const t = Date.parse(v.date_published);
     return Number.isFinite(t) ? t : 0;
@@ -90,34 +107,55 @@ export function pickModrinthVersion(
 
 /** Path separators, Windows-reserved characters, control, format (bidi overrides) and line/paragraph separators. */
 const UNSAFE_FILENAME = /[/\\:*?"<>|\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+/** Windows device names, which stay devices with any extension (`CON.jar`, `nul.txt.jar`). */
+const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])$/i;
 
-/** A Modrinth filename that is safe as a single path component and is a `.jar`. */
+/** A Modrinth filename that is safe as a single path component on Linux and Windows and is a `.jar`. */
 export function isSafeJarFilename(name: string): boolean {
-  return (
-    name.length >= 5 &&
-    name.length <= 255 &&
-    !UNSAFE_FILENAME.test(name) &&
-    !name.startsWith(".") &&
-    !name.endsWith(" ") &&
-    name.toLowerCase().endsWith(".jar")
-  );
+  if (name.length < 5 || name.length > 255 || UNSAFE_FILENAME.test(name) || name.startsWith(".") || name.endsWith(" ") || name.endsWith(".")) return false;
+  if (!name.toLowerCase().endsWith(".jar")) return false;
+  const stem = name.split(".")[0]!.trimEnd();
+  return !WINDOWS_DEVICE.test(stem);
 }
 
-export type FileProblem = "NO_JAR" | "UNSAFE_FILENAME" | "URL_NOT_ALLOWED" | "TOO_LARGE";
+/**
+ * An installed extension path this library may ask the agent to delete/replace:
+ * `<installDir>/<safe jar name>` (also `….jar.disabled`), nothing else.
+ */
+export function isSafeInstalledExtensionPath(path: string, installDir: "plugins" | "mods"): boolean {
+  if (!path.startsWith(`${installDir}/`)) return false;
+  let name = path.slice(installDir.length + 1);
+  if (name.toLowerCase().endsWith(".jar.disabled")) name = name.slice(0, -".disabled".length);
+  return isSafeJarFilename(name);
+}
 
-/** Primary `.jar` of a version (the only jar when none is flagged primary), validated. */
-export function primaryJarFile(v: ModrinthVersionRaw, cdnHosts: readonly string[]): { file: ModrinthFileRaw } | { problem: FileProblem } {
-  const jars = v.files.filter((f) => f.filename.toLowerCase().endsWith(".jar"));
-  const file = v.files.find((f) => f.primary && jars.includes(f)) ?? (jars.length === 1 ? jars[0] : undefined) ?? jars.find((f) => f.file_type === null || f.file_type === undefined);
-  if (!file) return { problem: "NO_JAR" };
+export type FileProblem = "NO_JAR" | "UNSAFE_FILENAME" | "URL_NOT_ALLOWED" | "TOO_LARGE" | "NO_SHA512";
+
+export interface InstallableFile {
+  file: ModrinthFileRaw;
+  /** WHATWG-normalised URL that passed the CDN allowlist (store this, never the raw string). */
+  url: string;
+  sha512: string;
+}
+
+/**
+ * The file Modrinth's download button serves — the one flagged `primary`, or the only file of a
+ * single-file version — provided it is an installable jar: safe filename, cdn.modrinth.com URL,
+ * ≤ 2 GiB and a SHA-512 (the agent verifies every download with it). No fallback to other jars.
+ */
+export function primaryJarFile(v: ModrinthVersionRaw, cdnHosts: readonly string[]): InstallableFile | { problem: FileProblem } {
+  const file = v.files.find((f) => f.primary) ?? (v.files.length === 1 ? v.files[0] : undefined);
+  if (!file || !file.filename.toLowerCase().endsWith(".jar")) return { problem: "NO_JAR" };
   if (!isSafeJarFilename(file.filename)) return { problem: "UNSAFE_FILENAME" };
+  let url: string;
   try {
-    assertAllowedUrl(file.url, cdnHosts, "artifact");
+    url = assertAllowedUrl(file.url, cdnHosts, "artifact").href;
   } catch {
     return { problem: "URL_NOT_ALLOWED" };
   }
   if (file.size > MAX_EXTENSION_FILE_BYTES) return { problem: "TOO_LARGE" };
-  return { file };
+  if (!file.hashes.sha512) return { problem: "NO_SHA512" };
+  return { file, url, sha512: file.hashes.sha512 };
 }
 
 export function summarizeVersion(v: ModrinthVersionRaw, profile: ModrinthLoaderProfile, minecraftVersion: string | null, cdnHosts: readonly string[]): ModrinthVersionSummary {
@@ -135,13 +173,13 @@ export function summarizeVersion(v: ModrinthVersionRaw, profile: ModrinthLoaderP
     gameVersions: v.game_versions,
     loaderMatch: c.loader,
     gameVersionMatch: c.gameVersion,
-    dependencies: v.dependencies.map((d) => ({
+    dependencies: v.dependencies.slice(0, MAX_DEPENDENCIES_PER_VERSION).map((d) => ({
       type: dependencyType(d.dependency_type),
       projectId: d.project_id ?? null,
       versionId: d.version_id ?? null,
-      fileName: d.file_name ?? null,
+      fileName: d.file_name ? displayText(d.file_name) : null,
     })),
-    primaryFile: "file" in f ? { filename: f.file.filename, sizeBytes: f.file.size, sha1: f.file.hashes.sha1, sha512: f.file.hashes.sha512 ?? null } : null,
+    primaryFile: "file" in f ? { filename: f.file.filename, sizeBytes: f.file.size, sha1: f.file.hashes.sha1, sha512: f.sha512 } : null,
   };
 }
 
@@ -190,13 +228,16 @@ export type PlanWarningCode =
   | "ALREADY_INSTALLED"
   | "REPLACES_INSTALLED"
   | "FILE_CONFLICT"
+  | "UNSAFE_INSTALLED_PATH"
   | "INCOMPATIBLE_INSTALLED"
   | "INCOMPATIBLE_IN_PLAN"
   | "DEPENDENCY_UNRESOLVED"
   | "DEPENDENCY_EXTERNAL_FILE"
   | "DEPENDENCY_LIMIT"
   | "DEPENDENCY_PIN_IGNORED"
+  | "DEPENDENCY_PIN_CONFLICT"
   | "DEPENDENCY_ALREADY_INSTALLED"
+  | "DEPENDENCY_INSTALLED_UNKNOWN"
   | "OPTIONAL_DEPENDENCY"
   | "EMBEDDED_DEPENDENCY"
   | "UNKNOWN_DEPENDENCY_TYPE"
@@ -207,6 +248,7 @@ export type PlanWarningCode =
 export interface PlanWarning {
   code: PlanWarningCode;
   level: "info" | "warning" | "error";
+  /** Built from upstream text via `displayText` (single line, bounded). */
   message: string;
   projectId: string | null;
   versionId: string | null;
@@ -226,16 +268,16 @@ export interface ModrinthPlannedFile {
   versionType: string;
   loaders: string[];
   filename: string;
-  /** cdn.modrinth.com URL. */
+  /** Normalised cdn.modrinth.com URL. */
   url: string;
   sizeBytes: number;
   sha1: string;
-  sha512: string | null;
-  /** Checksum for `artifact.fetch` (SHA-512, SHA-1 only when Modrinth has no SHA-512). */
+  sha512: string;
+  /** Checksum for `artifact.fetch` (always SHA-512). */
   checksum: Checksum;
   /** `plugins/<filename>` or `mods/<filename>`. */
   destPath: string;
-  /** Installed files of the same project to delete after a successful fetch (update/downgrade). */
+  /** Installed files of the same project to delete after a successful fetch (safe `<dir>/<jar>` paths only). */
   replaces: string[];
 }
 
@@ -249,8 +291,11 @@ export interface ModrinthInstallPlan {
   files: ModrinthPlannedFile[];
   /** Planned files whose exact bytes are already on the server (not re-fetched). */
   alreadyInstalled: Array<{ projectId: string; versionId: string; path: string }>;
-  /** Optional dependencies that are neither installed nor planned (offer them in the UI). */
-  optionalDependencies: Array<{ projectId: string; slug: string | null; title: string | null; requiredBy: string }>;
+  /**
+   * Optional dependencies that are neither installed nor planned (offer them in the UI; opt in via
+   * `includeOptional` with the project id, or the version id when only that is known).
+   */
+  optionalDependencies: Array<{ projectId: string | null; versionId: string | null; slug: string | null; title: string | null; requiredBy: string }>;
   warnings: PlanWarning[];
   /** False when any warning has level `error`. */
   installable: boolean;
@@ -261,8 +306,14 @@ export interface ModrinthInstallRequest extends CompatibilityTarget {
   project: string;
   /** Pin a version id; default: best compatible version. */
   versionId?: string | null;
+  /**
+   * Administrator override for an explicit `versionId` that does not list the server's Minecraft
+   * version, is not listed on Modrinth, or is a prerelease while `allowPrerelease` is false — the
+   * plan then carries a warning instead of an error. Default false. Never overrides a wrong loader.
+   */
+  allowIncompatibleVersion?: boolean;
   installed?: readonly InstalledExtensionRef[];
-  /** Optional dependencies (project ids) the administrator opted into. */
+  /** Optional dependencies the administrator opted into (project ids or version ids). */
   includeOptional?: readonly string[];
   /** Default true: fall back to beta/alpha builds when there is no compatible release. */
   allowPrerelease?: boolean;
@@ -289,9 +340,12 @@ function hashesOf(i: InstalledExtensionRef): string[] {
 
 /**
  * Plans the installation of a Modrinth project on a server: picks the version, resolves required
- * dependencies for the same loader/game version (cycle-safe, bounded by `maxFiles`/`maxDepth`),
- * validates every file (cdn.modrinth.com, safe `.jar` filename, size), and reports client-only,
- * incompatible, already-installed and unresolved items.
+ * dependencies for the same loader/game version (cycle-safe; bounded by `maxFiles`, `maxDepth`,
+ * `MAX_DEPENDENCIES_PER_VERSION` and a request budget; version ids are only fetched for
+ * dependencies that are actually selected), honours dependency pins only when they pass the same
+ * listed/type/compatibility policy as automatic selection, flags conflicting pins and installed
+ * versions that do not satisfy them, validates every file (primary jar, cdn.modrinth.com,
+ * SHA-512, safe name, size), and reports client-only, incompatible and unresolved items.
  */
 export async function planModrinthInstall(client: ModrinthClient, req: ModrinthInstallRequest): Promise<ModrinthInstallPlan> {
   const profile = requireLoaderProfile(req.software);
@@ -301,7 +355,9 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
   const includeOptional = new Set(req.includeOptional ?? []);
   const installed = req.installed ?? [];
   const filter = versionFilter(profile, mc);
-  const pickOpts = req.allowPrerelease === undefined ? {} : { allowPrerelease: req.allowPrerelease };
+  const allowPre = req.allowPrerelease ?? true;
+  const selectable = (v: ModrinthVersionRaw) => isSelectableVersion(v, profile, mc, allowPre);
+  let budget = maxFiles * 2 + 16; // dependency API requests (version fetches + version lists)
 
   const warnings: PlanWarning[] = [];
   const warn = (code: PlanWarningCode, level: PlanWarning["level"], message: string, projectId: string | null = null, versionId: string | null = null) => {
@@ -317,110 +373,204 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
 
   const rootProject = await client.getProject(req.project);
   const projects = new Map<string, ModrinthProjectRaw>([[rootProject.id, rootProject]]);
-  const label = (projectId: string) => projects.get(projectId)?.title ?? projectId;
-  const versionCache = new Map<string, ModrinthVersionRaw>();
-  const fetchVersion = async (id: string) => {
-    const hit = versionCache.get(id);
-    if (hit) return hit;
-    const v = await client.getVersion(id);
+  const label = (projectId: string) => displayText(projects.get(projectId)?.title ?? projectId);
+  const vlabel = (v: ModrinthVersionRaw) => displayText(v.version_number, 64);
+  const versionCache = new Map<string, ModrinthVersionRaw | null>();
+  const deferred: Array<() => void> = [];
+  const later = (fn: () => void) => deferred.push(fn);
+  let budgetReported = false;
+  const spend = (): boolean => {
+    if (budget > 0) {
+      budget--;
+      return true;
+    }
+    if (!budgetReported) {
+      budgetReported = true;
+      later(() => warn("DEPENDENCY_LIMIT", "error", "dependency resolution stopped: too many Modrinth requests for one plan", null, null));
+    }
+    return false;
+  };
+  /** Version by id (cached; NOT_FOUND → null; undefined when the request budget is exhausted). */
+  const fetchVersion = async (id: string): Promise<ModrinthVersionRaw | null | undefined> => {
+    if (versionCache.has(id)) return versionCache.get(id)!;
+    if (!spend()) return undefined;
+    let v: ModrinthVersionRaw | null;
+    try {
+      v = await client.getVersion(assertModrinthId(id, "version id"));
+    } catch (err) {
+      if (err instanceof CatalogError && (err.code === "NOT_FOUND" || err.code === "INVALID_ARGUMENT")) v = null;
+      else throw err;
+    }
     versionCache.set(id, v);
     return v;
   };
 
-  const fetchVersionOrNull = async (id: string) => {
-    try {
-      return await fetchVersion(id);
-    } catch (err) {
-      if (err instanceof CatalogError && err.code === "NOT_FOUND") return null;
-      throw err;
-    }
-  };
+  // Installed versions (identification results): needed for pins and incompatibility checks.
+  const installedVersions = new Map<string, ModrinthVersionRaw>();
+  const installedVersionIds = [...new Set(installed.map((i) => i.versionId).filter((id): id is string => !!id))];
+  if (installedVersionIds.length > 0) for (const iv of await client.getVersions(installedVersionIds)) installedVersions.set(iv.id, iv);
 
-  let rootVersion: ModrinthVersionRaw | null;
+  // --- root version
+  let rootVersion: ModrinthVersionRaw;
   if (req.versionId) {
-    rootVersion = await fetchVersion(assertModrinthId(req.versionId, "version id"));
-    if (rootVersion.project_id !== rootProject.id) throw new CatalogError("INVALID_ARGUMENT", "the version does not belong to the project");
-    const c = versionCompatibility(rootVersion, profile, mc);
-    if (c.loader === "none") warn("VERSION_MISMATCH", "error", `${rootProject.title} ${rootVersion.version_number} is not built for ${req.software} (${rootVersion.loaders.join(", ")})`, rootProject.id, rootVersion.id);
-    else if (!c.gameVersion) warn("VERSION_MISMATCH", "warning", `${rootProject.title} ${rootVersion.version_number} does not list Minecraft ${mc}`, rootProject.id, rootVersion.id);
+    const pinned = await client.getVersion(assertModrinthId(req.versionId, "version id"));
+    versionCache.set(pinned.id, pinned);
+    if (pinned.project_id !== rootProject.id) throw new CatalogError("INVALID_ARGUMENT", "the version does not belong to the project");
+    rootVersion = pinned;
+    const c = versionCompatibility(pinned, profile, mc);
+    const overridable = req.allowIncompatibleVersion === true ? "warning" : "error";
+    const what = `${label(rootProject.id)} ${vlabel(pinned)}`;
+    if (c.loader === "none") warn("VERSION_MISMATCH", "error", `${what} is not built for ${req.software} (${displayText(pinned.loaders.join(", "))})`, rootProject.id, pinned.id);
+    else if (!c.gameVersion) warn("VERSION_MISMATCH", overridable, `${what} does not list Minecraft ${mc}`, rootProject.id, pinned.id);
+    if (!c.listed) warn("NOT_LISTED", overridable, `${what} is ${displayText(pinned.status ?? "not listed", 32)} on Modrinth`, rootProject.id, pinned.id);
+    if (!allowPre && pinned.version_type !== "release") warn("PRERELEASE", overridable, `${what} is a ${displayText(pinned.version_type, 16)} build and prereleases are not allowed`, rootProject.id, pinned.id);
   } else {
-    rootVersion = pickModrinthVersion(await client.listVersions(rootProject.id, filter), profile, mc, pickOpts);
-    if (!rootVersion) throw new CatalogError("UNAVAILABLE", `${rootProject.title} has no version for ${req.software}${mc ? ` ${mc}` : ""}`);
+    const picked = pickModrinthVersion(await client.listVersions(rootProject.id, filter), profile, mc, { allowPrerelease: allowPre });
+    if (!picked) throw new CatalogError("UNAVAILABLE", `${label(rootProject.id)} has no version for ${req.software}${mc ? ` ${mc}` : ""}`);
+    rootVersion = picked;
   }
 
   const nodes = new Map<string, Node>();
   const order: Node[] = [];
-  const optional = new Map<string, string>(); // projectId → requiredBy
+  const optional = new Map<string, { projectId: string | null; versionId: string | null; requiredBy: string }>();
   const incompatible: Array<{ by: string; projectId: string }> = [];
   const mentioned = new Set<string>();
-  const deferred: Array<() => void> = [];
-  const later = (fn: () => void) => deferred.push(fn);
 
-  const resolveDependency = async (projectId: string, pinned: string | null): Promise<ModrinthVersionRaw | null> => {
-    if (pinned) {
-      const v = await fetchVersionOrNull(pinned);
-      if (v) {
-        const c = versionCompatibility(v, profile, mc);
-        if (v.project_id === projectId && c.loader !== "none" && c.gameVersion) return v;
-      }
-      const pinnedLabel = v ? v.version_number : pinned;
-      later(() => warn("DEPENDENCY_PIN_IGNORED", "info", `the pinned version ${pinnedLabel} of ${label(projectId)} does not fit this server; using the newest compatible version instead`, projectId, pinned));
-    }
-    return pickModrinthVersion(await client.listVersions(projectId, filter), profile, mc, pickOpts);
+  /** A pinned version honoured only when it belongs to the project and passes the selection policy. */
+  const honourPin = async (projectId: string, pinned: string): Promise<ModrinthVersionRaw | null> => {
+    const pv = await fetchVersion(pinned);
+    if (pv && pv.project_id === projectId && selectable(pv)) return pv;
+    const what = pv && pv.project_id === projectId ? `${vlabel(pv)} (${displayText(pv.version_type, 16)}, ${displayText(pv.status ?? "unlisted", 16)})` : pinned;
+    later(() => warn("DEPENDENCY_PIN_IGNORED", "warning", `the pinned version ${what} of ${label(projectId)} does not fit this server or the release policy; using the newest compatible version instead`, projectId, pinned));
+    return null;
+  };
+
+  const newestCompatible = async (projectId: string): Promise<ModrinthVersionRaw | null> => {
+    if (!spend()) return null;
+    return pickModrinthVersion(await client.listVersions(projectId, filter), profile, mc, { allowPrerelease: allowPre });
   };
 
   const visit = async (node: Node): Promise<void> => {
-    for (const dep of node.version.dependencies) {
+    let deps = node.version.dependencies;
+    if (deps.length > MAX_DEPENDENCIES_PER_VERSION) {
+      const dropped = deps.slice(MAX_DEPENDENCIES_PER_VERSION);
+      const level = dropped.some((d) => dependencyType(d.dependency_type) === "required") ? "error" : "warning";
+      later(() => warn("DEPENDENCY_LIMIT", level, `${label(node.projectId)} ${vlabel(node.version)} declares ${node.version.dependencies.length} dependencies; only the first ${MAX_DEPENDENCIES_PER_VERSION} were considered`, node.projectId, node.version.id));
+      deps = deps.slice(0, MAX_DEPENDENCIES_PER_VERSION);
+    }
+    for (const dep of deps) {
       const type = dependencyType(dep.dependency_type);
       let projectId = dep.project_id ?? null;
-      if (!projectId && dep.version_id) projectId = (await fetchVersionOrNull(dep.version_id))?.project_id ?? null;
-      if (!projectId) {
-        if (dep.file_name && (type === "required" || type === "optional")) {
-          later(() => warn("DEPENDENCY_EXTERNAL_FILE", type === "required" ? "warning" : "info", `${label(node.projectId)} needs a file that is not on Modrinth (${dep.file_name}); install it manually`, node.projectId, node.version.id));
+      const pinned = dep.version_id ?? null;
+      if (type === "unknown") {
+        later(() => warn("UNKNOWN_DEPENDENCY_TYPE", "info", `unknown dependency type "${displayText(dep.dependency_type, 32)}"`, projectId, pinned));
+        continue;
+      }
+      if (type === "embedded") {
+        // Bundled inside the jar: nothing to fetch or install.
+        if (projectId) mentioned.add(projectId);
+        later(() => warn("EMBEDDED_DEPENDENCY", "info", `${label(node.projectId)} bundles ${projectId ? label(projectId) : `version ${pinned ?? "?"}`}; nothing to install`, projectId, pinned));
+        continue;
+      }
+      if (!projectId && !pinned) {
+        const fileName = dep.file_name ? displayText(dep.file_name) : null;
+        if (fileName && (type === "required" || type === "optional")) {
+          later(() => warn("DEPENDENCY_EXTERNAL_FILE", type === "required" ? "warning" : "info", `${label(node.projectId)} needs a file that is not on Modrinth (${fileName}); install it manually`, node.projectId, node.version.id));
         }
         continue;
       }
       if (projectId === node.projectId) continue;
-      mentioned.add(projectId);
-      const wanted = type === "required" || (type === "optional" && includeOptional.has(projectId));
-      if (type === "embedded") {
-        later(() => warn("EMBEDDED_DEPENDENCY", "info", `${label(node.projectId)} bundles ${label(projectId)}; nothing to install`, projectId, dep.version_id ?? null));
+      if (type === "optional" && !((projectId && includeOptional.has(projectId)) || (pinned && includeOptional.has(pinned)))) {
+        // Not selected: record it, fetch nothing.
+        const key = projectId ?? `version:${pinned}`;
+        if (!optional.has(key)) optional.set(key, { projectId, versionId: projectId ? null : pinned, requiredBy: node.projectId });
+        if (projectId) mentioned.add(projectId);
         continue;
       }
       if (type === "incompatible") {
-        incompatible.push({ by: node.projectId, projectId });
+        if (!projectId && pinned) projectId = (await fetchVersion(pinned))?.project_id ?? null;
+        if (projectId) {
+          mentioned.add(projectId);
+          incompatible.push({ by: node.projectId, projectId });
+        } else {
+          later(() => warn("DEPENDENCY_UNRESOLVED", "warning", `${label(node.projectId)} declares an incompatibility with version ${pinned ?? "?"} that could not be looked up`, node.projectId, node.version.id));
+        }
         continue;
       }
-      if (type === "unknown") {
-        later(() => warn("UNKNOWN_DEPENDENCY_TYPE", "info", `unknown dependency type "${dep.dependency_type.slice(0, 32)}"`, projectId, null));
-        continue;
-      }
-      if (!wanted) {
-        if (!installedByProject.has(projectId) && !nodes.has(projectId) && !optional.has(projectId)) optional.set(projectId, node.projectId);
-        continue;
-      }
-      if (installedByProject.has(projectId)) {
-        later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(projectId)}, which is already installed`, projectId, null));
-        continue;
-      }
-      const existing = nodes.get(projectId);
-      if (existing) {
-        if (existing.reason !== "requested") existing.requiredBy.add(node.projectId);
-        continue;
-      }
+
+      // Required, or an optional dependency the administrator opted into.
       const level = type === "required" ? "error" : "warning";
-      if (node.depth + 1 > maxDepth || nodes.size >= maxFiles) {
+      const existing = projectId ? nodes.get(projectId) : undefined;
+      if (!existing && (node.depth + 1 > maxDepth || nodes.size >= maxFiles)) {
         const reached = node.depth + 1 > maxDepth ? `depth ${maxDepth}` : `${maxFiles} files`;
-        later(() => warn("DEPENDENCY_LIMIT", level, `dependency resolution stopped at ${reached}; ${label(projectId)} was not added`, projectId, null));
+        const what = projectId ?? `version ${pinned}`;
+        later(() => warn("DEPENDENCY_LIMIT", level, `dependency resolution stopped at ${reached}; ${projectId ? label(projectId) : what} was not added`, projectId, pinned));
         continue;
       }
-      const v = await resolveDependency(projectId, dep.version_id ?? null);
-      if (!v) {
-        later(() => warn("DEPENDENCY_UNRESOLVED", level, `${label(node.projectId)} needs ${label(projectId)}, which has no version for ${req.software}${mc ? ` ${mc}` : ""}`, projectId, null));
+      if (!projectId) {
+        const pv = await fetchVersion(pinned!);
+        if (!pv) {
+          if (pv === null) later(() => warn("DEPENDENCY_UNRESOLVED", level, `${label(node.projectId)} needs version ${pinned}, which does not exist on Modrinth`, null, pinned));
+          continue;
+        }
+        projectId = pv.project_id;
+        if (projectId === node.projectId) continue;
+      }
+      const pid = projectId;
+      mentioned.add(pid);
+
+      const already = nodes.get(pid);
+      if (already) {
+        if (already.reason !== "requested") already.requiredBy.add(node.projectId);
+        if (pinned && pinned !== already.version.id) {
+          const pv = await fetchVersion(pinned);
+          if (pv && pv.project_id === pid && selectable(pv)) {
+            const chosen = already.version;
+            later(() =>
+              warn(
+                "DEPENDENCY_PIN_CONFLICT",
+                "error",
+                `${label(node.projectId)} requires ${label(pid)} ${vlabel(pv)}, but the plan already uses ${vlabel(chosen)}`,
+                pid,
+                pinned,
+              ),
+            );
+          } else {
+            later(() => warn("DEPENDENCY_PIN_IGNORED", "warning", `${label(node.projectId)} pins ${label(pid)} to ${pv ? vlabel(pv) : pinned}, which does not fit this server; the plan uses ${vlabel(already.version)}`, pid, pinned));
+          }
+        }
         continue;
       }
-      const child: Node = { projectId, version: v, reason: type === "required" ? "dependency" : "optional-dependency", requiredBy: new Set([node.projectId]), depth: node.depth + 1 };
-      nodes.set(projectId, child);
+
+      let chosen: ModrinthVersionRaw | null = pinned ? await honourPin(pid, pinned) : null;
+      const inst = installedByProject.get(pid);
+      if (inst) {
+        const instVersions = inst.map((i) => (i.versionId ? installedVersions.get(i.versionId) : undefined));
+        if (instVersions.some((v) => v === undefined)) {
+          later(() => warn("DEPENDENCY_INSTALLED_UNKNOWN", "error", `${label(node.projectId)} needs ${label(pid)}; the installed copy (${displayText(inst.map((i) => i.path).join(", "))}) cannot be matched to a Modrinth version`, pid, null));
+          continue;
+        }
+        const versions = instVersions as ModrinthVersionRaw[];
+        if (chosen) {
+          if (versions.every((v) => v.id === chosen!.id)) {
+            later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(pid)} ${vlabel(chosen!)}, which is installed`, pid, chosen!.id));
+            continue;
+          }
+          // Installed version differs from the pin: replace it (the file loop fills `replaces`).
+        } else if (versions.every((v) => versionCompatibility(v, profile, mc).loader !== "none" && versionCompatibility(v, profile, mc).gameVersion)) {
+          later(() => warn("DEPENDENCY_ALREADY_INSTALLED", "info", `${label(node.projectId)} needs ${label(pid)}, which is installed (${displayText(versions.map((v) => v.version_number).join(", "))})`, pid, null));
+          continue;
+        } else {
+          later(() => warn("REPLACES_INSTALLED", "warning", `the installed ${label(pid)} does not fit this server and will be replaced`, pid, null));
+        }
+      }
+      chosen ??= await newestCompatible(pid);
+      if (!chosen) {
+        later(() => warn("DEPENDENCY_UNRESOLVED", level, `${label(node.projectId)} needs ${label(pid)}, which has no version for ${req.software}${mc ? ` ${mc}` : ""}`, pid, null));
+        continue;
+      }
+      const child: Node = { projectId: pid, version: chosen, reason: type === "required" ? "dependency" : "optional-dependency", requiredBy: new Set([node.projectId]), depth: node.depth + 1 };
+      nodes.set(pid, child);
       await visit(child);
     }
     order.push(node);
@@ -430,25 +580,22 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
   nodes.set(root.projectId, root);
   await visit(root);
 
-  // Metadata for everything else we mention (titles, client-only flags), one batched request.
+  // Metadata for everything else we mention (titles, client-only flags), batched.
   const missing = [...new Set([...nodes.keys(), ...mentioned])].filter((id) => !projects.has(id));
   if (missing.length > 0) for (const p of await client.getProjects(missing)) projects.set(p.id, p);
   for (const fn of deferred) fn();
 
   // Installed extensions that declare themselves incompatible with something in the plan.
-  const installedVersionIds = [...new Set(installed.map((i) => i.versionId).filter((id): id is string => !!id))];
-  if (installedVersionIds.length > 0) {
-    for (const iv of await client.getVersions(installedVersionIds)) {
-      if (nodes.has(iv.project_id)) continue; // being replaced by the plan
-      for (const d of iv.dependencies) {
-        if (dependencyType(d.dependency_type) === "incompatible" && d.project_id && nodes.has(d.project_id)) incompatible.push({ by: iv.project_id, projectId: d.project_id });
-      }
+  for (const iv of installedVersions.values()) {
+    if (nodes.has(iv.project_id)) continue; // being replaced by the plan
+    for (const d of iv.dependencies.slice(0, MAX_DEPENDENCIES_PER_VERSION)) {
+      if (dependencyType(d.dependency_type) === "incompatible" && d.project_id && nodes.has(d.project_id)) incompatible.push({ by: iv.project_id, projectId: d.project_id });
     }
   }
   for (const { by, projectId } of incompatible) {
     if (installedByProject.has(projectId) || (installedByProject.has(by) && nodes.has(projectId))) {
       const path = (installedByProject.get(projectId) ?? installedByProject.get(by))![0]!.path;
-      warn("INCOMPATIBLE_INSTALLED", "error", `${label(by)} is incompatible with ${label(projectId)} (installed: ${path})`, projectId, null);
+      warn("INCOMPATIBLE_INSTALLED", "error", `${label(by)} is incompatible with ${label(projectId)} (installed: ${displayText(path)})`, projectId, null);
     } else if (nodes.has(projectId) && nodes.has(by)) {
       warn("INCOMPATIBLE_IN_PLAN", "error", `${label(by)} is incompatible with ${label(projectId)}`, projectId, null);
     }
@@ -460,40 +607,45 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
   for (const node of order) {
     const v = node.version;
     const project = projects.get(node.projectId) ?? null;
+    const what = `${label(node.projectId)} ${vlabel(v)}`;
     if (isClientOnly({ serverSide: project?.server_side ?? null, environment: v.environment ?? null })) {
       warn("CLIENT_ONLY", "warning", `${label(node.projectId)} is marked client-side only on Modrinth and may crash or do nothing on a server`, node.projectId, v.id);
     }
     if (loaderMatch(profile, v.loaders) === "warning") {
-      warn("QUILT_ON_FABRIC", "warning", `${label(node.projectId)} ${v.version_number} is built for ${v.loaders.join(", ")}; Fabric cannot load Quilt-only mods`, node.projectId, v.id);
+      warn("QUILT_ON_FABRIC", "warning", `${what} is built for ${displayText(v.loaders.join(", "))}; Fabric cannot load Quilt-only mods`, node.projectId, v.id);
     }
-    if (v.version_type !== "release") warn("PRERELEASE", "info", `${label(node.projectId)} ${v.version_number} is a ${v.version_type} build`, node.projectId, v.id);
-    if (v.status !== undefined && v.status !== "listed") warn("NOT_LISTED", "warning", `${label(node.projectId)} ${v.version_number} is ${v.status} on Modrinth`, node.projectId, v.id);
+    if (v.version_type !== "release") warn("PRERELEASE", "info", `${what} is a ${displayText(v.version_type, 16)} build`, node.projectId, v.id);
 
     const picked = primaryJarFile(v, client.cdnHosts);
     if ("problem" in picked) {
-      warn("NO_INSTALLABLE_FILE", "error", `${label(node.projectId)} ${v.version_number} has no installable jar (${picked.problem})`, node.projectId, v.id);
+      if (picked.problem === "NO_SHA512") warn("NO_SHA512", "error", `${what}: Modrinth publishes no SHA-512 for the file, so the download cannot be verified`, node.projectId, v.id);
+      else warn("NO_INSTALLABLE_FILE", "error", `${what} has no installable primary jar (${picked.problem})`, node.projectId, v.id);
       continue;
     }
     const f = picked.file;
-    const hit = installedHashes.get(f.hashes.sha1) ?? (f.hashes.sha512 ? installedHashes.get(f.hashes.sha512) : undefined);
+    const hit = installedHashes.get(picked.sha512) ?? installedHashes.get(f.hashes.sha1);
     if (hit) {
       alreadyInstalled.push({ projectId: node.projectId, versionId: v.id, path: hit.path });
-      warn("ALREADY_INSTALLED", "info", `${label(node.projectId)} ${v.version_number} is already installed (${hit.path})`, node.projectId, v.id);
+      warn("ALREADY_INSTALLED", "info", `${what} is already installed (${displayText(hit.path)})`, node.projectId, v.id);
       continue;
     }
     const destPath = `${profile.installDir}/${f.filename}`;
     if (destPaths.has(destPath.toLowerCase())) {
-      warn("FILE_CONFLICT", "error", `two planned files are named ${f.filename}`, node.projectId, v.id);
+      warn("FILE_CONFLICT", "error", `two planned files are named ${displayText(f.filename)}`, node.projectId, v.id);
       continue;
     }
     destPaths.add(destPath.toLowerCase());
-    const replaces = (installedByProject.get(node.projectId) ?? []).map((i) => i.path).filter((p) => p !== destPath);
-    if (replaces.length > 0) warn("REPLACES_INSTALLED", "info", `${label(node.projectId)} replaces ${replaces.join(", ")}`, node.projectId, v.id);
+    const replaces: string[] = [];
+    for (const i of installedByProject.get(node.projectId) ?? []) {
+      if (i.path === destPath) continue;
+      if (isSafeInstalledExtensionPath(i.path, profile.installDir)) replaces.push(i.path);
+      else warn("UNSAFE_INSTALLED_PATH", "error", `the installed ${label(node.projectId)} at ${displayText(i.path)} is not a plain ${profile.installDir}/<name>.jar file; remove it manually`, node.projectId, v.id);
+    }
+    if (replaces.length > 0) warn("REPLACES_INSTALLED", "info", `${label(node.projectId)} replaces ${displayText(replaces.join(", "))}`, node.projectId, v.id);
     const clash = installed.find((i) => i.path.toLowerCase() === destPath.toLowerCase() && i.projectId !== node.projectId);
     if (clash) warn("FILE_CONFLICT", "warning", `${destPath} already exists and belongs to another extension; it would be overwritten`, node.projectId, v.id);
-    if (!f.hashes.sha512) warn("NO_SHA512", "info", `${label(node.projectId)} ${v.version_number}: Modrinth has no SHA-512; verifying with SHA-1`, node.projectId, v.id);
     files.push({
-      action: replaces.length > 0 || installedByProject.has(node.projectId) ? "replace" : "install",
+      action: installedByProject.has(node.projectId) ? "replace" : "install",
       reason: node.reason,
       requiredBy: [...node.requiredBy],
       projectId: node.projectId,
@@ -504,20 +656,22 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
       versionType: v.version_type,
       loaders: v.loaders,
       filename: f.filename,
-      url: f.url,
+      url: picked.url,
       sizeBytes: f.size,
       sha1: f.hashes.sha1,
-      sha512: f.hashes.sha512 ?? null,
-      checksum: f.hashes.sha512 ? { algorithm: "sha512", value: f.hashes.sha512 } : { algorithm: "sha1", value: f.hashes.sha1 },
+      sha512: picked.sha512,
+      checksum: { algorithm: "sha512", value: picked.sha512 },
       destPath,
       replaces,
     });
   }
 
-  const optionalDependencies = [...optional]
-    .filter(([id]) => !nodes.has(id) && !installedByProject.has(id))
-    .map(([projectId, requiredBy]) => ({ projectId, slug: projects.get(projectId)?.slug ?? null, title: projects.get(projectId)?.title ?? null, requiredBy }));
-  for (const o of optionalDependencies) warn("OPTIONAL_DEPENDENCY", "info", `${label(o.requiredBy)} can use ${o.title ?? o.projectId} (optional)`, o.projectId, null);
+  const optionalDependencies = [...optional.values()]
+    .filter((o) => !(o.projectId && (nodes.has(o.projectId) || installedByProject.has(o.projectId))))
+    .map((o) => ({ ...o, slug: o.projectId ? (projects.get(o.projectId)?.slug ?? null) : null, title: o.projectId ? (projects.get(o.projectId)?.title ?? null) : null }));
+  for (const o of optionalDependencies) {
+    warn("OPTIONAL_DEPENDENCY", "info", `${label(o.requiredBy)} can use ${o.projectId ? label(o.projectId) : `version ${o.versionId}`} (optional)`, o.projectId, o.versionId);
+  }
 
   return {
     software: req.software,
@@ -532,9 +686,13 @@ export async function planModrinthInstall(client: ModrinthClient, req: ModrinthI
   };
 }
 
-/** `artifact.fetch` payload for a planned file (the control plane adds nothing but the workload id). */
-export function modrinthFetchPayload(file: ModrinthPlannedFile, workloadId: string) {
-  return { workloadId, url: file.url, destPath: file.destPath, checksum: file.checksum, maxBytes: file.sizeBytes, cache: true };
+/**
+ * `artifact.fetch` payload for a planned file (the control plane adds nothing but the workload id).
+ * The URL is re-validated and stored in its normalised form.
+ */
+export function modrinthFetchPayload(file: ModrinthPlannedFile, workloadId: string, cdnHosts: readonly string[] = MODRINTH_HOSTS.cdn) {
+  const url = assertAllowedUrl(file.url, cdnHosts, "artifact").href;
+  return { workloadId, url, destPath: file.destPath, checksum: file.checksum, maxBytes: file.sizeBytes, cache: true };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -569,7 +727,9 @@ function lookupHash(i: InstalledExtensionRef): { algorithm: "sha1" | "sha512"; v
 
 /**
  * Identifies installed jars by hash (`POST /version_files`, SHA-512 preferred, SHA-1 otherwise)
- * and adds project titles (`GET /projects`). Unknown files (uploads, other sources) get `null`.
+ * and adds project titles (`GET /projects`). A response entry only counts when the returned
+ * version really lists the queried hash (`ModrinthClient.versionsFromHashes`). Unknown files
+ * (uploads, other sources) get `null`.
  */
 export async function identifyModrinthFiles(client: ModrinthClient, files: readonly InstalledExtensionRef[]): Promise<IdentifiedFile[]> {
   const byAlg = { sha1: [] as string[], sha512: [] as string[] };
@@ -630,8 +790,9 @@ export function allowedUpdateTypes(currentType: string, allowPrerelease = false)
 /**
  * Update check for installed files (`POST /version_files` + `POST /version_files/update` with the
  * server's loaders, game version and — unless `allowPrerelease` — version types no less stable
- * than the installed one, so a release is never "updated" to a beta). An update is offered only
- * when the newest compatible version differs from and is newer than the installed one.
+ * than the installed one, so a release is never "updated" to a beta). The installed version is
+ * only trusted when it lists the queried hash; the offered update must be a listed, compatible
+ * version of the same project, newer than the installed one, with an installable primary jar.
  * Dependencies of the new version are not resolved here; run `planModrinthInstall` with
  * `versionId` for that.
  */
@@ -668,12 +829,11 @@ export async function checkModrinthUpdates(
   return files.map((f) => {
     const h = lookupHash(f);
     const cur = h ? current.get(h.value) : undefined;
-    let lat = h ? latest.get(h.value) : undefined;
+    let lat = h && cur ? latest.get(h.value) : undefined;
     if (lat && cur && lat.project_id !== cur.project_id) lat = undefined;
     if (lat) {
-      const c = versionCompatibility(lat, profile, mc);
       const types = cur ? allowedUpdateTypes(cur.version_type, opts.allowPrerelease) : undefined;
-      if (c.loader === "none" || !c.gameVersion || (types && !types.includes(lat.version_type as VersionType))) lat = undefined;
+      if (!isSelectableVersion(lat, profile, mc, true) || (types && !types.includes(lat.version_type as VersionType))) lat = undefined;
     }
     const newer = !!(cur && lat && lat.id !== cur.id && (Date.parse(lat.date_published) || 0) > (Date.parse(cur.date_published) || 0));
     let file: ModrinthPlannedFile | null = null;
@@ -681,6 +841,7 @@ export async function checkModrinthUpdates(
     if (newer && lat) {
       const picked = primaryJarFile(lat, client.cdnHosts);
       if ("problem" in picked) problem = picked.problem;
+      else if (!isSafeInstalledExtensionPath(f.path, profile.installDir)) problem = "UNSAFE_FILENAME";
       else {
         const pf = picked.file;
         const destPath = `${profile.installDir}/${pf.filename}`;
@@ -696,11 +857,11 @@ export async function checkModrinthUpdates(
           versionType: lat.version_type,
           loaders: lat.loaders,
           filename: pf.filename,
-          url: pf.url,
+          url: picked.url,
           sizeBytes: pf.size,
           sha1: pf.hashes.sha1,
-          sha512: pf.hashes.sha512 ?? null,
-          checksum: pf.hashes.sha512 ? { algorithm: "sha512", value: pf.hashes.sha512 } : { algorithm: "sha1", value: pf.hashes.sha1 },
+          sha512: picked.sha512,
+          checksum: { algorithm: "sha512", value: picked.sha512 },
           destPath,
           replaces: f.path === destPath ? [] : [f.path],
         };

@@ -61,10 +61,82 @@ export interface ModrinthClientOptions {
   /**
    * When `X-Ratelimit-Remaining` drops to this value or below, `rateLimit.backoffMs` asks callers
    * to wait until the window resets. Default 10 (the public limit is 300 requests/minute per IP).
+   * Ignored when `limiter` is given.
    */
   lowWatermark?: number;
-  /** Clock for the rate-limit window (default `Date.now`). */
+  /** Clock for the rate-limit window (default `Date.now`). Ignored when `limiter` is given. */
   now?: () => number;
+  /**
+   * Rate limiter shared by every client that talks to Modrinth from the same IP (the limit is per
+   * IP, not per client). Default: a private `ModrinthRateLimiter`.
+   */
+  limiter?: ModrinthRateLimiter;
+}
+
+export interface ModrinthRateLimiterOptions {
+  /** Start spacing requests out when this many or fewer remain in the window. Default 10. */
+  lowWatermark?: number;
+  /** Longest wait `acquire` performs; a longer one throws `RATE_LIMITED` instead. Default 2 000 ms. */
+  maxWaitMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Client-side view of Modrinth's `X-Ratelimit-*` window, shareable between clients. Before each
+ * request `acquire` waits when the window is nearly used up (spreading the remaining requests
+ * over the time to reset) or, when the window is exhausted, until it resets; waits longer than
+ * `maxWaitMs` throw `RATE_LIMITED` with `retryAfterMs` instead of blocking the caller.
+ */
+export class ModrinthRateLimiter {
+  private state: ModrinthRateLimit | null = null;
+  private resetAt = 0;
+  private readonly lowWatermark: number;
+  private readonly maxWaitMs: number;
+  private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
+
+  constructor(opts: ModrinthRateLimiterOptions = {}) {
+    this.lowWatermark = opts.lowWatermark ?? 10;
+    this.maxWaitMs = opts.maxWaitMs ?? 2_000;
+    this.now = opts.now ?? Date.now;
+    this.sleep = opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  /** Last observed headers plus the back-off hint (null before the first response). */
+  get current(): ModrinthRateLimit | null {
+    return this.state;
+  }
+
+  /** How long the next request should wait (0 = send now). */
+  waitMs(): number {
+    const st = this.state;
+    if (!st || st.remaining === null) return 0;
+    const left = this.resetAt - this.now();
+    if (left <= 0) return 0;
+    if (st.remaining <= 0) return left;
+    if (st.remaining <= this.lowWatermark) return Math.ceil(left / (st.remaining + 1));
+    return 0;
+  }
+
+  async acquire(url: string): Promise<void> {
+    const wait = this.waitMs();
+    if (wait > this.maxWaitMs) {
+      throw new CatalogError("RATE_LIMITED", "Modrinth rate limit window exhausted", { url, retryAfterMs: Math.max(wait, this.resetAt - this.now()) });
+    }
+    if (wait > 0) await this.sleep(wait);
+    // Count this request against the window until the next response tells us better.
+    if (this.state && this.state.remaining !== null && this.state.remaining > 0) this.state = { ...this.state, remaining: this.state.remaining - 1 };
+  }
+
+  update(headers: Headers, status: number): void {
+    const parsed = parseRateLimit(headers, status, this.lowWatermark);
+    if (parsed.remaining === null && status !== 429) return; // no rate-limit headers: keep the last view
+    this.state = parsed;
+    const resetMs = status === 429 ? parsed.backoffMs : Math.max(1, parsed.resetSeconds ?? 60) * 1000;
+    this.resetAt = this.now() + resetMs;
+    if (status === 429) this.state = { ...parsed, remaining: 0 };
+  }
 }
 
 /** Last observed `X-Ratelimit-*` headers plus a back-off hint. */
@@ -127,6 +199,12 @@ export function parseRateLimit(headers: Headers, status: number, lowWatermark = 
   return { limit, remaining, resetSeconds, backoffMs };
 }
 
+/** Whether a version's files include `hash` under `algorithm` (hash lookups must not be trusted blindly). */
+export function versionHasFileHash(v: ModrinthVersionRaw, hash: string, algorithm: HashAlgorithm): boolean {
+  const h = hash.toLowerCase();
+  return v.files.some((f) => (algorithm === "sha1" ? f.hashes.sha1 : f.hashes.sha512) === h);
+}
+
 const MAX_REDIRECTS = 5;
 const MAX_BATCH = 100;
 
@@ -138,13 +216,15 @@ const MAX_BATCH = 100;
 export class ModrinthClient {
   private readonly opts: ModrinthClientOptions;
   private readonly base: string;
-  private last: ModrinthRateLimit | null = null;
-  private lastAt = 0;
+  private readonly limiter: ModrinthRateLimiter;
 
   constructor(opts: ModrinthClientOptions) {
     if (!USER_AGENT_RE.test(opts.userAgent)) throw new CatalogError("INVALID_ARGUMENT", "a printable ASCII User-Agent is required by Modrinth");
     this.opts = opts;
     this.base = (opts.apiBase ?? MODRINTH_API_BASE).replace(/\/+$/, "");
+    this.limiter =
+      opts.limiter ??
+      new ModrinthRateLimiter({ ...(opts.lowWatermark === undefined ? {} : { lowWatermark: opts.lowWatermark }), ...(opts.now ? { now: opts.now } : {}) });
     assertAllowedUrl(this.base, this.apiHosts);
   }
 
@@ -156,27 +236,15 @@ export class ModrinthClient {
     return this.opts.cdnHosts ?? MODRINTH_HOSTS.cdn;
   }
 
-  /** Rate-limit state of the most recent response (null before the first request). */
+  /** Rate-limit state of the most recent response seen by this client's limiter (null before the first request). */
   get rateLimit(): ModrinthRateLimit | null {
-    return this.last;
+    return this.limiter.current;
   }
 
   url(path: string, query: Record<string, string | undefined> = {}): string {
     const u = new URL(`${this.base}${path}`);
     for (const [k, v] of Object.entries(query)) if (v !== undefined) u.searchParams.set(k, v);
     return u.href;
-  }
-
-  /**
-   * Refuses to send while the last response said the window is exhausted (`remaining: 0`) and
-   * its reset time has not passed — the caller gets `RATE_LIMITED` with the remaining wait.
-   */
-  private checkWindow(url: string): void {
-    const last = this.last;
-    if (!last || last.remaining !== 0) return;
-    const until = this.lastAt + Math.max(1, last.resetSeconds ?? 60) * 1000;
-    const wait = until - (this.opts.now ?? Date.now)();
-    if (wait > 0) throw new CatalogError("RATE_LIMITED", "Modrinth rate limit window exhausted", { url, retryAfterMs: wait });
   }
 
   private async request(method: "GET" | "POST", url: string, body: unknown, notFoundAsNull: boolean): Promise<string | null> {
@@ -186,7 +254,6 @@ export class ModrinthClient {
     const cache = this.opts.cache;
     const NOT_FOUND = "\u0000404";
     const load = async (): Promise<string> => {
-      this.checkWindow(url);
       let current = url;
       let res: Response;
       for (let hop = 0; ; hop++) {
@@ -197,13 +264,13 @@ export class ModrinthClient {
           init.body = bodyText;
         }
         if (this.opts.signal) init.signal = this.opts.signal;
+        await this.limiter.acquire(current);
         try {
           res = await this.opts.fetch(current, init);
         } catch (cause) {
           throw new CatalogError("UPSTREAM_ERROR", `request failed: ${current}`, { url: current, cause });
         }
-        this.last = parseRateLimit(res.headers, res.status, this.opts.lowWatermark);
-        this.lastAt = (this.opts.now ?? Date.now)();
+        this.limiter.update(res.headers, res.status);
         if (res.type === "opaqueredirect") throw new CatalogError("UPSTREAM_ERROR", `upstream redirected and the target cannot be inspected: ${current}`, { url: current });
         if (res.status < 300 || res.status >= 400 || res.status === 304) break;
         // Only follow redirects for GET; a redirected POST would change semantics.
@@ -223,7 +290,7 @@ export class ModrinthClient {
       }
       if (res.status === 429) {
         await res.body?.cancel().catch(() => undefined);
-        throw new CatalogError("RATE_LIMITED", "Modrinth rate limit reached", { url, status: 429, retryAfterMs: this.last?.backoffMs ?? 60_000 });
+        throw new CatalogError("RATE_LIMITED", "Modrinth rate limit reached", { url, status: 429, retryAfterMs: this.limiter.current?.backoffMs ?? 60_000 });
       }
       if (res.status === 404) {
         await res.body?.cancel().catch(() => undefined);
@@ -319,7 +386,8 @@ export class ModrinthClient {
   /** `GET /version_file/{hash}` → the version containing the file, or null when unknown (404). */
   async versionFromHash(hash: string, algorithm: HashAlgorithm): Promise<ModrinthVersionRaw | null> {
     const h = assertHash(hash, algorithm);
-    return this.getJsonOrNull(this.url(`/version_file/${h}`, { algorithm }), ModrinthVersionSchema);
+    const v = await this.getJsonOrNull(this.url(`/version_file/${h}`, { algorithm }), ModrinthVersionSchema);
+    return v && versionHasFileHash(v, h, algorithm) ? v : null;
   }
 
   /** `POST /version_files` → hash → version for the hashes Modrinth knows (batched by 100). */
@@ -331,7 +399,7 @@ export class ModrinthClient {
       const map = await this.postJson(this.url("/version_files"), { hashes: chunk, algorithm }, ModrinthHashMapSchema);
       for (const h of chunk) {
         const v = Object.hasOwn(map, h) ? map[h] : undefined;
-        if (v) out.set(h, v);
+        if (v && versionHasFileHash(v, h, algorithm)) out.set(h, v);
       }
     }
     return out;

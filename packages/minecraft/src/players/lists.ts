@@ -116,17 +116,29 @@ export function assertListText(value: string, what: string): string {
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
-/** IPv4 dotted quad or IPv6 literal (no brackets, ports, zones or CIDR). Returns the canonical form or null. */
+/**
+ * IP address as the server keys IP bans: an IPv4 dotted quad. `IpBanList.getIpFromAddress`
+ * (26.3 bytecode) takes `SocketAddress.toString()`, keeps what follows `/` and cuts at the first
+ * `:` — so IPv6 clients can never match a ban, and IPv4-mapped IPv6 clients arrive as plain IPv4
+ * (Java `Inet4Address`). `::ffff:a.b.c.d` / `::ffff:XXXX:XXXX` are therefore normalised to
+ * `a.b.c.d`; other IPv6 addresses, ports, zones, CIDR and leading zeros are rejected (the
+ * `ban-ip` command argument cannot contain `:` either).
+ */
 export function normalizeIp(input: string): string | null {
   const s = input.trim();
   if (IPV4.test(s)) return s;
   if (!/^[0-9A-Fa-f:.]{2,45}$/.test(s) || !s.includes(":")) return null;
+  let host: string;
   try {
-    const host = new URL(`http://[${s}]/`).hostname;
-    return host.slice(1, -1);
+    host = new URL(`http://[${s}]/`).hostname.slice(1, -1);
   } catch {
     return null;
   }
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+  if (!mapped) return null;
+  const hi = parseInt(mapped[1]!, 16);
+  const lo = parseInt(mapped[2]!, 16);
+  return `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
 }
 
 // --- parse / serialize ------------------------------------------------------------------------
@@ -248,13 +260,19 @@ function rebuild<K extends PlayerListKind>(kind: K, raw: unknown[], issues: stri
   return { kind, entries, raw, issues };
 }
 
-/** Inserts or updates the entry with the same UUID (IP for `banned-ips`), keeping unknown keys. */
-function upsert<K extends PlayerListKind>(doc: PlayerListDocument<K>, fields: Record<string, unknown>): PlayerListDocument<K> {
+/**
+ * Inserts or updates the entry with the same UUID (IP for `banned-ips`), keeping unknown keys;
+ * `remove` lists keys of the old record that the new one must not inherit (e.g. a ban reason).
+ */
+function upsert<K extends PlayerListKind>(doc: PlayerListDocument<K>, fields: Record<string, unknown>, remove: readonly string[] = []): PlayerListDocument<K> {
   const key = keyOf(doc.kind, fields);
   const raw = doc.raw.map((r) => {
     if (!isRecord(r) || keyOf(doc.kind, r) !== key) return r;
     const copy: Record<string, unknown> = {};
-    for (const k of Object.keys(r)) Object.defineProperty(copy, k, { value: r[k], enumerable: true, writable: true, configurable: true });
+    for (const k of Object.keys(r)) {
+      if (remove.includes(k)) continue;
+      Object.defineProperty(copy, k, { value: r[k], enumerable: true, writable: true, configurable: true });
+    }
     for (const [k, v] of Object.entries(fields)) copy[k] = v;
     return copy;
   });
@@ -315,11 +333,12 @@ function banRecord(input: BanInput): Record<string, unknown> {
 }
 
 export function banPlayer(doc: PlayerListDocument<"banned-players">, player: { uuid: string; name: string } & BanInput): PlayerListDocument<"banned-players"> {
-  return upsert(doc, { uuid: assertUuid(player.uuid), name: assertPlayerName(player.name), ...banRecord(player) });
+  // A new ban replaces the whole ban record: no reason given → the old reason must not survive.
+  return upsert(doc, { uuid: assertUuid(player.uuid), name: assertPlayerName(player.name), ...banRecord(player) }, ["reason"]);
 }
 
 export function banIp(doc: PlayerListDocument<"banned-ips">, input: { ip: string } & BanInput): PlayerListDocument<"banned-ips"> {
   const ip = normalizeIp(input.ip);
-  if (!ip) throw new PlayerInputError("invalid IP address");
-  return upsert(doc, { ip, ...banRecord(input) });
+  if (!ip) throw new PlayerInputError("invalid IP address (the server only matches IPv4 bans)");
+  return upsert(doc, { ip, ...banRecord(input) }, ["reason"]);
 }

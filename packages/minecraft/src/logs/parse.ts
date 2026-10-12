@@ -95,12 +95,35 @@ export function stripCommandFeedbackPrefix(message: string): string {
 }
 
 /**
- * The server's own message on a console line — log prefix and formatting removed, 26.3+
- * `System chat: ` prefix removed — or null when the line is player chat (before or after the
- * prefix), so callers can anchor their patterns without letting players forge them.
+ * Logger segments that belong to the server itself. Vanilla, Fabric and Paper print no logger for
+ * Minecraft's own loggers (Paper prints `[Plugin] ` inside the message for everything else);
+ * Forge/NeoForge print `[minecraft/<Class>]` (real lines: `[minecraft/Eula]`, `[minecraft/Main]`);
+ * Velocity's latest.log prints the full class name (`com.velocitypowered.…`). Anything else —
+ * `[EvilMod]`, `[com.evil.Mod]`, `[io.netty…]` — is a mod/plugin/library logger.
  */
-export function consoleMessage(raw: string | ParsedLogLine): string | null {
+export function isServerLogger(logger: string | null): boolean {
+  return logger === null || /^minecraft\/[A-Za-z_$][\w$]{0,63}$/.test(logger) || /^com\.velocitypowered\.[\w$.]{1,200}$/.test(logger);
+}
+
+export interface ConsoleMessageOptions {
+  /** Accept only these levels (e.g. `["info"]` for command feedback). Default: any. */
+  levels?: readonly LogLevel[];
+  /** Accept only these logger segments (`null` = no logger printed). Default: `isServerLogger`. */
+  loggers?: readonly (string | null)[];
+}
+
+/**
+ * The server's own message on a console line — log prefix and formatting removed, 26.3+
+ * `System chat: ` prefix removed — or null when the line cannot be attributed to the server:
+ * no recognised log layout (bare text), a mod/plugin logger (see `isServerLogger`), a level outside
+ * `opts.levels`, or player chat (before or after the prefix). Callers anchor their patterns on
+ * the result, so neither players nor other loggers can forge server output by accident.
+ */
+export function consoleMessage(raw: string | ParsedLogLine, opts: ConsoleMessageOptions = {}): string | null {
   const p = typeof raw === "string" ? parseLogLine(raw) : raw;
+  if (p.layout === "unknown" || p.stackTrace) return null;
+  if (opts.loggers ? !opts.loggers.includes(p.logger) : !isServerLogger(p.logger)) return null;
+  if (opts.levels && (p.level === null || !opts.levels.includes(p.level))) return null;
   if (isChatMessage(p.message)) return null;
   const m = stripCommandFeedbackPrefix(p.message);
   return isChatMessage(m) ? null : m;
@@ -149,13 +172,14 @@ function num(s: string): number {
 export function detectLogEvents(raw: string | ParsedLogLine): LogEvent[] {
   const p = typeof raw === "string" ? parseLogLine(raw) : raw;
   const events: LogEvent[] = [];
-  // 26.3+ logs join/leave broadcasts as "System chat: Steve joined the game".
-  const msg = consoleMessage(p);
-  if (msg === null) return events;
+  // 26.3+ logs join/leave broadcasts as "System chat: Steve joined the game". Server events need
+  // a recognised layout and a server logger; crash indicators below still look at every line.
+  const msg = consoleMessage(p) ?? "";
+  if (isChatMessage(p.message)) return events;
 
   // Readiness: game servers `Done (3.456s)! For help, type "help"`; Velocity `Done (1.55s)!`.
   let m = /^Done \((\d+(?:[.,]\d+)?)s\)!(?: For help, type "help")?/.exec(msg);
-  if (m && p.layout !== "unknown") events.push({ type: "ready", seconds: num(m[1]!) });
+  if (m) events.push({ type: "ready", seconds: num(m[1]!) });
 
   if ((m = new RegExp(String.raw`^${NAME} joined the game$`).exec(msg)) && validName(m[1]!)) events.push({ type: "player_join", name: m[1]! });
   else if ((m = new RegExp(String.raw`^${NAME} \(formerly known as ${NAME}\) joined the game$`).exec(msg)) && validName(m[1]!)) {

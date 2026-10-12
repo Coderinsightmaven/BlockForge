@@ -1,7 +1,8 @@
 import type { ServerSoftware } from "@blockforge/contracts";
 import { consoleMessage } from "../logs/parse.js";
+import { commandFeedbackMessage } from "../logs/save.js";
 import { normalizeIp } from "./lists.js";
-import { PlayerInputError, assertPlayerName, normalizeUuid } from "./uuid.js";
+import { PlayerInputError, assertPlayerName, isValidPlayerName, normalizeUuid } from "./uuid.js";
 
 /**
  * Console command builders for running servers and parsers for their output. Commands are typed
@@ -82,34 +83,45 @@ export interface PlayerListOutput {
   format: "vanilla" | "legacy";
   online: number;
   max: number;
+  /** Only entries that are valid Java Edition names (`[A-Za-z0-9_]{1,16}`). */
   players: OnlinePlayer[];
+  /** Entries dropped because they are not valid player names (offline-mode oddities, forged text). */
+  skipped: number;
 }
 
 export interface VelocityGlistOutput {
   format: "velocity";
   /** From the "N players are currently connected to the proxy." line; null when absent. */
   total: number | null;
-  servers: Array<{ server: string; count: number; players: string[] }>;
+  servers: Array<{ server: string; count: number; players: string[]; skipped: number }>;
 }
 
-/** Server message of a console line (log prefix, formatting and `System chat: ` removed); "" for chat. */
+/**
+ * Command feedback of a console line under the strict rules of `commandFeedbackMessage`
+ * (recognised layout, INFO, server logger, no chat, `System chat: ` removed); "" otherwise.
+ */
 function messageOf(line: string): string {
-  return consoleMessage(line) ?? "";
+  return commandFeedbackMessage(line) ?? "";
 }
 
-const NAME_AND_ID = /^([A-Za-z0-9_]{1,16}) \(([0-9a-fA-F-]{32,36})\)$/;
+const NAME_AND_ID = /^(\S{1,16}) \(([0-9a-fA-F-]{32,36})\)$/;
 
-function splitPlayers(text: string): OnlinePlayer[] {
+/** Splits a ", "-separated name list; entries that are not valid player names are counted, not returned. */
+function splitPlayers(text: string): { players: OnlinePlayer[]; skipped: number } {
   const t = text.trim();
-  if (t === "") return [];
-  const out: OnlinePlayer[] = [];
-  for (const part of t.split(", ")) {
+  const players: OnlinePlayer[] = [];
+  let skipped = 0;
+  if (t === "") return { players, skipped };
+  for (const part of t.split(", ").slice(0, 1000)) {
     const p = part.trim();
+    if (p === "") continue;
     const m = NAME_AND_ID.exec(p);
-    if (m) out.push({ name: m[1]!, uuid: normalizeUuid(m[2]!) });
-    else if (p !== "") out.push({ name: p, uuid: null });
+    const name = m ? m[1]! : p;
+    const uuid = m ? normalizeUuid(m[2]!) : null;
+    if (!isValidPlayerName(name) || (m && uuid === null)) skipped++;
+    else players.push({ name, uuid });
   }
-  return out;
+  return { players, skipped };
 }
 
 // 1.13+: commands.list.players = "There are %s of a max of %s players online: %s"
@@ -127,13 +139,13 @@ export function parsePlayerListOutput(lines: readonly string[]): PlayerListOutpu
     const msg = messageOf(lines[i]!);
     let m = VANILLA_LIST.exec(msg.trimEnd()) ?? VANILLA_LIST.exec(msg);
     if (m) {
-      return { format: "vanilla", online: Number(m[1]), max: Number(m[2]), players: splitPlayers(m[3] ?? "") };
+      return { format: "vanilla", online: Number(m[1]), max: Number(m[2]), ...splitPlayers(m[3] ?? "") };
     }
     m = LEGACY_LIST.exec(msg.trim());
     if (m) {
       const online = Number(m[1]);
       const next = online > 0 && i + 1 < lines.length ? messageOf(lines[i + 1]!) : "";
-      return { format: "legacy", online, max: Number(m[2]), players: splitPlayers(next) };
+      return { format: "legacy", online, max: Number(m[2]), ...splitPlayers(next) };
     }
   }
   return null;
@@ -142,6 +154,7 @@ export function parsePlayerListOutput(lines: readonly string[]): PlayerListOutpu
 export interface WhitelistOutput {
   format: "vanilla" | "legacy";
   players: string[];
+  skipped: number;
 }
 
 // 1.13+: commands.whitelist.list "There are %s whitelisted player(s): %s" / commands.whitelist.none
@@ -154,13 +167,16 @@ const WHITELIST_LEGACY = /^There are (\d+) \(out of \d+ seen\) whitelisted playe
 export function parseWhitelistListOutput(lines: readonly string[]): WhitelistOutput | null {
   for (let i = 0; i < lines.length; i++) {
     const msg = messageOf(lines[i]!).trim();
-    if (WHITELIST_NONE.test(msg)) return { format: "vanilla", players: [] };
+    if (WHITELIST_NONE.test(msg)) return { format: "vanilla", players: [], skipped: 0 };
     let m = WHITELIST_LIST.exec(msg);
-    if (m) return { format: "vanilla", players: splitPlayers(m[2]!).map((p) => p.name) };
+    if (m) {
+      const r = splitPlayers(m[2]!);
+      return { format: "vanilla", players: r.players.map((p) => p.name), skipped: r.skipped };
+    }
     m = WHITELIST_LEGACY.exec(msg);
     if (m) {
-      const next = Number(m[1]) > 0 && i + 1 < lines.length ? messageOf(lines[i + 1]!) : "";
-      return { format: "legacy", players: splitPlayers(next).map((p) => p.name) };
+      const r = splitPlayers(Number(m[1]) > 0 && i + 1 < lines.length ? messageOf(lines[i + 1]!) : "");
+      return { format: "legacy", players: r.players.map((p) => p.name), skipped: r.skipped };
     }
   }
   return null;
@@ -169,21 +185,25 @@ export function parseWhitelistListOutput(lines: readonly string[]): WhitelistOut
 // velocity.command.glist-player-singular/plural
 const GLIST_TOTAL = /^(\d+) players? (?:is|are) currently connected to the proxy\.$/;
 // GlistCommand: "[" + server + "] " + "(" + count + ")" + ": " + names joined by ", "
-const GLIST_SERVER = /^\[([^\]]{1,64})\] \((\d+)\): ?(.*)$/;
+const GLIST_SERVER = /^\[([A-Za-z0-9._-]{1,64})\] \((\d+)\): ?(.*)$/;
 
 /** Parses Velocity `glist` / `glist all` / `glist <server>` output. */
 export function parseVelocityGlist(lines: readonly string[]): VelocityGlistOutput | null {
   let total: number | null = null;
   const servers: VelocityGlistOutput["servers"] = [];
   for (const line of lines) {
-    const msg = messageOf(line).trim();
+    // Velocity's own messages: recognised layout, INFO, no foreign logger.
+    const msg = (consoleMessage(line, { levels: ["info"] }) ?? "").trim();
     const t = GLIST_TOTAL.exec(msg);
     if (t) {
       total = Number(t[1]);
       continue;
     }
     const s = GLIST_SERVER.exec(msg);
-    if (s) servers.push({ server: s[1]!, count: Number(s[2]), players: splitPlayers(s[3] ?? "").map((p) => p.name) });
+    if (s) {
+      const r = splitPlayers(s[3] ?? "");
+      servers.push({ server: s[1]!, count: Number(s[2]), players: r.players.map((p) => p.name), skipped: r.skipped });
+    }
   }
   return total === null && servers.length === 0 ? null : { format: "velocity", total, servers };
 }
@@ -194,9 +214,17 @@ export type CommandFeedback =
   | { action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "kick" | "ban-ip" | "pardon-ip"; ok: true; target: string; reason: string | null }
   | { action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "player"; ok: false; message: string };
 
-type Rule = [RegExp, (m: RegExpExecArray, msg: string) => CommandFeedback];
+type Rule = [RegExp, (m: RegExpExecArray, msg: string) => CommandFeedback | null];
 
-const ok = (action: Extract<CommandFeedback, { ok: true }>["action"], target: string, reason: string | null = null): CommandFeedback => ({ action, ok: true, target, reason });
+const IP_ACTIONS = new Set(["ban-ip", "pardon-ip"]);
+/** Success feedback; null when the captured target is not a valid player name (or IPv4 for IP actions). */
+const ok = (action: Extract<CommandFeedback, { ok: true }>["action"], target: string, reason: string | null = null): CommandFeedback | null => {
+  if (IP_ACTIONS.has(action)) {
+    const ip = normalizeIp(target);
+    return ip === null ? null : { action, ok: true, target: ip, reason };
+  }
+  return isValidPlayerName(target) ? { action, ok: true, target, reason } : null;
+};
 const fail = (action: Extract<CommandFeedback, { ok: false }>["action"]) => (_m: RegExpExecArray, msg: string): CommandFeedback => ({ action, ok: false, message: msg });
 
 /** Success/failure strings of 26.3 (`en_us.json`) and 1.12.2 (`en_us.lang`). */
@@ -224,9 +252,14 @@ const FEEDBACK: Rule[] = [
   [/^(?:That player does not exist|No player was found)$/, fail("player")],
 ];
 
-/** Interprets one console line printed in response to a player command; null if unrelated. */
+/**
+ * Interprets one console line printed in response to a player command; null if unrelated, not
+ * attributable to the server (see `commandFeedbackMessage`), or when the captured target is not a
+ * valid player name / IPv4 address (e.g. a forged `Made @a a server operator`).
+ */
 export function parseCommandFeedback(line: string): CommandFeedback | null {
-  const msg = messageOf(line).trim();
+  const msg = messageOf(line);
+  if (msg === "") return null;
   for (const [re, make] of FEEDBACK) {
     const m = re.exec(msg);
     if (m) return make(m, msg);

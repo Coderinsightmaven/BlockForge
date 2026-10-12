@@ -18,7 +18,7 @@ web-standard globals (`fetch`, `TextEncoder`, Web Crypto) are used.
 | server.properties | `parseProperties` / `serializeProperties` / `getProperties` / `getProperty` / `setProperties` / `updatePropertiesText` (format-preserving), `escapePropertyKey/Value`, `PROPERTY_SCHEMA`, `validateProperties`, `gameplayToProperties` (incl. 1.21.9+ game rules), `platformProperties`, `redactServerProperties` |
 | Launch | `buildLaunchSpec` → `{ image, command, stopCommand, env, heapMaxBytes, javaMajor, warnings }`, `buildInstallerSpec`, `validateJvmArgs`, `defaultHeapBytes`, `AIKAR_FLAGS` |
 | Logs | `parseLogLine`, `detectLogLevel`, `detectLogEvents` (ready, player join/leave/login/uuid/disconnect, Velocity proxy connect/switch/disconnect, crash indicators, Java version mismatch, port bind failure, EULA required, Paper TPS), `detectReadiness`, `detectCrashIndicator`, `parsePaperTps`, `tokenizeFormatting` / `stripFormatting` (`§` codes + ANSI → plain segments with style, never HTML) |
-| Console feedback | `stripCommandFeedbackPrefix` / `consoleMessage` (26.3+ `System chat: ` prefix removed, player chat → null; used by every event, list and feedback parser), `isSaveConfirmation`, `isSaveFailure`, `isSaveOffConfirmation`, `isSaveOnConfirmation` (1.13+ and ≤ 1.12 strings), `parseWhitelistListOutput` |
+| Console feedback | `stripCommandFeedbackPrefix` / `consoleMessage` (26.3+ `System chat: ` prefix removed; null for player chat, bare text, stack lines and non-server loggers — `isServerLogger`: none, Forge/NeoForge `minecraft/<Class>`, Velocity `com.velocitypowered.*`; used by every event, list and feedback parser), strict `isSaveConfirmation`, `isSaveFailure`, `isSaveOffConfirmation`, `isSaveOnConfirmation`, `isSaveProgress`, `createSaveTracker` (INFO + logger none / `minecraft/MinecraftServer` / `minecraft/DedicatedServer`), `parseWhitelistListOutput`; list/feedback targets re-validated as player names / IPv4 |
 | EULA / world | `generateEula`, `isEulaAccepted`, `validateSeed`, `javaStringHashCode`, `validateLevelType`, `validateLevelName`, `WORLD_PRESETS` |
 | Provisioning | `buildMinecraftProvisioning(input)` → `{ downloads (artifact.fetch payloads, cache: true), install (Forge/NeoForge `workload.install` payload) | null, workload: WorkloadSpec, files (server.properties, eula.txt, velocity.toml bind), deferredFiles, gamerules, warnings }`; `setVelocityBind` |
 | Fetch boundary | Every metadata request and redirect hop must be HTTPS on `CATALOG_HOSTS.metadata` (`redirect: "manual"`, max 5 hops); download URLs taken from upstream JSON must be on `CATALOG_HOSTS.artifacts` (`assertAllowedUrl`, `assertArtifactUrl`; override via `CatalogContext.metadataHosts/artifactHosts`). |
@@ -84,11 +84,25 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
 * Version choice: listed, loader + game version match, full loader match over Quilt-only, release
   over beta over alpha, newest. Update checks send `version_types` so a release is never
   "updated" to a beta (`allowPrerelease` overrides).
-* Dependencies: required ones resolved recursively for the same loader/version (pinned
-  `version_id` honoured when compatible), cycle-safe, bounded by `maxFiles` (32) / `maxDepth` (8);
-  `incompatible` against installed or planned projects (both directions, using installed version
-  ids) → error; `embedded` → info; `optional` → offered (`includeOptional` opts in);
-  `file_name`-only deps → manual install warning. Warning levels: `error` blocks (`installable: false`).
+* Selection policy (`isSelectableVersion`): loader + game version match, `status: "listed"` (missing
+  status = unlisted), known type, release unless prereleases are allowed — for automatic picks and
+  for dependency pins (a failing pin → `DEPENDENCY_PIN_IGNORED` + fallback). An explicit root
+  `versionId` outside the policy is an error unless `allowIncompatibleVersion`.
+* Dependencies: required ones resolved recursively for the same loader/version, cycle-safe,
+  bounded by `maxFiles` (32), `maxDepth` (8), 64 entries per version and a per-plan request
+  budget; version ids are only fetched for selected dependencies. Two different valid pins of one
+  project → `DEPENDENCY_PIN_CONFLICT`; an installed dependency must equal the pin (else it is
+  replaced) or, unpinned, be compatible; installed copies without a known version →
+  `DEPENDENCY_INSTALLED_UNKNOWN`. `incompatible` against installed or planned projects (both
+  directions) → error; `embedded` → info; `optional` → offered (`includeOptional` opts in by
+  project or version id); `file_name`-only deps → manual install warning. `error` blocks
+  (`installable: false`).
+* Files: only the primary file (or the only file), which must be a safe `.jar` (no Windows device
+  names), on `cdn.modrinth.com` (normalised href stored), ≤ 2 GiB, with SHA-512 (always the agent
+  checksum). Hash lookups only count when the returned version lists the hash. Search drops hits
+  without a matching loader and client-only hits (`filteredOut`).
+* Rate limits: `ModrinthRateLimiter` (shareable via the `limiter` option) spaces requests when few
+  remain, waits for the reset up to `maxWaitMs` (2 s), otherwise `RATE_LIMITED`.
 
 ## Players
 
@@ -98,7 +112,8 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
   Edit these files while the server is stopped (a running server overwrites them on its next
   change); for a running server use the console commands (`whitelist reload` re-reads only the
   whitelist).
-* Console commands accept only `[A-Za-z0-9_]{1,16}` names and literal IPs; reasons are collapsed to
+* Console commands accept only `[A-Za-z0-9_]{1,16}` names and IPv4 addresses (IPv4-mapped IPv6 is
+  normalised; vanilla `IpBanList` cuts addresses at the first `:`, so IPv6 bans never match); reasons are collapsed to
   one line (control/format/separator characters → spaces, ≤ 200 characters).
 * Output parsers only read the message part of a console line (chat lines `<name> …` never match);
   the control plane should still only parse lines that follow the command it sent.

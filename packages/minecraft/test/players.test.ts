@@ -190,7 +190,11 @@ describe("player list files (byte-exact against Gson output)", () => {
 
   it("IP addresses", () => {
     expect(normalizeIp("203.0.113.7")).toBe("203.0.113.7");
-    expect(normalizeIp("2001:DB8:0:0::1")).toBe("2001:db8::1");
+    // IPv4-mapped IPv6 → the dotted form the server keys bans by; other IPv6 never matches a vanilla ban.
+    expect(normalizeIp("::ffff:127.0.0.1")).toBe("127.0.0.1");
+    expect(normalizeIp("::FFFF:7f00:1")).toBe("127.0.0.1");
+    expect(normalizeIp("2001:DB8:0:0::1")).toBeNull();
+    expect(normalizeIp("::1")).toBeNull();
     for (const bad of ["", "1.2.3", "1.2.3.4:25565", "01.2.3.4", "[::1]", "::1%eth0", "10.0.0.0/8", "example.com", "1.2.3.4 ; stop"]) expect(normalizeIp(bad)).toBeNull();
   });
 
@@ -211,7 +215,8 @@ describe("console commands", () => {
     expect(playerCommands.pardon("Griefer")).toBe("pardon Griefer");
     expect(playerCommands.banIp({ ip: "203.0.113.7" }, "VPN abuse")).toBe("ban-ip 203.0.113.7 VPN abuse");
     expect(playerCommands.banIp({ name: "Griefer" })).toBe("ban-ip Griefer");
-    expect(playerCommands.pardonIp("2001:db8::1")).toBe("pardon-ip 2001:db8::1");
+    expect(playerCommands.pardonIp("::ffff:203.0.113.7")).toBe("pardon-ip 203.0.113.7");
+    expect(() => playerCommands.pardonIp("2001:db8::1")).toThrow(PlayerInputError);
     expect(playerCommands.kick("Notch", "Restarting")).toBe("kick Notch Restarting");
     expect(playerCommands.list({ uuids: true })).toBe("list uuids");
     expect(playerCommands.whitelistReload()).toBe("whitelist reload");
@@ -260,11 +265,11 @@ describe("command output parsing (format strings from the 26.3 / 1.12.2 jars and
   it("vanilla/Paper `list` and `list uuids` (with log prefixes)", () => {
     const names = `Notch, jeb_`;
     const paper = parsePlayerListOutput([`[19:30:01 INFO]: ${fmt(lang["commands.list.players"]!, "2", "20", names)}`]);
-    expect(paper).toEqual({ format: "vanilla", online: 2, max: 20, players: [{ name: "Notch", uuid: null }, { name: "jeb_", uuid: null }] });
+    expect(paper).toEqual({ format: "vanilla", online: 2, max: 20, players: [{ name: "Notch", uuid: null }, { name: "jeb_", uuid: null }], skipped: 0 });
     const withIds = [fmt(lang["commands.list.nameAndId"]!, "Notch", NOTCH), fmt(lang["commands.list.nameAndId"]!, "jeb_", JEB)].join(", ");
     const vanilla = parsePlayerListOutput([`[19:30:01] [Server thread/INFO]: ${fmt(lang["commands.list.players"]!, "2", "20", withIds)}`]);
     expect(vanilla!.players).toEqual([{ name: "Notch", uuid: NOTCH }, { name: "jeb_", uuid: JEB }]);
-    expect(parsePlayerListOutput([`[19:30:01 INFO]: ${fmt(lang["commands.list.players"]!, "0", "20", "")}`])).toEqual({ format: "vanilla", online: 0, max: 20, players: [] });
+    expect(parsePlayerListOutput([`[19:30:01 INFO]: ${fmt(lang["commands.list.players"]!, "0", "20", "")}`])).toEqual({ format: "vanilla", online: 0, max: 20, players: [], skipped: 0 });
   });
 
   it("legacy (≤ 1.12) two-line `list` output", () => {
@@ -275,8 +280,9 @@ describe("command output parsing (format strings from the 26.3 / 1.12.2 jars and
       online: 2,
       max: 20,
       players: [{ name: "Notch", uuid: null }, { name: "jeb_", uuid: null }],
+      skipped: 0,
     });
-    expect(parsePlayerListOutput([fmt(legacy["commands.players.list"]!, "0", "20")])!.players).toEqual([]);
+    expect(parsePlayerListOutput([`[19:30:01] [Server thread/INFO]: ${fmt(legacy["commands.players.list"]!, "0", "20")}`])!.players).toEqual([]);
   });
 
   it("ignores chat lines that imitate the output", () => {
@@ -294,11 +300,15 @@ describe("command output parsing (format strings from the 26.3 / 1.12.2 jars and
       format: "velocity",
       total: 3,
       servers: [
-        { server: "lobby", count: 2, players: ["Notch", "jeb_"] },
-        { server: "survival", count: 1, players: ["Griefer"] },
+        { server: "lobby", count: 2, players: ["Notch", "jeb_"], skipped: 0 },
+        { server: "survival", count: 1, players: ["Griefer"], skipped: 0 },
       ],
     });
-    expect(parseVelocityGlist([mm(velocity["velocity.command.glist-player-singular"]!, "1"), velocity["velocity.command.glist-view-all"]!])).toEqual({ format: "velocity", total: 1, servers: [] });
+    const t = "[19:30:01 INFO]: ";
+    expect(parseVelocityGlist([t + mm(velocity["velocity.command.glist-player-singular"]!, "1"), t + velocity["velocity.command.glist-view-all"]!])).toEqual({ format: "velocity", total: 1, servers: [] });
+    // Bare text or another logger is not Velocity's output.
+    expect(parseVelocityGlist([mm(velocity["velocity.command.glist-player-singular"]!, "1")])).toBeNull();
+    expect(parseVelocityGlist(["[19:30:01 INFO] [com.evil.Plugin]: [lobby] (1): Notch"])).toBeNull();
     expect(parseVelocityGlist(["[19:30:01 INFO]: nothing"])).toBeNull();
   });
 

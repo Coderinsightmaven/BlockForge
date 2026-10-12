@@ -66,7 +66,7 @@ describe.each(formats)("captured %s console lines", (_name, lines) => {
   });
 
   it("`whitelist list` and player errors", () => {
-    expect(parseWhitelistListOutput(lines)).toEqual({ format: "vanilla", players: [] });
+    expect(parseWhitelistListOutput(lines)).toEqual({ format: "vanilla", players: [], skipped: 0 });
     const fb = lines.map((l) => parseCommandFeedback(l)).filter((x) => x !== null);
     expect(fb).toEqual([
       { action: "player", ok: false, message: "That player does not exist" },
@@ -116,9 +116,10 @@ describe("save feedback across versions", () => {
   });
 });
 
-it("a bare message without a recognised log layout is taken as the server's text", () => {
-  expect(isSaveConfirmation("Saved the game")).toBe(true);
-  expect(isSaveConfirmation("System chat: Saved the game")).toBe(true);
+it("bare text without a recognised log layout never confirms (review #1)", () => {
+  expect(isSaveConfirmation("Saved the game")).toBe(false);
+  expect(isSaveConfirmation("System chat: Saved the game")).toBe(false);
+  expect(isSaveFailure("Saving failed: x")).toBe(false);
 });
 
 describe("events and other parsers with the 26.3 prefix", () => {
@@ -150,7 +151,9 @@ describe("events and other parsers with the 26.3 prefix", () => {
     expect(parsePlayerListOutput(["[12:00:00] [Server thread/INFO]: There are 1 of a max of 20 players online: Steve"])!.players).toEqual([{ name: "Steve", uuid: null }]);
     expect(parseCommandFeedback("[12:00:00] [Server thread/INFO]: Made Steve a server operator")).toMatchObject({ action: "op", ok: true });
     expect(parseCommandFeedback("[19:40:00 INFO]: System chat: Made Steve a server operator")).toMatchObject({ action: "op", ok: true, target: "Steve" });
-    expect(parseWhitelistListOutput(["[19:40:00 INFO]: System chat: There are 2 whitelisted player(s): Steve, Alex"])).toEqual({ format: "vanilla", players: ["Steve", "Alex"] });
-    expect(parseWhitelistListOutput(["There are 2 (out of 5 seen) whitelisted players:", "Steve, Alex"])).toEqual({ format: "legacy", players: ["Steve", "Alex"] });
+    expect(parseWhitelistListOutput(["[19:40:00 INFO]: System chat: There are 2 whitelisted player(s): Steve, Alex"])).toEqual({ format: "vanilla", players: ["Steve", "Alex"], skipped: 0 });
+    expect(
+      parseWhitelistListOutput(["[12:00:00] [Server thread/INFO]: There are 2 (out of 5 seen) whitelisted players:", "[12:00:00] [Server thread/INFO]: Steve, Alex"]),
+    ).toEqual({ format: "legacy", players: ["Steve", "Alex"], skipped: 0 });
   });
 });

@@ -43,7 +43,7 @@ export interface ModrinthSearchHit {
   clientSide: SideSupport;
   serverSide: SideSupport;
   clientOnly: boolean;
-  /** "warning" when the project only matches through a loader accepted with a warning (Quilt on Fabric). */
+  /** "warning" when the project only matches through a loader accepted with a warning (Quilt on Fabric). Hits with no matching loader are filtered out. */
   loaderMatch: "match" | "warning";
   dateModified: string;
   latestVersionId: string | null;
@@ -53,7 +53,10 @@ export interface ModrinthSearchResult {
   hits: ModrinthSearchHit[];
   offset: number;
   limit: number;
+  /** Upstream count (before the local filter below). */
   totalHits: number;
+  /** Hits of this page dropped locally: no loader of the server software, or client-only. */
+  filteredOut: number;
 }
 
 /** Loader tags Modrinth uses as categories (from `GET /v2/tag/loader`, 2026-10-12). */
@@ -103,7 +106,10 @@ export function safeIconUrl(url: string | null | undefined, cdnHosts: readonly s
   }
 }
 
-export function mapSearchHit(hit: ModrinthSearchHitRaw, profile: ModrinthLoaderProfile, cdnHosts: readonly string[]): ModrinthSearchHit {
+/** A mapped hit before filtering: `loaderMatch` may still be "none". */
+export type ModrinthSearchHitCandidate = Omit<ModrinthSearchHit, "loaderMatch"> & { loaderMatch: "match" | "warning" | "none" };
+
+export function mapSearchHit(hit: ModrinthSearchHitRaw, profile: ModrinthLoaderProfile, cdnHosts: readonly string[]): ModrinthSearchHitCandidate {
   const loaders = hit.categories.filter((c) => MODRINTH_LOADER_TAGS.includes(c));
   const match = loaderMatch(profile, loaders);
   return {
@@ -122,13 +128,13 @@ export function mapSearchHit(hit: ModrinthSearchHitRaw, profile: ModrinthLoaderP
     clientSide: sideSupport(hit.client_side),
     serverSide: sideSupport(hit.server_side),
     clientOnly: isClientOnly({ serverSide: hit.server_side, environment: hit.environment ?? null }),
-    loaderMatch: match === "warning" ? "warning" : "match",
+    loaderMatch: match,
     dateModified: hit.date_modified,
     latestVersionId: hit.latest_version ?? null,
   };
 }
 
-/** Searches Modrinth for plugins/mods that can run on `software` (client-only projects excluded). */
+/** Searches Modrinth for plugins/mods that can run on `software`; hits without a matching loader and client-only hits are dropped (`filteredOut`). */
 export async function searchModrinth(client: ModrinthClient, q: ModrinthSearchQuery): Promise<ModrinthSearchResult> {
   const profile = requireLoaderProfile(q.software);
   const query = (q.query ?? "").trim();
@@ -140,8 +146,12 @@ export async function searchModrinth(client: ModrinthClient, q: ModrinthSearchQu
   const sort = q.sort ?? "relevance";
   if (!["relevance", "downloads", "follows", "newest", "updated"].includes(sort)) throw new CatalogError("INVALID_ARGUMENT", "invalid sort");
   const res = await client.search({ query, facets: buildModrinthSearchFacets(q), index: sort, offset, limit });
+  // The facets already ask for server-side support and the loaders; re-check locally (upstream data is untrusted).
+  const mapped = res.hits.map((h) => mapSearchHit(h, profile, client.cdnHosts));
+  const hits = mapped.filter((h): h is ModrinthSearchHit => h.loaderMatch !== "none" && !h.clientOnly);
   return {
-    hits: res.hits.map((h) => mapSearchHit(h, profile, client.cdnHosts)),
+    hits,
+    filteredOut: mapped.length - hits.length,
     offset: res.offset,
     limit: res.limit,
     totalHits: res.total_hits,

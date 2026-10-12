@@ -76,12 +76,15 @@ export class ExtensionMetadataError extends Error {
 
 const MAX_STR = 1024;
 const MAX_LIST = 256;
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+/** Line-breaking whitespace (CR, LF, TAB, VT, FF, NEL, LS, PS) — replaced by a space. */
+const LINE_BREAKS = /[\t\n\r\v\f\u0085\u2028\u2029]+/g;
+/** Other control and format (bidi) characters — removed. */
+const CONTROL = /[\p{Cc}\p{Cf}]/gu;
 
 function clean(v: unknown, max = MAX_STR): string | null {
   if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
-    const s = String(v).replace(CONTROL, "").trim();
+    // Single line: metadata text ends up in UI rows and log-like contexts.
+    const s = String(v).replace(LINE_BREAKS, " ").replace(CONTROL, "").replace(/ {2,}/g, " ").trim();
     if (s === "") return null;
     return s.length > max ? s.slice(0, max) : s;
   }
@@ -339,16 +342,25 @@ export function parseFabricModJson(text: string): ExtensionMetadata {
     m.entrypoint = isRecord(first) ? clean(own(first, "value")) : clean(first);
   }
   const jars = own(o, "jars");
+  let unsafeJars = 0;
   if (Array.isArray(jars)) for (const j of jars.slice(0, MAX_LIST)) if (isRecord(j)) {
-    const f = clean(own(j, "file"));
-    if (f) m.bundledJars.push(f);
+    const f = clean(own(j, "file"), 512);
+    if (f && isSafeNestedJarPath(f)) m.bundledJars.push(f);
+    else if (f) unsafeJars++;
   }
+  if (unsafeJars > 0) m.warnings.push(`ignored ${unsafeJars} nested jar entr${unsafeJars === 1 ? "y" : "ies"} with an unsafe path`);
   const license = own(o, "license");
   m.license = Array.isArray(license) ? stringList(license).join(", ") || null : clean(license);
   const contact = own(o, "contact");
   if (isRecord(contact)) m.homepage = httpsLink(own(contact, "homepage")) ?? httpsLink(own(contact, "sources"));
   if (m.environment === "client") m.warnings.push("the mod declares environment \"client\" and is not loaded by dedicated servers");
   return m;
+}
+
+/** A relative path inside a jar (`META-INF/jars/x.jar`): no `..`/`.` segments, no absolute or drive paths, ends in `.jar`. */
+export function isSafeNestedJarPath(p: string): boolean {
+  if (p.length > 512 || !/^[A-Za-z0-9_.+-]+(?:\/[A-Za-z0-9_.+-]+)*$/.test(p) || !p.toLowerCase().endsWith(".jar")) return false;
+  return p.split("/").every((seg) => seg !== "." && seg !== "..");
 }
 
 /** Fabric dependency ids that are the platform itself (not separate mods). */
