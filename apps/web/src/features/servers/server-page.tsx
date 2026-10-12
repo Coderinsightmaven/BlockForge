@@ -13,34 +13,58 @@ import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState } from "@/components/common/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ServerStateBadge } from "@/components/ui/status";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConsolePanel } from "./console/console-panel";
 import { shouldBlockEditorLeave } from "./editor-guard";
-import { EulaBanner } from "./eula-banner";
 import type { PowerAction } from "./server-common";
-import {
-  JobProgress,
-  PowerControls,
-  PowerJobNotice,
-  ServerAddress,
-  ServerLiveStats,
-  StateHint,
-  SuspendedBanner,
-} from "./server-common";
+import { PowerControls, ServerAddress, ServerLiveStats, StateHint, SuspendedBanner } from "./server-common";
 
-const FilesTab = lazy(() => import("./files/files-tab"));
-const StatsTab = lazy(() => import("./tabs/stats-tab"));
-const BackupsTab = lazy(() => import("./tabs/backups-tab"));
-const ExtensionsTab = lazy(() => import("./extensions/extensions-tab"));
-const PlayersTab = lazy(() => import("./players/players-tab"));
-const SchedulesTab = lazy(() => import("./tabs/schedules-tab"));
-const StartupTab = lazy(() => import("./tabs/startup-tab"));
-const NetworkTab = lazy(() => import("./tabs/network-tab"));
-const UsersTab = lazy(() => import("./tabs/users-tab"));
-const ActivityTab = lazy(() => import("./tabs/activity-tab"));
-const SettingsTab = lazy(() => import("./tabs/settings-tab"));
+/*
+ * Only the console (the default tab) and the page frame are part of the route's first load. Every
+ * other tab is its own chunk, fetched when its trigger is hovered or focused (so switching is
+ * usually instant) and at the latest when it is opened (which shows the tab skeleton meanwhile).
+ */
+const TAB_LOADERS = {
+  stats: () => import("./tabs/stats-tab"),
+  files: () => import("./files/files-tab"),
+  extensions: () => import("./extensions/extensions-tab"),
+  players: () => import("./players/players-tab"),
+  backups: () => import("./tabs/backups-tab"),
+  schedules: () => import("./tabs/schedules-tab"),
+  startup: () => import("./tabs/startup-tab"),
+  network: () => import("./tabs/network-tab"),
+  users: () => import("./tabs/users-tab"),
+  activity: () => import("./tabs/activity-tab"),
+  settings: () => import("./tabs/settings-tab"),
+} satisfies Partial<Record<ServerTab, () => Promise<unknown>>>;
+
+/** Start downloading a tab's chunk (hover/focus of its trigger). The browser caches the module. */
+export function prefetchServerTab(tab: ServerTab): void {
+  const load = (TAB_LOADERS as Partial<Record<ServerTab, () => Promise<unknown>>>)[tab];
+  // A failed prefetch is not an error: opening the tab retries and shows the failure there.
+  if (load) load().catch(() => undefined);
+}
+
+const StatsTab = lazy(TAB_LOADERS.stats);
+const FilesTab = lazy(TAB_LOADERS.files);
+const ExtensionsTab = lazy(TAB_LOADERS.extensions);
+const PlayersTab = lazy(TAB_LOADERS.players);
+const BackupsTab = lazy(TAB_LOADERS.backups);
+const SchedulesTab = lazy(TAB_LOADERS.schedules);
+const StartupTab = lazy(TAB_LOADERS.startup);
+const NetworkTab = lazy(TAB_LOADERS.network);
+const UsersTab = lazy(TAB_LOADERS.users);
+const ActivityTab = lazy(TAB_LOADERS.activity);
+const SettingsTab = lazy(TAB_LOADERS.settings);
+
+// Shown only when relevant (EULA not accepted, a job running or failed): loaded on demand. Until the
+// chunk arrives they render nothing, exactly as they do while their own data is still loading.
+const EulaBanner = lazy(() => import("./eula-banner").then((m) => ({ default: m.EulaBanner })));
+const JobProgress = lazy(() => import("./server-jobs").then((m) => ({ default: m.JobProgress })));
+const PowerJobNotice = lazy(() => import("./server-jobs").then((m) => ({ default: m.PowerJobNotice })));
 
 export interface ServerPageSearch {
   tab?: ServerTab;
@@ -55,6 +79,20 @@ function TabFallback() {
       <Skeleton className="h-9 w-64" />
       <Skeleton className="h-64 w-full" />
     </div>
+  );
+}
+
+/** Shown while the job progress widget loads: the job's title and the same "Loading job…" line. */
+function JobProgressFallback({ title }: { title: string }) {
+  return (
+    <Card aria-busy>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-xs text-muted-foreground">Loading job…</p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -184,19 +222,29 @@ export function ServerPage({
       />
       <div className="flex flex-col gap-3">
         <SuspendedBanner server={server} />
-        <EulaBanner server={server} promptSeen={eulaPrompt} onAccepted={() => setEulaPrompt(false)} />
-        {powerJob ? (
-          <PowerJobNotice
-            key={powerJob.jobId}
-            jobId={powerJob.jobId}
-            action={powerJob.action}
-            onFailed={(code) => {
-              if (code === "EULA_NOT_ACCEPTED") setEulaPrompt(true);
-            }}
-            onDismiss={() => setPowerJob(null)}
-          />
+        {server.game === "minecraft-java" ? (
+          <Suspense fallback={null}>
+            <EulaBanner server={server} promptSeen={eulaPrompt} onAccepted={() => setEulaPrompt(false)} />
+          </Suspense>
         ) : null}
-        {job ? <JobProgress key={job.jobId} jobId={job.jobId} title={job.title} /> : null}
+        {powerJob ? (
+          <Suspense fallback={null}>
+            <PowerJobNotice
+              key={powerJob.jobId}
+              jobId={powerJob.jobId}
+              action={powerJob.action}
+              onFailed={(code) => {
+                if (code === "EULA_NOT_ACCEPTED") setEulaPrompt(true);
+              }}
+              onDismiss={() => setPowerJob(null)}
+            />
+          </Suspense>
+        ) : null}
+        {job ? (
+          <Suspense fallback={<JobProgressFallback title={job.title} />}>
+            <JobProgress key={job.jobId} jobId={job.jobId} title={job.title} />
+          </Suspense>
+        ) : null}
       </div>
 
       {tab === null ? (
@@ -213,7 +261,12 @@ export function ServerPage({
         >
           <TabsList>
             {tabs.map((t) => (
-              <TabsTrigger key={t.id} value={t.id}>
+              <TabsTrigger
+                key={t.id}
+                value={t.id}
+                onPointerEnter={() => prefetchServerTab(t.id)}
+                onFocus={() => prefetchServerTab(t.id)}
+              >
                 {t.label}
               </TabsTrigger>
             ))}

@@ -17,7 +17,7 @@ import { cpuView, memoryView, playersView } from "@/lib/server-metrics";
 import { nodeAddresses, parsePortInput } from "./nodes/node-allocations";
 import { warningMeta } from "./nodes/node-warnings";
 import { waitForJob } from "./servers/files/archive-result";
-import { mergeJobLogs } from "./servers/server-common";
+import { mergeJobLogs } from "./servers/server-jobs";
 import { allocationAddress, canAddAllocation } from "./servers/tabs/network-tab";
 import { buildPatch } from "./servers/tabs/settings-tab";
 import { checkPublicKey } from "./settings/ssh-keys";

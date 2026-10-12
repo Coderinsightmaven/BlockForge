@@ -21,7 +21,8 @@ import { SUBUSER_PERMISSION_GROUPS, defaultSubuserGrant } from "@/lib/server-per
 import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DISCARD_PROMPT, leavesEditor, shouldBlockEditorLeave } from "./editor-guard";
-import { JobErrorNotice, PowerControls, PowerJobNotice, StateHint } from "./server-common";
+import { PowerControls, StateHint } from "./server-common";
+import { JobErrorNotice, PowerJobNotice } from "./server-jobs";
 import { serverCardSnapshot } from "./server-card-snapshot";
 import { parseServerSearch } from "./server-search";
 import { DeleteCard } from "./tabs/settings-tab";

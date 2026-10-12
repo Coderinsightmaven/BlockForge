@@ -63,7 +63,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { InfoTip, Tooltip } from "@/components/ui/tooltip";
-import { JobErrorNotice } from "../server-common";
+import { JobErrorNotice } from "../server-jobs";
 
 // ---------------------------------------------------------------------------------------------
 // Presentation

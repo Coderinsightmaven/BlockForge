@@ -18,6 +18,8 @@ if (typeof window !== "undefined") {
   })) as unknown as typeof window.matchMedia;
   // Router scroll restoration calls this; jsdom only logs "not implemented".
   window.scrollTo = () => {};
+  // cmdk scrolls the selected option into view.
+  Element.prototype.scrollIntoView ??= () => {};
   globalThis.ResizeObserver ??= class {
     observe() {}
     unobserve() {}

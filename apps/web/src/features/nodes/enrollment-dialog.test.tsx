@@ -68,7 +68,8 @@ describe("EnrollmentDialog", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "open enrollment" }));
-    await user.type(screen.getByLabelText(/^Label/), "fra-node-03");
+    // The dialog is its own chunk, loaded on first open.
+    await user.type(await screen.findByLabelText(/^Label/), "fra-node-03");
     await user.click(screen.getByRole("button", { name: "Create token" }));
 
     await screen.findByText("Enrollment token created");

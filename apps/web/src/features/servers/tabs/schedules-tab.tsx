@@ -36,6 +36,7 @@ import { useApiMutation } from "@/lib/mutations";
 import { applyScheduleEvent, reconcileList, removeScheduleFromCache } from "@/lib/phase4-cache";
 import { qk } from "@/lib/query-keys";
 import { serverActionable, serverCan } from "@/lib/server-permissions";
+import { useDebounced } from "@/lib/use-debounced";
 import { PatternHelp } from "@/components/common/pattern-help";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/common/states";
 import { Timestamp } from "@/components/common/timestamp";
@@ -60,7 +61,7 @@ import type { StatusMeta } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip } from "@/components/ui/tooltip";
-import { JobProgress } from "../server-common";
+import { JobProgress } from "../server-jobs";
 import {
   MAX_OFFSET_SECONDS,
   MAX_TASKS,
@@ -158,15 +159,6 @@ function LastRun({ schedule }: { schedule: Schedule }) {
 
 // ---------------------------------------------------------------------------------------------
 // Editor
-
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
 
 function CronPreview({ cron, timezone }: { cron: ScheduleDraft["cron"]; timezone: string }) {
   const current = useMemo(() => ({ cron, timezone, count: 5 }), [cron, timezone]);

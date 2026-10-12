@@ -35,6 +35,7 @@ import { jobQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { useRealtimeClient, useRealtimeTopic } from "@/lib/realtime/provider";
 import { serverActionable } from "@/lib/server-permissions";
+import { useDebounced } from "@/lib/use-debounced";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/common/states";
 import { Timestamp } from "@/components/common/timestamp";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
@@ -49,7 +50,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip } from "@/components/ui/tooltip";
-import { JobProgress } from "../server-common";
+import { JobProgress } from "../server-jobs";
 import { ExtensionIcon, SafeLink } from "./extension-ui";
 import {
   HISTORY_ACTION_LABEL,
@@ -440,15 +441,6 @@ const SORTS = [
   { value: "updated" as const, label: "Recently updated" },
 ];
 const PAGE = 20;
-
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
 
 function BrowseSection({ server, onOpen }: { server: Server; onOpen: (project: string) => void }) {
   const [text, setText] = useState("");
