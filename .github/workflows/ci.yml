@@ -1,0 +1,59 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11-alpine
+        env:
+          POSTGRES_USER: blockforge
+          POSTGRES_PASSWORD: blockforge-dev-only
+          POSTGRES_DB: blockforge_test
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U blockforge" --health-interval 2s --health-timeout 3s --health-retries 30
+      victoriametrics:
+        image: victoriametrics/victoria-metrics:v1.153.0
+        ports: ["58428:8428"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Agent protocol fixtures are up to date
+        run: node packages/contracts/scripts/gen-fixtures.mjs && git diff --exit-code packages/contracts/fixtures
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  node-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/node-agent
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.x"
+          cache-dependency-path: services/node-agent/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Integration tests (real Docker)
+        run: go test -tags integration ./...
+      - name: Cross-compile
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/blockforge-agent
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/blockforge-agent
