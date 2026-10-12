@@ -13,7 +13,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   BACKUP_COUNTED_STATUSES,
@@ -27,7 +27,12 @@ import { ApiError, describeError } from "@/lib/api/errors";
 import { formatBytes, formatTimestamp } from "@/lib/format";
 import { isUncertainFailure, useIdempotencyKeys } from "@/lib/idempotency";
 import { useApiMutation } from "@/lib/mutations";
-import { applyBackupEvent, reconcileList, removeBackupFromCache } from "@/lib/phase4-cache";
+import {
+  applyBackupEvent,
+  reconcileList,
+  removeBackupFromCache,
+  restoreAfterFailedDelete,
+} from "@/lib/phase4-cache";
 import { jobQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { useRealtimeTopic } from "@/lib/realtime/provider";
@@ -58,6 +63,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { InfoTip, Tooltip } from "@/components/ui/tooltip";
+import { JobErrorNotice } from "../server-common";
 
 // ---------------------------------------------------------------------------------------------
 // Presentation
@@ -578,6 +584,69 @@ function RestoreDialog({
 }
 
 // ---------------------------------------------------------------------------------------------
+// Delete job follow-up
+
+const TERMINAL_JOB = new Set(["succeeded", "failed", "cancelled"]);
+
+/**
+ * Follows a backup's delete job. The row was hidden at once (tombstone); if the job fails or is
+ * cancelled the backup still exists, so the tombstone is lifted, the list re-read and the failure
+ * shown. Without access to the job (403/404) nothing more can be learnt: the tombstone TTL is the
+ * last-resort valve then.
+ */
+function DeleteJobNotice({
+  serverId,
+  jobId,
+  backup,
+  onDone,
+}: {
+  serverId: string;
+  jobId: string;
+  backup: Backup;
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const job = useQuery({
+    ...jobQuery(jobId),
+    // Realtime normally settles it; the poll covers a missed event.
+    refetchInterval: (q) =>
+      q.state.status === "error" || (q.state.data && TERMINAL_JOB.has(q.state.data.status)) ? false : 3_000,
+    retry: false,
+  });
+  useRealtimeTopic(`job:${jobId}`, (event) => {
+    if (event.type !== "job.updated") return;
+    const parsed = REALTIME_EVENT_PAYLOADS["job.updated"].safeParse(event.data);
+    if (parsed.success && parsed.data.id === jobId)
+      queryClient.setQueryData(qk.jobs.detail(jobId), parsed.data);
+  });
+  const status = job.data?.status;
+  const failed = status === "failed" || status === "cancelled";
+  const doneRef = useRef(onDone);
+  doneRef.current = onDone;
+  useEffect(() => {
+    if (failed) void restoreAfterFailedDelete(queryClient, "backups", serverId, backup.id);
+    else if (status === "succeeded" || job.isError) doneRef.current();
+  }, [failed, status, job.isError, queryClient, serverId, backup.id]);
+  if (!failed || !job.data) return null;
+  const label = backup.name || formatTimestamp(backup.createdAt);
+  return (
+    <JobErrorNotice
+      title={`Deleting “${label}” failed`}
+      error={
+        job.data.error ??
+        (status === "cancelled"
+          ? { code: "CANCELLED", message: "The delete job was cancelled; the backup was kept." }
+          : {
+              code: "UNKNOWN",
+              message: "The delete job failed without an error message; the backup was kept.",
+            })
+      }
+      onDismiss={onDone}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Tab
 
 export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
@@ -585,6 +654,8 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
   const [creating, setCreating] = useState(false);
   const [restoring, setRestoring] = useState<Backup | null>(null);
   const [removing, setRemoving] = useState<Backup | null>(null);
+  /** Delete jobs being followed until they succeed (or their failure is dismissed). */
+  const [deleteJobs, setDeleteJobs] = useState<Array<{ jobId: string; backup: Backup }>>([]);
   const list = useQuery({
     queryKey: qk.server(server.id).backups,
     // Kept live by backup.updated / backup.deleted on server:<id> (no polling); deleted rows stay
@@ -621,8 +692,9 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
     mutationFn: (b: Backup) => backupsApi.remove(server.id, b.id),
     success: "Backup is being deleted",
     errorTitle: "Could not delete the backup",
-    onSuccess: async (_r, b) => {
+    onSuccess: async (r, b) => {
       setRemoving(null);
+      setDeleteJobs((list) => [...list, { jobId: r.jobId, backup: b }]);
       await removeBackupFromCache(queryClient, server.id, b.id);
     },
   });
@@ -663,6 +735,19 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
           </Tooltip>
         ) : null}
       </CardHeader>
+      {deleteJobs.length ? (
+        <div className="mx-4 mb-3 flex flex-col gap-2 empty:hidden">
+          {deleteJobs.map((d) => (
+            <DeleteJobNotice
+              key={d.jobId}
+              serverId={server.id}
+              jobId={d.jobId}
+              backup={d.backup}
+              onDone={() => setDeleteJobs((list) => list.filter((x) => x.jobId !== d.jobId))}
+            />
+          ))}
+        </div>
+      ) : null}
       {disabled ? (
         <Callout tone="info" className="mx-4 mb-3" title="Backups are disabled for this server">
           Its backup limit is 0. An administrator can raise it under Settings → Administration.

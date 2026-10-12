@@ -9,8 +9,8 @@ import { qk } from "./query-keys";
  *
  * Deletions leave a tombstone so a deleted row cannot come back from a refetch that was already in
  * flight or from a late `*.updated` event. A tombstone is dropped once a fetch no longer returns the
- * id — or, as a safety valve for a delete that failed server-side, when a fetch still returns it
- * after TOMBSTONE_TTL_MS.
+ * id, or when the delete job is known to have failed (`restoreAfterFailedDelete`). TOMBSTONE_TTL_MS
+ * is only the last-resort valve for a failure the client could not observe.
  */
 
 export type ListKind = "backups" | "schedules";
@@ -107,6 +107,22 @@ export async function markDeleted(
   queryClient.setQueryData<Array<{ id: string }>>(listKey(kind, serverId), (prev) =>
     prev ? prev.filter((x) => x.id !== id) : prev,
   );
+}
+
+/** Lift a tombstone (e.g. the delete job failed: the row still exists). */
+export function clearTombstone(queryClient: QueryClient, kind: ListKind, serverId: string, id: string): void {
+  stones(queryClient).delete(tKey(kind, serverId, id));
+}
+
+/** A delete did not happen after all: show the row again and re-read the list. */
+export async function restoreAfterFailedDelete(
+  queryClient: QueryClient,
+  kind: ListKind,
+  serverId: string,
+  id: string,
+): Promise<void> {
+  clearTombstone(queryClient, kind, serverId, id);
+  await queryClient.invalidateQueries({ queryKey: listKey(kind, serverId) });
 }
 
 export function removeBackupFromCache(

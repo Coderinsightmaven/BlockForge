@@ -161,3 +161,6 @@ export function lastIndexWithData(data: AlignedChartData): number | null {
   }
   return null;
 }
+
+/** Categorical slots available before a chart switches to single-hue ("mono") rendering. */
+export const MAX_CATEGORICAL_SERIES = 8;

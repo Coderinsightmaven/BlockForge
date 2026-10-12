@@ -37,6 +37,8 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm build
+      - name: Web route bundle budget (300 KiB gzip per route)
+        run: pnpm --filter @blockforge/web bundle:check
 
   node-agent:
     runs-on: ubuntu-latest

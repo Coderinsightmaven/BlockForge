@@ -7,10 +7,10 @@ import { canAny } from "@/lib/permissions";
 import { metricRangeQuery, nodesQuery } from "@/lib/queries";
 import { describeTimeRange, refreshIntervalFor, resolveTimeRange, timeRangeKey } from "@/lib/time-range";
 import type { TimeRange } from "@/lib/time-range";
-import { alignLines, lineLabel, seriesKey } from "@/components/charts/chart-data";
+import { MAX_CATEGORICAL_SERIES, alignLines, lineLabel, seriesKey } from "@/components/charts/chart-data";
 import type { MetricLine } from "@/components/charts/chart-data";
+import { TimeSeriesChart } from "@/components/charts/lazy-time-series-chart";
 import { ChartViewToggle } from "@/components/charts/metric-chart";
-import { MAX_CATEGORICAL_SERIES, TimeSeriesChart } from "@/components/charts/time-series-chart";
 import { TimeRangePicker } from "@/components/charts/time-range-picker";
 import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState, NoPermission } from "@/components/common/states";
@@ -22,7 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select } from "@/components/ui/select";
 import { NODE_CONNECTION_META, StatusDot, statusMeta } from "@/components/ui/status";
-import { NODE_CHARTS } from "@/features/nodes/node-detail-page";
+import { NODE_CHARTS } from "@/features/nodes/node-charts";
 
 export const MAX_COMPARE_NODES = MAX_CATEGORICAL_SERIES;
 

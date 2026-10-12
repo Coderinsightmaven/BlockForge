@@ -6,13 +6,12 @@ import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { EmptyState, ErrorState } from "@/components/common/states";
 import { Skeleton } from "@/components/ui/skeleton";
-import { hasAnyValue, lastIndexWithData, lineStats } from "./chart-data";
+import { MAX_CATEGORICAL_SERIES, hasAnyValue, lastIndexWithData, lineStats } from "./chart-data";
 import type { AlignedChartData, ChartSeries } from "./chart-data";
 
 const TOOLTIP_WIDTH = 220;
 
-/** Categorical slots available before a chart switches to single-hue ("mono") rendering. */
-export const MAX_CATEGORICAL_SERIES = 8;
+export { MAX_CATEGORICAL_SERIES } from "./chart-data";
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";

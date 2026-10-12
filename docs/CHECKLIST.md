@@ -149,4 +149,4 @@ fixed, 8394357), control plane Phase 4a (fixes in progress), Minecraft 4b libs (
 progress, `docs/reviews/2026-10-12-minecraft-phase4b-libs.md`). Phase 4a sign-off after a live re-run on the test node.
 Phase 4b: contracts being drafted (extensions/players API, agent `fs.hash`/`jar.readEntries`), then agent commands,
 control-plane routes and web UI for Plugins & Mods and Players, then Phase 5 (databases).
-Web follow-ups: CI bundle-budget check; `/monitoring` (325.7 KiB) and `/nodes/$id` (320.1 KiB) over the 300 KiB route target.
+Web route budget enforced in CI (`bundle:check`); tightest routes: `/nodes/$nodeId` 297.4 KiB, `/servers/$serverId` 295.3 KiB.

@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { InfoTip } from "@/components/ui/tooltip";
 import { alignLines } from "./chart-data";
 import type { MetricLine } from "./chart-data";
-import { TimeSeriesChart } from "./time-series-chart";
+import { TimeSeriesChart } from "./lazy-time-series-chart";
 
 export function ChartViewToggle({
   view,

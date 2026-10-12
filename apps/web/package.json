@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "lint": "eslint src vite.config.ts vitest.config.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bundle:check": "node scripts/bundle-budget.mjs"
   },
   "dependencies": {
     "@blockforge/contracts": "workspace:*",

@@ -268,6 +268,7 @@ describe("Backups tab", () => {
     const calls = routeFetch([
       ["GET", /\/backups$/, ok([makeBackup({ id: ID(1) }), makeBackup({ id: ID(2), name: "second" })])],
       ["DELETE", /\/backups\//, ok({ jobId: JOB_ID }, 202)],
+      ["GET", /\/jobs\//, ok({ ...job, type: "backup.delete", status: "succeeded", finishedAt: 2 })],
     ]);
     const user = userEvent.setup();
     wrap(<BackupsTab server={makeServer({ backupLimit: 3 })} me={makeMe()} />);
@@ -277,7 +278,44 @@ describe("Backups tab", () => {
     );
     await waitFor(() => expect(screen.queryByText("second")).toBeNull());
     expect(screen.getByText("1 / 3 used")).toBeTruthy();
+    // The delete job is followed (here it succeeds): no notice, no re-read of the list.
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith(`/jobs/${JOB_ID}`))).toBe(true));
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(calls.filter((c) => c.method === "GET" && c.url.endsWith("/backups"))).toHaveLength(1);
+  });
+
+  it("a delete job that fails brings the backup back at once and says why", async () => {
+    const backups = [makeBackup({ id: ID(1) }), makeBackup({ id: ID(2), name: "second" })];
+    const calls = routeFetch([
+      ["GET", /\/backups$/, ok(backups)],
+      ["DELETE", /\/backups\//, ok({ jobId: JOB_ID }, 202)],
+      [
+        "GET",
+        /\/jobs\//,
+        ok({
+          ...job,
+          type: "backup.delete",
+          status: "failed",
+          finishedAt: 2,
+          error: { code: "AGENT_ERROR", message: "permission denied removing the archive" },
+        }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<BackupsTab server={makeServer({ backupLimit: 3 })} me={makeMe()} />);
+    await user.click(await screen.findByRole("button", { name: "Delete second" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Delete backup" }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Deleting “second” failed");
+    expect(alert.textContent).toContain("permission denied removing the archive");
+    // Tombstone lifted and the list re-read: the row and its slot are back without waiting for the TTL.
+    expect(await screen.findByText("second")).toBeTruthy();
+    expect(screen.getByText("2 / 3 used")).toBeTruthy();
+    expect(calls.filter((c) => c.method === "GET" && c.url.endsWith("/backups"))).toHaveLength(2);
+    await user.click(within(alert).getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("locks, and deletes only after confirmation", async () => {
