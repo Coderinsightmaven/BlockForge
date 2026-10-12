@@ -110,11 +110,20 @@ export type ControlPlaneFrame = z.infer<typeof ControlPlaneFrame>;
 // ---------------------------------------------------------------------------
 // Agent → control plane
 
+/** Agent error details are untrusted and persisted: bounded to 16 KiB of JSON. */
+const BoundedDetails = z.unknown().refine((v) => {
+  try {
+    return v === undefined || JSON.stringify(v).length <= 16 * 1024;
+  } catch {
+    return false;
+  }
+}, "details too large");
+
 export const AgentError = z.object({
   code: AgentErrorCode,
-  message: z.string(),
+  message: z.string().max(4096),
   retryable: z.boolean().default(false),
-  details: z.unknown().optional(),
+  details: BoundedDetails.optional(),
 });
 export type AgentError = z.infer<typeof AgentError>;
 

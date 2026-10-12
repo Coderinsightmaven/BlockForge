@@ -61,6 +61,14 @@ describe("permissions", () => {
     }
   });
 
+  it("only user administrators see users and audit data", () => {
+    for (const key of ["infra_admin", "network_admin", "server_admin", "moderator", "observer"] as const) {
+      const perms = BUILTIN_ROLES[key].permissions as readonly string[];
+      expect(perms).not.toContain("users.view");
+      expect(perms).not.toContain("audit.view");
+    }
+  });
+
   it("observer is read-only", () => {
     for (const p of BUILTIN_ROLES.observer.permissions) expect(p.endsWith(".view")).toBe(true);
   });
@@ -102,6 +110,9 @@ describe("command payload redaction", () => {
       url: "https://h.example/a.jar?[REDACTED]",
     });
     expect(redactCommandPayload("workload.start", { workloadId: "x" })).toEqual({ workloadId: "x" });
+    expect(
+      redactCommandPayload("workload.ensure", { command: ["java", "-Dapi.token=s3cret", "-Xmx2G", "-jar", "server.jar"] }),
+    ).toEqual({ command: ["java", "-Dapi.token=[REDACTED]", "-Xmx2G", "-jar", "server.jar"] });
   });
 });
 

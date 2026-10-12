@@ -232,7 +232,7 @@ export const ROTATION_PROOF_PREFIX = "blockforge-rotate:";
  */
 export const COMMAND_REDACTIONS: Partial<Record<AgentCommandType, readonly string[]>> = {
   "fs.write": ["content"],
-  "workload.ensure": ["env"],
+  "workload.ensure": ["env", "command"],
   "workload.install": ["env", "script"],
   "artifact.fetch": ["url"],
 };
@@ -255,6 +255,11 @@ export function redactCommandPayload(type: AgentCommandType, payload: unknown): 
       }
     } else if (field === "env" && value !== null && typeof value === "object") {
       copy[field] = Object.fromEntries(Object.keys(value).map((k) => [k, REDACTED]));
+    } else if (field === "command" && Array.isArray(value)) {
+      // JVM system properties may carry secrets (`-Dapi.token=…`): keep the key, mask the value.
+      copy[field] = value.map((arg) =>
+        typeof arg === "string" && /^-D[^=]+=/.test(arg) ? `${arg.slice(0, arg.indexOf("=") + 1)}${REDACTED}` : arg,
+      );
     } else {
       copy[field] = REDACTED;
     }

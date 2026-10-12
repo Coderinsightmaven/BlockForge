@@ -79,6 +79,8 @@ export const ALL_PERMISSIONS = Object.keys(PERMISSIONS) as Permission[];
 export const PermissionSchema = z.enum(ALL_PERMISSIONS as [Permission, ...Permission[]]);
 
 const viewPermissions = ALL_PERMISSIONS.filter((p) => p.endsWith(".view"));
+/** View permissions minus identity/audit data, which only user administrators should see. */
+const operationalViewPermissions = viewPermissions.filter((p) => p !== "users.view" && p !== "audit.view");
 
 export const BUILTIN_ROLES = {
   owner: {
@@ -95,7 +97,7 @@ export const BUILTIN_ROLES = {
     name: "Infrastructure Administrator",
     description: "Manages nodes, capacity and monitoring; can operate servers.",
     permissions: [
-      ...viewPermissions,
+      ...operationalViewPermissions,
       "nodes.manage",
       "nodes.enroll",
       "allocations.manage",
@@ -108,7 +110,7 @@ export const BUILTIN_ROLES = {
     name: "Network Administrator",
     description: "Manages Velocity networks, proxies, routing and their servers.",
     permissions: [
-      ...viewPermissions,
+      ...operationalViewPermissions,
       "networks.create",
       "networks.manage",
       "servers.create",
@@ -189,7 +191,7 @@ export const BUILTIN_ROLES = {
   observer: {
     name: "Read-only Observer",
     description: "Read-only access to dashboards, servers and infrastructure.",
-    permissions: viewPermissions.filter((p) => p !== "users.view" && p !== "audit.view"),
+    permissions: operationalViewPermissions,
   },
 } as const satisfies Record<string, { name: string; description: string; permissions: readonly Permission[] }>;
 
