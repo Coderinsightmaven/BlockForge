@@ -104,7 +104,13 @@ export const TEMPLATE_PLACEHOLDERS = [
   "server.uuid",
   "server.name",
   "config.docker.interface",
+  // Pelican spellings
+  "server.allocations.default.ip",
+  "server.allocations.default.port",
+  "server.build.memory_limit",
 ] as const;
+/** Placeholder prefixes that take a variable name (`{{env.SAVE_NAME}}`, Pelican `{{server.environment.SAVE_NAME}}`). */
+export const TEMPLATE_PLACEHOLDER_PREFIXES = ["env.", "server.build.env.", "server.environment."] as const;
 
 export const StopConfig = z.discriminatedUnion("type", [
   /** Line written to the console (stdin). */
@@ -136,7 +142,7 @@ export const Template = z.object({
   game: TemplateGame,
   author: z.string().max(191).nullable(),
   source: z.enum(["builtin", "import"]),
-  sourceFormat: z.enum(["PTDL_v1", "PTDL_v2", "PLCN_v1"]).nullable(),
+  sourceFormat: z.enum(["PTDL_v1", "PTDL_v2", "PLCN_v1", "PLCN_v2", "PLCN_v3"]).nullable(),
   /** Empty for built-in Minecraft/Velocity templates (image follows the required Java version). */
   dockerImages: z.array(DockerImageOption).max(32),
   /** Startup string evaluated by the image's entrypoint (`STARTUP` env); empty for built-in templates. */

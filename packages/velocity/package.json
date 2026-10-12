@@ -4,9 +4,15 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": { "@blockforge/source": "./src/index.ts", "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+    ".": {
+      "@blockforge/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -14,8 +20,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@blockforge/contracts": "workspace:*", "@blockforge/minecraft": "workspace:*", "smol-toml": "^1.9.1", "yaml": "^2.9.1",
+    "@blockforge/contracts": "workspace:*",
+    "@blockforge/eggs": "workspace:*",
+    "@blockforge/minecraft": "workspace:*",
+    "smol-toml": "^1.9.1",
+    "yaml": "^2.9.1",
     "zod": "^4.6.6"
   },
-  "devDependencies": { "typescript": "~6.0.3", "vitest": "^5.0.3" }
+  "devDependencies": {
+    "typescript": "~6.0.3",
+    "vitest": "^5.0.3"
+  }
 }
