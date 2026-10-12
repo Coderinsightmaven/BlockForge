@@ -1,7 +1,7 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Gamepad2, LayoutGrid, Plus, Rows3, Search, Users } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { Me, Server } from "@blockforge/contracts";
 import { formatBytes } from "@/lib/format";
 import { serversQuery } from "@/lib/queries";
@@ -21,19 +21,14 @@ import { ServerStateBadge } from "@/components/ui/status";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SpacerRow, VirtualTable, useVirtualRows } from "@/components/ui/virtual-table";
 import { ServerAddress } from "./server-common";
+import { serverCardSnapshot, softwareLabel } from "./server-card-snapshot";
 
 export type ServersView = "cards" | "table";
 
 /** Cards render every loaded server; beyond this the table (virtualised) is used. */
 export const MAX_CARDS = 200;
 
-function softwareLabel(s: Server): string {
-  if (s.software)
-    return `${s.software[0]!.toUpperCase()}${s.software.slice(1)} ${s.minecraftVersion ?? ""}`.trim();
-  return s.templateName;
-}
-
-function ServerCard({ server }: { server: Server }) {
+function ServerCardView({ server }: { server: Server }) {
   const cpu = cpuView(server.latest, server.cpuLimitMillicores);
   const mem = memoryView(server);
   const players = playersView(server);
@@ -88,6 +83,12 @@ function ServerCard({ server }: { server: Server }) {
     </Card>
   );
 }
+
+/** Re-renders only when something the card shows changed (see serverCardSnapshot). */
+const ServerCard = memo(
+  ServerCardView,
+  (a, b) => a.server === b.server || serverCardSnapshot(a.server) === serverCardSnapshot(b.server),
+);
 
 function ServersTable({ servers, onVisible }: { servers: Server[]; onVisible: (ids: string[]) => void }) {
   const v = useVirtualRows(servers, { estimateSize: 53, getKey: (s) => s.id });

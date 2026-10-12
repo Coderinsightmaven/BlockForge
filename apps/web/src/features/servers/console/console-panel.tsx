@@ -6,6 +6,8 @@ import { stripFormatting } from "@blockforge/minecraft";
 import { REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
 import type { Server } from "@blockforge/contracts";
 import { serversApi } from "@/lib/api/servers-api";
+import { addCommand, getCommandHistory } from "@/lib/console-history";
+import { downloadText } from "@/lib/download";
 import { describeError } from "@/lib/api/errors";
 import { formatTimestamp } from "@/lib/format";
 import { useApiMutation } from "@/lib/mutations";
@@ -22,7 +24,6 @@ import { ConsoleStore } from "./console-store";
 import type { ConsoleLine, ConsoleStream } from "./console-store";
 
 const HISTORY_LINES = 1000;
-const COMMAND_HISTORY_MAX = 100;
 const ACCEPTS_COMMANDS = new Set(["running", "starting", "degraded", "stopping"]);
 
 const plainCache = new WeakMap<ConsoleLine, string>();
@@ -51,37 +52,9 @@ export function consoleToText(lines: readonly ConsoleLine[]): string {
 }
 
 function useCommandHistory(serverId: string) {
-  const key = `blockforge.console-history.${serverId}`;
-  const [items, setItems] = useState<string[]>(() => {
-    try {
-      const raw = JSON.parse(sessionStorage.getItem(key) ?? "[]") as unknown;
-      return Array.isArray(raw)
-        ? raw.filter((x): x is string => typeof x === "string").slice(-COMMAND_HISTORY_MAX)
-        : [];
-    } catch {
-      return [];
-    }
-  });
-  const add = (cmd: string) =>
-    setItems((prev) => {
-      const next = [...prev.filter((c) => c !== cmd), cmd].slice(-COMMAND_HISTORY_MAX);
-      try {
-        sessionStorage.setItem(key, JSON.stringify(next));
-      } catch {
-        /* storage full or disabled */
-      }
-      return next;
-    });
+  const [items, setItems] = useState<readonly string[]>(() => getCommandHistory(serverId));
+  const add = (cmd: string) => setItems(addCommand(serverId, cmd));
   return { items, add };
-}
-
-function downloadText(fileName: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function ConsolePanel({
@@ -103,23 +76,30 @@ export function ConsolePanel({
   const [store] = useState(() => new ConsoleStore({ onGap: () => loadHistoryRef.current() }));
   useEffect(() => () => store.dispose(), [store]);
 
+  // One history request at a time: a gap or reconnect refetch aborts the one still running.
+  const historyCtrl = useRef<AbortController | null>(null);
   const loadHistory = useCallback(() => {
+    historyCtrl.current?.abort();
     const ctrl = new AbortController();
+    historyCtrl.current = ctrl;
     serversApi
       .consoleHistory(server.id, HISTORY_LINES, ctrl.signal)
       .then((h) => {
+        if (ctrl.signal.aborted) return;
         setHistoryError(null);
         store.loadHistory(h);
         if (h.lines.some((l) => isEulaPrompt(l.line))) eulaRef.current?.();
       })
       .catch((err: unknown) => {
-        if ((err as { name?: string }).name !== "AbortError") setHistoryError(err);
+        if (!ctrl.signal.aborted && (err as { name?: string }).name !== "AbortError") setHistoryError(err);
       });
-    return () => ctrl.abort();
   }, [server.id, store]);
   loadHistoryRef.current = loadHistory;
 
-  useEffect(() => loadHistory(), [loadHistory]);
+  useEffect(() => {
+    loadHistory();
+    return () => historyCtrl.current?.abort();
+  }, [loadHistory]);
   // Realtime is not durable: re-read history after every reconnect (merged by seq, no duplicates).
   useEffect(() => client?.onReconnect(() => loadHistory()), [client, loadHistory]);
 
@@ -139,11 +119,13 @@ export function ConsolePanel({
   const [streams, setStreams] = useState<Set<ConsoleStream>>(() => new Set(["stdout", "stderr", "system"]));
   const [showTs, setShowTs] = useState(() => localStorage.getItem("blockforge.console-ts") === "1");
   const [paused, setPaused] = useState<readonly ConsoleLine[] | null>(null);
+  // Counted in appended lines, not buffer length (which stops growing at the ring cap).
+  const [pausedAt, setPausedAt] = useState(0);
   const [follow, setFollow] = useState(true);
 
   const source = paused ?? allLines;
   const lines = useMemo(() => filterLines(source, query, streams), [source, query, streams]);
-  const newWhilePaused = paused ? allLines.length - paused.length : 0;
+  const newWhilePaused = paused ? store.appendedCount - pausedAt : 0;
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -280,7 +262,10 @@ export function ConsolePanel({
               aria-pressed={!!paused}
               aria-label={paused ? "Resume output" : "Pause output"}
               className="text-[#8b949e] hover:bg-white/10 hover:text-white"
-              onClick={() => setPaused((p) => (p ? null : allLines))}
+              onClick={() => {
+                if (!paused) setPausedAt(store.appendedCount);
+                setPaused((p) => (p ? null : allLines));
+              }}
             >
               {paused ? <Play aria-hidden /> : <Pause aria-hidden />}
             </Button>
@@ -312,6 +297,19 @@ export function ConsolePanel({
         </div>
       </div>
 
+      {historyError && allLines.length > 0 ? (
+        <div
+          role="alert"
+          className="flex items-center gap-2 border-b border-white/10 bg-[#2a1515] px-3 py-1 text-xs text-[#ff9b9b]"
+        >
+          <span className="min-w-0 flex-1">
+            Could not reload console history: {describeError(historyError).title}
+          </span>
+          <button type="button" className="underline hover:text-white" onClick={() => loadHistory()}>
+            Retry
+          </button>
+        </div>
+      ) : null}
       <div className="relative min-h-0 flex-1">
         <div
           ref={scrollRef}
@@ -323,8 +321,11 @@ export function ConsolePanel({
           className="h-full overflow-auto px-3 py-2 font-mono text-[12px] leading-[18px] break-all whitespace-pre-wrap focus-visible:outline-none"
         >
           {historyError && allLines.length === 0 ? (
-            <p className="text-[#ff8080]">
-              Could not load console history: {describeError(historyError).title}
+            <p role="alert" className="text-[#ff8080]">
+              Could not load console history: {describeError(historyError).title}{" "}
+              <button type="button" className="underline hover:text-white" onClick={() => loadHistory()}>
+                Retry
+              </button>
             </p>
           ) : lines.length === 0 ? (
             <p className="text-[#6b7280]">

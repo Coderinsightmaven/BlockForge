@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, Lock, Save } from "lucide-react";
-import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { Server } from "@blockforge/contracts";
 import { filesApi } from "@/lib/api/servers-api";
@@ -41,13 +41,17 @@ export function FileEditor({
   path,
   isNew,
   onClose,
+  onDirtyChange,
 }: {
   server: Server;
   path: string;
   /** A file that does not exist yet (created on first save). */
   isNew: boolean;
   onClose: () => void;
+  /** Reports unsaved changes so the page can block tab changes / navigation. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const backRef = useRef<HTMLButtonElement>(null);
   const queryClient = useQueryClient();
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
@@ -86,6 +90,11 @@ export function FileEditor({
   }, [load]);
 
   const dirty = loaded !== null && text !== loaded.content;
+  const dirtyRef = useRef(onDirtyChange);
+  dirtyRef.current = onDirtyChange;
+  useEffect(() => dirtyRef.current?.(dirty), [dirty]);
+  // Leaving the editor (unmount) clears the page's dirty flag.
+  useEffect(() => () => dirtyRef.current?.(false), []);
   const readOnly = !canWrite || !!loaded?.readOnlyReason;
 
   // Warn before leaving with unsaved changes.
@@ -135,13 +144,14 @@ export function FileEditor({
 
   const close = () => {
     if (dirty && !window.confirm("Discard unsaved changes?")) return;
+    onDirtyChange?.(false); // confirmed: let the navigation through
     onClose();
   };
 
   return (
     <div className="flex h-[calc(100dvh-14rem)] min-h-96 flex-col overflow-hidden rounded-lg border bg-card">
       <div className="flex flex-wrap items-center gap-2 border-b px-2 py-1.5">
-        <Button size="sm" variant="ghost" onClick={close}>
+        <Button ref={backRef} size="sm" variant="ghost" onClick={close}>
           <ArrowLeft aria-hidden />
           Files
         </Button>
@@ -199,6 +209,7 @@ export function FileEditor({
               language={languageFor(path)}
               readOnly={readOnly}
               onSave={() => void save()}
+              onEscape={() => backRef.current?.focus()}
               ariaLabel={`Editing ${path}`}
             />
           </Suspense>
@@ -235,7 +246,8 @@ export function FileEditor({
       </Dialog>
       {loaded && !loadError ? (
         <div className="border-t px-3 py-1 text-[11px] text-muted-foreground">
-          {formatBytes(loaded.size)} on disk · {languageFor(path)} · Ctrl/⌘+S to save
+          {formatBytes(loaded.size)} on disk · {languageFor(path)} · Tab indents · Esc leaves the editor ·
+          Ctrl/⌘+S saves
         </div>
       ) : null}
     </div>

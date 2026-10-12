@@ -83,6 +83,7 @@ export default function NetworkTab({ server }: { server: Server }) {
   const canManage = serverActionable(server, "servers.allocations.manage");
   const [editing, setEditing] = useState<Allocation | null>(null);
   const [removing, setRemoving] = useState<Allocation | null>(null);
+  const [promoting, setPromoting] = useState<Allocation | null>(null);
   const restartToast = (restartRequired: boolean, msg: string) =>
     restartRequired
       ? toast.success(msg, { description: "Restart the server to apply the change." })
@@ -106,6 +107,7 @@ export default function NetworkTab({ server }: { server: Server }) {
     errorTitle: "Could not change the primary allocation",
     onSuccess: async (r) => {
       restartToast(r.restartRequired, `${allocationAddress(r.allocation)} is now primary`);
+      setPromoting(null);
       await refresh();
     },
   });
@@ -121,6 +123,7 @@ export default function NetworkTab({ server }: { server: Server }) {
 
   const items = [...(q.data ?? [])].sort((a, b) => Number(b.primary) - Number(a.primary) || a.port - b.port);
   const additional = items.filter((a) => !a.primary).length;
+  const primary = items.find((a) => a.primary) ?? null;
   const roomLeft = canAddAllocation(items, server.allocationLimit);
 
   return (
@@ -190,7 +193,8 @@ export default function NetworkTab({ server }: { server: Server }) {
                           size="sm"
                           variant="ghost"
                           loading={makePrimary.isPending && makePrimary.variables?.id === a.id}
-                          onClick={() => makePrimary.mutate(a)}
+                          aria-label={`Make ${allocationAddress(a)} primary`}
+                          onClick={() => setPromoting(a)}
                         >
                           <Star aria-hidden />
                           Make primary
@@ -223,6 +227,17 @@ export default function NetworkTab({ server }: { server: Server }) {
         </Table>
       )}
       <NotesDialog server={server} allocation={editing} onClose={() => setEditing(null)} />
+      <ConfirmDialog
+        open={promoting !== null}
+        onOpenChange={(o) => !o && setPromoting(null)}
+        title="Change the primary allocation?"
+        description={`Players will connect to ${promoting ? allocationAddress(promoting) : ""} instead of ${
+          primary ? allocationAddress(primary) : "the current address"
+        }. The server usually needs a restart to listen on the new port, and anyone using the old address must update it.`}
+        confirmLabel="Make primary"
+        pending={makePrimary.isPending}
+        onConfirm={() => promoting && makePrimary.mutate(promoting)}
+      />
       <ConfirmDialog
         open={removing !== null}
         onOpenChange={(o) => !o && setRemoving(null)}

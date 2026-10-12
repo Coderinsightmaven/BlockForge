@@ -21,9 +21,11 @@ import {
 } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import type { DragEvent, FormEvent } from "react";
+import { toast } from "sonner";
 import type { FileEntry, Server } from "@blockforge/contracts";
 import { filesApi } from "@/lib/api/servers-api";
 import { formatBytes, formatTimestamp } from "@/lib/format";
+import { describeError, isApiError } from "@/lib/api/errors";
 import { toastError, useApiMutation } from "@/lib/mutations";
 import { fileListQuery, fileSearchQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
@@ -31,6 +33,7 @@ import { serverActionable, serverCan } from "@/lib/server-permissions";
 import { cn } from "@/lib/utils";
 import { EmptyState, ErrorState, TableSkeleton } from "@/components/common/states";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card } from "@/components/ui/card";
@@ -69,6 +72,8 @@ import {
   validateRelativePath,
 } from "./paths";
 import { reportArchiveResult } from "./archive-result";
+import { collectDrop, planUploads } from "./drop";
+import type { UploadPlan } from "./drop";
 import { downloadFile, uploadFile } from "./upload";
 import type { UploadProgress } from "./upload";
 
@@ -153,6 +158,15 @@ function NameDialog({
   );
 }
 
+/** Files open in the editor or download; folders navigate. Links and special files do neither. */
+export function isOpenable(e: Pick<FileEntry, "type">): boolean {
+  return e.type === "file" || e.type === "dir";
+}
+
+export function entryTypeLabel(e: Pick<FileEntry, "type">): string {
+  return e.type === "symlink" ? "symlink — not followed" : e.type === "other" ? "special file" : e.type;
+}
+
 export function validateMode(mode: string): string | null {
   return /^[0-7]{3}$/.test(mode.trim()) ? null : "Use three octal digits, e.g. 644 or 755.";
 }
@@ -163,17 +177,23 @@ export default function FilesTab({
   editing,
   onNavigate,
   onEdit,
+  onEditorDirty,
 }: {
   server: Server;
   path: string;
   editing: string | null;
   onNavigate: (path: string) => void;
   onEdit: (path: string | null) => void;
+  /** The open editor's unsaved-changes flag, so the page can guard tab changes/navigation. */
+  onEditorDirty?: (dirty: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const canWrite = serverActionable(server, "servers.files.write");
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [pendingChmod, setPendingChmod] = useState<{ paths: string[]; mode: string; folders: number } | null>(
+    null,
+  );
   const [newFile, setNewFile] = useState<string | null>(null);
   const [searchDraft, setSearchDraft] = useState("");
   const [searchQ, setSearchQ] = useState("");
@@ -258,17 +278,25 @@ export default function FilesTab({
     },
   });
 
-  const startUploads = (files: FileList | File[]) => {
+  /** Create the planned folders (parents first), then upload files sequentially into them. */
+  const startUploads = (plan: UploadPlan) => {
     const dir = path;
-    const items = [...files].map((f) => ({
-      file: f,
+    for (const message of plan.errors.slice(0, 5)) toast.error("Skipped", { description: message });
+    if (plan.errors.length > 5) toast.error(`${plan.errors.length - 5} more items were skipped.`);
+    if (plan.files.length === 0) {
+      if (plan.errors.length === 0)
+        toast.error("Nothing to upload", { description: "The selection contained no files." });
+      return;
+    }
+    const items = plan.files.map((f) => ({
+      ...f,
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     }));
     setUploads((u) => [
       ...u.filter((x) => x.status === "uploading" || x.status === "pending"),
-      ...items.map(({ file, id }) => ({
+      ...items.map(({ file, relativeDir, id }) => ({
         id,
-        name: file.name,
+        name: joinPath(relativeDir, file.name),
         size: file.size,
         loaded: 0,
         status: "pending" as const,
@@ -276,25 +304,44 @@ export default function FilesTab({
     ]);
     // Sequential: keeps the node's disk and the user's uplink from being saturated by many parallel streams.
     void (async () => {
-      for (const { file, id } of items) {
+      const failedDirs = new Map<string, string>();
+      for (const d of plan.dirs) {
+        try {
+          await filesApi.mkdir(server.id, joinPath(dir, d));
+        } catch (err) {
+          // An existing folder is fine; anything else fails the files inside it.
+          if (!(isApiError(err) && err.code === "CONFLICT")) failedDirs.set(d, describeError(err).title);
+        }
+      }
+      for (const { file, relativeDir, id } of items) {
         const patch = (p: Partial<UploadProgress>) =>
           setUploads((u) => u.map((x) => (x.id === id ? { ...x, ...p } : x)));
+        const blocked = [...failedDirs].find(([d]) => relativeDir === d || relativeDir.startsWith(`${d}/`));
+        if (blocked) {
+          patch({ status: "error", error: `Folder ${blocked[0]} could not be created: ${blocked[1]}` });
+          continue;
+        }
         patch({ status: "uploading" });
         try {
-          await uploadFile(server.id, dir, file, (loaded) => patch({ loaded }));
+          await uploadFile(server.id, joinPath(dir, relativeDir), file, (loaded) => patch({ loaded }));
           patch({ status: "done", loaded: file.size });
         } catch (err) {
           patch({ status: "error", error: err instanceof Error ? err.message : "Upload failed" });
         }
       }
-      refresh([dir]);
+      refresh([dir, ...plan.dirs.map((d) => joinPath(dir, d))]);
     })();
   };
 
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setDragging(false);
-    if (canWrite && e.dataTransfer.files.length) startUploads(e.dataTransfer.files);
+    if (!canWrite) return;
+    // Entries must be captured synchronously, before the event handler returns.
+    void collectDrop(e.dataTransfer).then(({ items, errors }) => {
+      const plan = planUploads(items);
+      startUploads({ ...plan, errors: [...errors, ...plan.errors] });
+    });
   };
 
   const open = (entry: FileEntry) => {
@@ -320,6 +367,7 @@ export default function FilesTab({
         server={server}
         path={p}
         isNew={!editing && !!newFile}
+        onDirtyChange={onEditorDirty}
         onClose={() => {
           setNewFile(null);
           onEdit(null);
@@ -330,6 +378,7 @@ export default function FilesTab({
   }
 
   const allChecked = entries.length > 0 && entries.every((e) => selected.has(e.path));
+  const truncatedListing = searchQ ? !!search.data?.truncated : !!list.data?.truncated;
   const toggle = (p: string, on: boolean) =>
     setSelected((s) => {
       const n = new Set(s);
@@ -374,12 +423,16 @@ export default function FilesTab({
                 <ArchiveRestore aria-hidden /> Extract here
               </DropdownMenuItem>
             ) : null}
-            <DropdownMenuItem onSelect={() => setDialog({ kind: "compress", entries: [e] })}>
-              <Archive aria-hidden /> Compress
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setDialog({ kind: "chmod", entries: [e] })}>
-              <KeyRound aria-hidden /> Permissions
-            </DropdownMenuItem>
+            {e.type !== "symlink" ? (
+              <>
+                <DropdownMenuItem onSelect={() => setDialog({ kind: "compress", entries: [e] })}>
+                  <Archive aria-hidden /> Compress
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setDialog({ kind: "chmod", entries: [e] })}>
+                  <KeyRound aria-hidden /> Permissions
+                </DropdownMenuItem>
+              </>
+            ) : null}
             <DropdownMenuSeparator />
             <DropdownMenuItem destructive onSelect={() => setDialog({ kind: "delete", entries: [e] })}>
               <Trash2 aria-hidden /> Delete
@@ -475,7 +528,8 @@ export default function FilesTab({
               multiple
               hidden
               onChange={(e) => {
-                if (e.target.files?.length) startUploads(e.target.files);
+                if (e.target.files?.length)
+                  startUploads(planUploads([...e.target.files].map((file) => ({ path: file.name, file }))));
                 e.target.value = "";
               }}
             />
@@ -591,7 +645,16 @@ export default function FilesTab({
               <TableHead className="w-8">
                 {canWrite ? (
                   <Checkbox
-                    aria-label="Select all"
+                    aria-label={
+                      truncatedListing
+                        ? `Select all ${entries.length} loaded rows (the listing is truncated)`
+                        : `Select all ${entries.length} rows`
+                    }
+                    title={
+                      truncatedListing
+                        ? "Selects only the rows loaded so far — the listing is truncated"
+                        : undefined
+                    }
                     checked={allChecked}
                     onCheckedChange={(c) =>
                       setSelected(c === true ? new Set(entries.map((e) => e.path)) : new Set())
@@ -631,15 +694,29 @@ export default function FilesTab({
                     ) : null}
                   </TableCell>
                   <TableCell className="max-w-0 w-full">
-                    <button
-                      type="button"
-                      onClick={() => open(e)}
-                      className="flex max-w-full items-center gap-2 text-left hover:underline"
-                      title={e.path}
-                    >
-                      <EntryIcon entry={e} />
-                      <span className="truncate">{searchQ ? e.path : e.name}</span>
-                    </button>
+                    {isOpenable(e) ? (
+                      <button
+                        type="button"
+                        onClick={() => open(e)}
+                        className="flex max-w-full items-center gap-2 text-left hover:underline"
+                        title={e.path}
+                      >
+                        <EntryIcon entry={e} />
+                        <span className="truncate">{searchQ ? e.path : e.name}</span>
+                      </button>
+                    ) : (
+                      // Symlinks are never followed by the agent (sandbox); other types can't be opened.
+                      <span
+                        className="flex max-w-full items-center gap-2"
+                        title={`${e.path} (${entryTypeLabel(e)})`}
+                      >
+                        <EntryIcon entry={e} />
+                        <span className="truncate text-muted-foreground">{searchQ ? e.path : e.name}</span>
+                        <Badge variant="outline" className="shrink-0">
+                          {entryTypeLabel(e)}
+                        </Badge>
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="text-right text-xs whitespace-nowrap">
                     {e.type === "dir" ? "—" : formatBytes(e.size)}
@@ -719,9 +796,35 @@ export default function FilesTab({
           validate={validateMode}
           pending={chmod.isPending}
           onClose={() => setDialog(null)}
-          onSubmit={(mode) => chmod.mutate({ paths: dialog.entries.map((e) => e.path), mode })}
+          onSubmit={(mode) => {
+            setPendingChmod({
+              paths: dialog.entries.map((e) => e.path),
+              mode,
+              folders: dialog.entries.filter((e) => e.type === "dir").length,
+            });
+            setDialog(null);
+          }}
         />
       ) : null}
+      <ConfirmDialog
+        open={pendingChmod !== null}
+        onOpenChange={(o) => !o && !chmod.isPending && setPendingChmod(null)}
+        title={`Set mode ${pendingChmod?.mode ?? ""} on ${pendingChmod?.paths.length ?? 0} item(s)?`}
+        description={
+          pendingChmod?.folders
+            ? `${pendingChmod.folders} folder(s) are included: the mode applies to the folders themselves, not to what is inside. A folder without the execute bit (e.g. 644) cannot be entered by the server.`
+            : "The server process must still be able to read (and, for its own files, write) them."
+        }
+        confirmLabel="Change permissions"
+        pending={chmod.isPending}
+        onConfirm={() =>
+          pendingChmod &&
+          chmod.mutate(
+            { paths: pendingChmod.paths, mode: pendingChmod.mode },
+            { onSettled: () => setPendingChmod(null) },
+          )
+        }
+      />
       {dialog?.kind === "compress" ? (
         <CompressDialog
           count={dialog.entries.length}

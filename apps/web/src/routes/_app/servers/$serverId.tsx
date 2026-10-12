@@ -1,21 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
-import type { ServerTab } from "@/lib/server-permissions";
-import { SERVER_TABS } from "@/lib/server-permissions";
 import { parseTimeRange, serializeTimeRange } from "@/lib/time-range";
 import { useMe } from "@/lib/use-me";
 import { ServerPage } from "@/features/servers/server-page";
 import type { ServerPageSearch } from "@/features/servers/server-page";
-
-const TABS = new Set<string>(SERVER_TABS.map((t) => t.id));
-const str = (v: unknown, max: number) => (typeof v === "string" && v ? v.slice(0, max) : undefined);
+import { parseServerSearch } from "@/features/servers/server-search";
 
 export const Route = createFileRoute("/_app/servers/$serverId")({
-  validateSearch: (search: Record<string, unknown>): ServerPageSearch => ({
-    tab: typeof search.tab === "string" && TABS.has(search.tab) ? (search.tab as ServerTab) : undefined,
-    path: str(search.path, 1024),
-    edit: str(search.edit, 1024),
-    range: str(search.range, 64),
-  }),
+  validateSearch: (search: Record<string, unknown>): ServerPageSearch => parseServerSearch(search),
   component: function ServerDetail() {
     const me = useMe();
     const { serverId } = Route.useParams();

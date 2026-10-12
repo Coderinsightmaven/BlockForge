@@ -7,7 +7,7 @@ import { makeClient } from "@/test/fake-socket";
 import { SERVER_ID, makeServer } from "@/test/fixtures";
 import { qk } from "../query-keys";
 import { RealtimeProvider } from "./provider";
-import { useServerListRealtime } from "./server-handlers";
+import { useServerListRealtime, useServerRealtime } from "./server-handlers";
 
 const OTHER = "44444444-4444-4444-8444-444444444444";
 
@@ -71,5 +71,52 @@ describe("useServerListRealtime", () => {
 
     rerender(ui([SERVER_ID]));
     expect(last().ops()).toContain(`unsubscribe:server:${OTHER}`);
+  });
+});
+
+describe("useServerRealtime", () => {
+  it("applies server.updated at once and re-reads the per-user DTO (throttled)", () => {
+    vi.useFakeTimers();
+    const { client, last } = makeClient();
+    const qc = new QueryClient();
+    qc.setQueryData(qk.servers.detail(SERVER_ID), makeServer({ state: "stopped" }));
+    const invalidate = vi.spyOn(qc, "invalidateQueries").mockResolvedValue();
+    function Live() {
+      useServerRealtime(SERVER_ID, true);
+      return null;
+    }
+    render(
+      <QueryClientProvider client={qc}>
+        <RealtimeProvider client={client}>
+          <Live />
+        </RealtimeProvider>
+      </QueryClientProvider>,
+    );
+    act(() => last().open());
+    const { myPermissions: _p, sftp: _s, ...broadcast } = makeServer({ state: "running" });
+    const updated = (ts: number) =>
+      act(() =>
+        last().receive({
+          op: "event",
+          topic: `server:${SERVER_ID}`,
+          type: "server.updated",
+          ts,
+          data: broadcast,
+        }),
+      );
+    updated(1);
+    // Immediate cache write; per-user fields kept from REST.
+    const cached = qc.getQueryData<Server>(qk.servers.detail(SERVER_ID))!;
+    expect(cached.state).toBe("running");
+    expect(cached.myPermissions.length).toBeGreaterThan(0);
+    // A burst of updates causes one detail refetch after the throttle window.
+    updated(2);
+    updated(3);
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(2000));
+    const detailCalls = invalidate.mock.calls.filter(
+      ([f]) => JSON.stringify(f?.queryKey) === JSON.stringify(qk.servers.detail(SERVER_ID)),
+    );
+    expect(detailCalls).toHaveLength(1);
   });
 });

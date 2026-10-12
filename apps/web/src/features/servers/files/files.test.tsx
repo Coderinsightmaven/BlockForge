@@ -7,7 +7,8 @@ import { ApiError } from "@/lib/api/errors";
 import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FileEditor } from "./file-editor";
-import { sortEntries, validateMode } from "./files-tab";
+import FilesTab, { entryTypeLabel, isOpenable, sortEntries, validateMode } from "./files-tab";
+import { MAX_DROPPED_FILES, collectDrop, planUploads } from "./drop";
 import {
   baseName,
   breadcrumbs,
@@ -25,12 +26,19 @@ import { isSameOriginUrl } from "./upload";
 
 // jsdom cannot lay out CodeMirror; the editor contract (value/onChange/readOnly) is what matters here.
 vi.mock("./code-editor", () => ({
-  default: (p: { value: string; onChange: (v: string) => void; readOnly: boolean; ariaLabel: string }) => (
+  default: (p: {
+    value: string;
+    onChange: (v: string) => void;
+    readOnly: boolean;
+    ariaLabel: string;
+    onEscape?: () => void;
+  }) => (
     <textarea
       aria-label={p.ariaLabel}
       value={p.value}
       readOnly={p.readOnly}
       onChange={(e) => p.onChange(e.target.value)}
+      onKeyDown={(e) => e.key === "Escape" && p.onEscape?.()}
     />
   ),
 }));
@@ -107,12 +115,18 @@ describe("saveFile conflict handling", () => {
   });
 });
 
-function renderEditor(path: string, server = makeServer()) {
+function renderEditor(path: string, server = makeServer(), onDirtyChange?: (dirty: boolean) => void) {
   return render(
     <ThemeProvider>
       <QueryClientProvider client={new QueryClient()}>
         <TooltipProvider>
-          <FileEditor server={server} path={path} isNew={false} onClose={() => {}} />
+          <FileEditor
+            server={server}
+            path={path}
+            isNew={false}
+            onClose={() => {}}
+            onDirtyChange={onDirtyChange}
+          />
         </TooltipProvider>
       </QueryClientProvider>
     </ThemeProvider>,
@@ -204,5 +218,184 @@ describe("FileEditor", () => {
     renderEditor("config/secret.cfg");
     expect(await screen.findByText(/file denylist/)).toBeTruthy();
     expect(screen.getByText("Protected by the server's template")).toBeTruthy();
+  });
+});
+
+describe("FileEditor keyboard and dirty reporting (#9, #10)", () => {
+  it("reports unsaved changes to the page and Escape leaves the editor for the Back button", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(contents())),
+    );
+    const onDirty = vi.fn();
+    const user = userEvent.setup();
+    const { unmount } = renderEditor("server.properties", makeServer(), onDirty);
+    const editor = (await screen.findByLabelText("Editing server.properties")) as HTMLTextAreaElement;
+    await user.type(editor, "x");
+    expect(onDirty).toHaveBeenLastCalledWith(true);
+    await user.keyboard("{Escape}");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Files" }));
+    expect(screen.getByText(/Tab indents · Esc leaves the editor/)).toBeTruthy();
+    unmount();
+    expect(onDirty).toHaveBeenLastCalledWith(false);
+  });
+});
+
+// -------------------------------------------------------------------------------------------------
+
+const file = (name: string, content = "x") => new File([content], name);
+
+describe("upload planning (#7)", () => {
+  it("creates folders parents-first and uploads into them", () => {
+    const plan = planUploads([
+      { path: "world/region/r.0.0.mca", file: file("r.0.0.mca") },
+      { path: "world/level.dat", file: file("level.dat") },
+      { path: "ops.json", file: file("ops.json") },
+    ]);
+    expect(plan.errors).toEqual([]);
+    expect(plan.dirs).toEqual(["world", "world/region"]);
+    expect(plan.files.map((f) => [f.relativeDir, f.file.name])).toEqual([
+      ["world/region", "r.0.0.mca"],
+      ["world", "level.dat"],
+      ["", "ops.json"],
+    ]);
+  });
+
+  it("rejects traversal and separators in any segment (picker names included)", () => {
+    const plan = planUploads([
+      { path: "../escape.txt", file: file("escape.txt") },
+      { path: "a/../../b.txt", file: file("b.txt") },
+      { path: "evil\\..\\x", file: file("x") },
+      { path: "ok.txt", file: file("ok.txt") },
+    ]);
+    expect(plan.files.map((f) => f.file.name)).toEqual(["ok.txt"]);
+    expect(plan.dirs).toEqual([]);
+    expect(plan.errors).toHaveLength(3);
+  });
+});
+
+// Minimal File System Entry fakes (what browsers hand out from webkitGetAsEntry).
+type FakeEntry = {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  file?: (ok: (f: File) => void, fail: (e: unknown) => void) => void;
+  createReader?: () => { readEntries: (ok: (e: FakeEntry[]) => void, fail: (e: unknown) => void) => void };
+};
+const fileEntry = (name: string): FakeEntry => ({
+  isFile: true,
+  isDirectory: false,
+  name,
+  file: (ok) => ok(file(name)),
+});
+const dirEntry = (name: string, children: FakeEntry[] | "unreadable", batch = 2): FakeEntry => ({
+  isFile: false,
+  isDirectory: true,
+  name,
+  createReader: () => {
+    let offset = 0;
+    return {
+      readEntries: (ok, fail) => {
+        if (children === "unreadable") return fail(new Error("NotReadableError"));
+        const next = children.slice(offset, offset + batch);
+        offset += next.length;
+        ok(next);
+      },
+    };
+  },
+});
+const dataTransfer = (entries: FakeEntry[]) =>
+  ({
+    items: entries.map((e) => ({ kind: "file", webkitGetAsEntry: () => e, getAsFile: () => null })),
+    files: [],
+  }) as unknown as DataTransfer;
+
+describe("folder drops (#7)", () => {
+  it("walks nested folders (all readEntries batches) and keeps relative paths", async () => {
+    const dt = dataTransfer([
+      dirEntry("plugins", [
+        fileEntry("a.jar"),
+        fileEntry("b.jar"),
+        fileEntry("c.jar"),
+        dirEntry("Essentials", [fileEntry("config.yml")]),
+      ]),
+      fileEntry("server.properties"),
+    ]);
+    const { items, errors } = await collectDrop(dt);
+    expect(errors).toEqual([]);
+    expect(items.map((i) => i.path).sort()).toEqual([
+      "plugins/Essentials/config.yml",
+      "plugins/a.jar",
+      "plugins/b.jar",
+      "plugins/c.jar",
+      "server.properties",
+    ]);
+    expect(planUploads(items).dirs).toEqual(["plugins", "plugins/Essentials"]);
+  });
+
+  it("reports unreadable folders and files instead of silently uploading nothing", async () => {
+    const broken: FakeEntry = {
+      isFile: true,
+      isDirectory: false,
+      name: "locked.bin",
+      file: (_ok, fail) => fail(new Error("denied")),
+    };
+    const { items, errors } = await collectDrop(dataTransfer([dirEntry("secret", "unreadable"), broken]));
+    expect(items).toEqual([]);
+    expect(errors).toEqual(["secret/: the folder could not be read.", "locked.bin: could not be read."]);
+  });
+
+  it("stops expanding a drop at the file cap", async () => {
+    const many = Array.from({ length: MAX_DROPPED_FILES + 5 }, (_, i) => fileEntry(`f${i}.txt`));
+    const { items, errors } = await collectDrop(dataTransfer([dirEntry("big", many, 1000)]));
+    expect(items).toHaveLength(MAX_DROPPED_FILES);
+    expect(errors).toEqual([`Only the first ${MAX_DROPPED_FILES} files were taken.`]);
+  });
+});
+
+describe("file list rows (#8, #17)", () => {
+  it("links and special files are labelled, not dead buttons; select-all names its scope", async () => {
+    const entry = (name: string, type: string) => ({ name, path: name, type, size: 1, modifiedAt: 1 });
+    // jsdom has no layout: give the virtualised table a viewport so its rows render.
+    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600);
+    const width = vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(800);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          path: "",
+          truncated: true,
+          entries: [
+            entry("world", "dir"),
+            entry("server.properties", "file"),
+            entry("latest", "symlink"),
+            entry("pipe", "other"),
+          ],
+        }),
+      ),
+    );
+    render(
+      <ThemeProvider>
+        <QueryClientProvider client={new QueryClient()}>
+          <TooltipProvider>
+            <FilesTab server={makeServer()} path="" editing={null} onNavigate={() => {}} onEdit={() => {}} />
+          </TooltipProvider>
+        </QueryClientProvider>
+      </ThemeProvider>,
+    );
+    expect(await screen.findByRole("button", { name: "server.properties" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "world" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^latest/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^pipe/ })).toBeNull();
+    expect(screen.getByText("symlink — not followed")).toBeTruthy();
+    expect(screen.getByText("special file")).toBeTruthy();
+    expect(
+      screen.getByRole("checkbox", { name: "Select all 4 loaded rows (the listing is truncated)" }),
+    ).toBeTruthy();
+    expect(isOpenable({ type: "symlink" })).toBe(false);
+    expect(isOpenable({ type: "file" })).toBe(true);
+    expect(entryTypeLabel({ type: "dir" })).toBe("dir");
+    height.mockRestore();
+    width.mockRestore();
   });
 });

@@ -6,6 +6,7 @@ import type { Me, Template, TemplateImportPreview, TemplateSummary } from "@bloc
 import { templatesApi } from "@/lib/api/servers-api";
 import { describeError, fieldErrorsFrom } from "@/lib/api/errors";
 import { toastError, useApiMutation } from "@/lib/mutations";
+import { downloadText } from "@/lib/download";
 import { hasGlobal } from "@/lib/permissions";
 import { templateQuery, templatesQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
@@ -58,12 +59,7 @@ export function hasBlockingIssues(
 }
 
 function downloadJson(name: string, data: unknown) {
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadText(name, JSON.stringify(data, null, 2), "application/json");
 }
 
 function AllowlistHelp({ images }: { images: string[] }) {

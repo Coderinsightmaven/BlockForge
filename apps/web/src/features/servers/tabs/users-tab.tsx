@@ -11,6 +11,7 @@ import { qk } from "@/lib/query-keys";
 import {
   BASE_SUBUSER_PERMISSIONS,
   SUBUSER_PERMISSION_GROUPS,
+  defaultSubuserGrant,
   grantablePermissions,
   normalizeGrant,
   serverActionable,
@@ -73,7 +74,18 @@ export function PermissionMatrix({
         return (
           <fieldset key={g.id} className="rounded-md border p-2.5">
             <legend className="flex w-full items-center justify-between gap-2 px-1 text-xs font-semibold">
-              {g.label}
+              <span className="flex items-center gap-1.5">
+                {g.label}
+                {g.uiPhase ? (
+                  <Badge
+                    variant="outline"
+                    className="font-normal"
+                    title="These permissions apply through the API today; the panel pages arrive later."
+                  >
+                    API only · UI in Phase {g.uiPhase}
+                  </Badge>
+                ) : null}
+              </span>
               {editable.length > 1 ? (
                 <button
                   type="button"
@@ -102,7 +114,8 @@ export function PermissionMatrix({
                   >
                     <Checkbox
                       id={id}
-                      checked={isBase || value.has(p.permission) || lockedHeld}
+                      // Never show a permission as granted that the granter cannot grant.
+                      checked={isBase || lockedHeld || (can && value.has(p.permission))}
                       disabled={isBase || !can}
                       onCheckedChange={(c) => toggle(p.permission, c === true)}
                       className="mt-0.5"
@@ -145,7 +158,7 @@ function SubuserDialog({
     if (!open) return;
     setUser("");
     setError(null);
-    setPerms(new Set(subuser?.permissions ?? ["servers.console.view", "servers.view"]));
+    setPerms(new Set(subuser?.permissions ?? defaultSubuserGrant(server.myPermissions)));
   }, [open, subuser]);
   const save = useApiMutation({
     mutationFn: (permissions: Permission[]) =>

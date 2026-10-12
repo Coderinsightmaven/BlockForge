@@ -121,6 +121,7 @@ export function makeServer(overrides: Partial<ServerT> = {}): ServerT {
     lastStartedAt: null,
     lastCrashAt: null,
     lastExitCode: null,
+    lastOomKilled: false,
     createdAt: 1_700_000_000_000,
     latest: null,
     myPermissions: [...SERVER_OWNER_PERMISSIONS],

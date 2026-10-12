@@ -61,7 +61,8 @@ describe("useApiMutation sensitive mode", () => {
       onError,
     });
     act(() => ref.current!.mutate("123456"));
-    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(err));
+    // Sensitive mutations never hand the variables back (they are not retained).
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledWith(err, undefined));
     await vi.waitFor(() => expect(ref.current!.status).toBe("idle"));
   });
 

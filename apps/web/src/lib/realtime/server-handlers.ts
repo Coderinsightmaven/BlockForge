@@ -34,7 +34,11 @@ export function useServerRealtime(serverId: string, enabled: boolean): void {
       const server = parseServerUpdated(event.data);
       if (server && server.id === serverId) {
         const before = queryClient.getQueryData<Server>(qk.servers.detail(serverId));
+        // Show the broadcast state at once, then re-read the full DTO: per-user fields
+        // (myPermissions, sftp) are not broadcast and may have changed with it (e.g. a subuser's
+        // grants, an owner change, a new allocation's alias). Throttled, so bursts cost one read.
         applyServerEvent(queryClient, server);
+        invalidate();
         // Allocation / image changes affect the sub-resources shown in tabs.
         if (
           before &&

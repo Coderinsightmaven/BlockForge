@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useBlocker } from "@tanstack/react-router";
 import { ArrowLeft, Lock } from "lucide-react";
-import { Suspense, lazy, useState } from "react";
+import { Suspense, lazy, useCallback, useRef, useState } from "react";
 import type { Me, Server } from "@blockforge/contracts";
 import { isApiError } from "@/lib/api/errors";
 import { serverQuery } from "@/lib/queries";
@@ -17,10 +17,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ServerStateBadge } from "@/components/ui/status";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ConsolePanel } from "./console/console-panel";
+import { shouldBlockEditorLeave } from "./editor-guard";
 import { EulaBanner } from "./eula-banner";
+import type { PowerAction } from "./server-common";
 import {
   JobProgress,
   PowerControls,
+  PowerJobNotice,
   ServerAddress,
   ServerLiveStats,
   StateHint,
@@ -80,8 +83,27 @@ export function ServerPage({
 }) {
   const query = useQuery(serverQuery(serverId));
   const [eulaPrompt, setEulaPrompt] = useState(false);
+  const [powerJob, setPowerJob] = useState<{ jobId: string; action: PowerAction } | null>(null);
   const server = query.data;
   useServerRealtime(serverId, !!server);
+  // Unsaved file-editor changes guard every way of leaving the editor: tab switches, links,
+  // back/forward. (The editor's own Back button asks first and clears the flag; reloads/closing
+  // the tab are covered by the editor's beforeunload handler.)
+  const editorDirty = useRef(false);
+  const onEditorDirty = useCallback((d: boolean) => {
+    editorDirty.current = d;
+  }, []);
+  const shouldBlockFn = useCallback(
+    ({
+      current,
+      next,
+    }: {
+      current: { pathname: string; search: unknown };
+      next: { pathname: string; search: unknown };
+    }) => shouldBlockEditorLeave(editorDirty, current, next),
+    [],
+  );
+  useBlocker({ shouldBlockFn, enableBeforeUnload: false });
 
   if (query.isPending) {
     return (
@@ -148,11 +170,26 @@ export function ServerPage({
             {server.ownerId !== me.user.id ? <span>Owner {server.ownerName}</span> : null}
           </span>
         }
-        actions={serverCan(server, "servers.control") ? <PowerControls server={server} /> : null}
+        actions={
+          serverCan(server, "servers.control") ? (
+            <PowerControls server={server} onJob={(jobId, action) => setPowerJob({ jobId, action })} />
+          ) : null
+        }
       />
       <div className="flex flex-col gap-3">
         <SuspendedBanner server={server} />
         <EulaBanner server={server} promptSeen={eulaPrompt} onAccepted={() => setEulaPrompt(false)} />
+        {powerJob ? (
+          <PowerJobNotice
+            key={powerJob.jobId}
+            jobId={powerJob.jobId}
+            action={powerJob.action}
+            onFailed={(code) => {
+              if (code === "EULA_NOT_ACCEPTED") setEulaPrompt(true);
+            }}
+            onDismiss={() => setPowerJob(null)}
+          />
+        ) : null}
         {job ? <JobProgress key={job.jobId} jobId={job.jobId} title={job.title} /> : null}
       </div>
 
@@ -197,6 +234,7 @@ export function ServerPage({
                     editing={search.edit ?? null}
                     onNavigate={(path) => onSearch({ path: path || undefined, edit: undefined })}
                     onEdit={(edit) => onSearch({ edit: edit ?? undefined })}
+                    onEditorDirty={onEditorDirty}
                   />
                 ) : null}
                 {tab === "startup" ? <StartupTab server={server} /> : null}

@@ -79,6 +79,8 @@ export interface CodeEditorProps {
   language: EditorLanguage;
   readOnly: boolean;
   onSave?: () => void;
+  /** Escape (with no search panel or selection to dismiss) leaves the editor — Tab indents. */
+  onEscape?: () => void;
   ariaLabel: string;
 }
 
@@ -88,6 +90,7 @@ export default function CodeEditor({
   language,
   readOnly,
   onSave,
+  onEscape,
   ariaLabel,
 }: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null);
@@ -97,6 +100,8 @@ export default function CodeEditor({
   const onSaveRef = useRef(onSave);
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
+  const onEscapeRef = useRef(onEscape);
+  onEscapeRef.current = onEscape;
 
   useEffect(() => {
     if (!host.current) return;
@@ -128,6 +133,15 @@ export default function CodeEditor({
             ...defaultKeymap,
             ...historyKeymap,
             ...searchKeymap,
+            // Last, so closing the search panel / collapsing a selection keeps priority.
+            {
+              key: "Escape",
+              run: () => {
+                if (!onEscapeRef.current) return false;
+                onEscapeRef.current();
+                return true;
+              },
+            },
           ]),
           languageExtension(language),
           syntaxHighlighting(highlight),
@@ -142,6 +156,8 @@ export default function CodeEditor({
       }),
     });
     view.current = v;
+    // Opening a file puts the cursor in it (keyboard users land in the document).
+    v.focus();
     return () => {
       v.destroy();
       view.current = null;

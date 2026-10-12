@@ -80,6 +80,8 @@ export interface PermissionGroup {
   id: string;
   label: string;
   permissions: PermissionInfo[];
+  /** The panel has no page for this yet (the permission still applies to the API). */
+  uiPhase?: number;
 }
 
 const P = (permission: Permission, label: string, description: string): PermissionInfo => ({
@@ -123,6 +125,7 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "config",
     label: "Configuration",
+    uiPhase: 4,
     permissions: [
       P("servers.config.view", "View config", "Read managed configuration files such as server.properties."),
       P("servers.config.edit", "Edit config", "Change managed configuration files (with revision history)."),
@@ -131,6 +134,7 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "backups",
     label: "Backups",
+    uiPhase: 6,
     permissions: [
       P("servers.backups.view", "View", "See backups."),
       P("servers.backups.create", "Create", "Create backups."),
@@ -179,6 +183,7 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "schedules",
     label: "Schedules",
+    uiPhase: 4,
     permissions: [
       P("schedules.view", "View", "See scheduled tasks."),
       P("schedules.manage", "Manage", "Create, edit and run scheduled tasks."),
@@ -200,6 +205,7 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "players",
     label: "Players",
+    uiPhase: 4,
     permissions: [
       P("servers.players.view", "View players", "See online players and player history."),
       P("servers.players.manage", "Manage players", "Kick, ban, whitelist and op players."),
@@ -208,6 +214,7 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
   {
     id: "extensions",
     label: "Plugins & mods",
+    uiPhase: 4,
     permissions: [P("servers.extensions.manage", "Manage", "Install, update and remove plugins and mods.")],
   },
   {
@@ -224,6 +231,11 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
 
 /** Every subuser needs to see the server. */
 export const BASE_SUBUSER_PERMISSIONS: readonly Permission[] = ["servers.view"];
+
+/** Starting selection for a new subuser: console view (if the granter may grant it) + servers.view. */
+export function defaultSubuserGrant(granterPermissions: readonly Permission[]): Permission[] {
+  return normalizeGrant(["servers.console.view"], granterPermissions);
+}
 
 /**
  * What the granter may hand out: assignable permissions they hold themselves on this server

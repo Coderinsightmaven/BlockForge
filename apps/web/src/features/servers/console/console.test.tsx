@@ -124,3 +124,124 @@ describe("console filtering and export", () => {
     expect(text).not.toContain("§");
   });
 });
+
+describe("ConsoleStore review fixes", () => {
+  const real = (store: ConsoleStore) =>
+    store
+      .all()
+      .filter((l) => !l.local)
+      .map((l) => l.seq);
+  const notices = (store: ConsoleStore) =>
+    store
+      .all()
+      .filter((l) => l.local)
+      .map((l) => l.line);
+
+  it("announces only the increase of the cumulative history `dropped` counter", () => {
+    const store = syncStore();
+    store.loadHistory(ev([1, 2, 3], { dropped: 40 }));
+    store.loadHistory(ev([1, 2, 3, 4], { dropped: 40 }));
+    store.loadHistory(ev([1, 2, 3, 4, 5], { dropped: 45 }));
+    expect(notices(store)).toEqual([
+      "40 line(s) were dropped by the server (output rate limit).",
+      "5 line(s) were dropped by the server (output rate limit).",
+    ]);
+    // Live increments count towards what history later reports cumulatively.
+    store.push(ev([6], { dropped: 3 }));
+    store.loadHistory(ev([4, 5, 6], { dropped: 48 }));
+    expect(notices(store).filter((n) => n.includes("dropped"))).toHaveLength(3);
+  });
+
+  it("detects a gap inside one live batch", () => {
+    const onGap = vi.fn();
+    const store = syncStore({ onGap });
+    store.push(ev([1, 2]));
+    store.push(ev([3, 6, 7, 9]));
+    expect(onGap).toHaveBeenCalledOnce();
+    expect(notices(store)).toEqual(["3 line(s) missed — reloading history."]);
+    expect(real(store)).toEqual([1, 2, 3, 6, 7, 9]);
+  });
+
+  it("clear() hides everything so far, history cannot bring it back, and gaps are still seen", () => {
+    const onGap = vi.fn();
+    const store = syncStore({ onGap });
+    store.loadHistory(ev([1, 2, 3, 4, 5]));
+    store.clear();
+    expect(store.all()).toEqual([]);
+    store.loadHistory(ev([1, 2, 3, 4, 5]));
+    expect(store.all()).toEqual([]);
+    store.push(ev([6]));
+    expect(onGap).not.toHaveBeenCalled();
+    expect(real(store)).toEqual([6]);
+    store.clear();
+    store.push(ev([9]));
+    expect(onGap).toHaveBeenCalledOnce(); // 7 and 8 were missed after the clear
+  });
+
+  it("an older live line already held is a duplicate, not a restart", () => {
+    const store = syncStore();
+    store.push(ev([5, 6]));
+    store.loadHistory(ev([1, 2, 3, 4, 5]));
+    store.push(ev([6, 7]));
+    expect(real(store)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(notices(store)).toEqual([]);
+  });
+
+  it("recognises a control-plane seq restart and keeps earlier lines above the new output", () => {
+    const onGap = vi.fn();
+    const store = syncStore({ onGap });
+    store.loadHistory(ev([100, 101, 102]));
+    // The buffer restarted: seq 1.. again, newer output (ts far past the newest held line).
+    const restarted = {
+      serverId: SERVER_ID,
+      lines: [1, 2].map((seq) => ({
+        seq,
+        ts: 1_000_000 + seq,
+        stream: "stdout" as const,
+        line: `new ${seq}`,
+      })),
+    };
+    store.push(restarted);
+    expect(onGap).toHaveBeenCalledOnce();
+    const lines = store.all();
+    expect(lines.map((l) => l.line)).toEqual([
+      "line 100",
+      "line 101",
+      "line 102",
+      "The console sequence restarted on the control plane; earlier lines are kept above.",
+      "new 1",
+      "new 2",
+    ]);
+    // History of the new buffer merges without duplicating.
+    store.loadHistory({ ...restarted, lines: [...restarted.lines] });
+    expect(store.all().filter((l) => l.line.startsWith("new"))).toHaveLength(2);
+  });
+
+  it("a held seq arriving with different content is a restart (history)", () => {
+    const store = syncStore();
+    store.loadHistory(ev([1, 2, 3]));
+    store.loadHistory({
+      serverId: SERVER_ID,
+      lines: [{ seq: 1, ts: 5, stream: "stdout", line: "different" }],
+    });
+    expect(store.all().map((l) => l.line)).toEqual([
+      "line 1",
+      "line 2",
+      "line 3",
+      "The console sequence restarted on the control plane; earlier lines are kept above.",
+      "different",
+    ]);
+  });
+
+  it("counts appended lines past the ring cap (paused 'N new')", () => {
+    const store = syncStore({ max: 5 });
+    store.push(ev([1, 2, 3, 4, 5]));
+    const pausedAt = store.appendedCount;
+    store.push(ev([6, 7, 8, 9, 10, 11, 12]));
+    expect(store.all()).toHaveLength(5);
+    expect(store.appendedCount - pausedAt).toBe(7);
+    // Duplicates from a history reload are not "new".
+    store.loadHistory(ev([8, 9, 10, 11, 12]));
+    expect(store.appendedCount - pausedAt).toBe(7);
+  });
+});

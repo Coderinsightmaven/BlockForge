@@ -20,7 +20,8 @@ export interface ApiMutationOptions<TData, TVars> {
   /** Query prefixes to invalidate after success. */
   invalidate?: QueryKey[];
   onSuccess?: (data: TData, vars: TVars) => void | Promise<void>;
-  onError?: (err: unknown) => void;
+  /** Called after the error toast. (`vars` is undefined for sensitive mutations.) */
+  onError?: (err: unknown, vars: TVars) => void;
   /** Suppress the error toast (the caller renders the error inline instead). */
   silentError?: boolean;
   /**
@@ -62,9 +63,9 @@ export function useApiMutation<TData, TVars = void>(
       );
       await opts.onSuccess?.(data, vars);
     },
-    onError: (err) => {
+    onError: (err, vars) => {
       if (!opts.silentError) toastError(err, opts.errorTitle);
-      opts.onError?.(err);
+      opts.onError?.(err, vars);
     },
     onSettled: () => {
       if (!sensitive) return;

@@ -71,7 +71,8 @@ export default function ActivityTab({ server }: { server: Server }) {
                         size="icon-sm"
                         variant="ghost"
                         aria-expanded={expanded}
-                        aria-label={expanded ? "Hide details" : "Show details"}
+                        aria-controls={expanded ? `activity-${e.id}` : undefined}
+                        aria-label={`${expanded ? "Hide" : "Show"} details: ${e.action} by ${actor(e)} at ${formatTimestamp(e.at)}`}
                         onClick={() =>
                           setOpen((s) => {
                             const n = new Set(s);
@@ -92,7 +93,7 @@ export default function ActivityTab({ server }: { server: Server }) {
                     </TableCell>
                   </TableRow>
                   {expanded ? (
-                    <TableRow className="border-0 bg-muted/30 hover:bg-muted/30">
+                    <TableRow id={`activity-${e.id}`} className="border-0 bg-muted/30 hover:bg-muted/30">
                       <TableCell />
                       <TableCell colSpan={4}>
                         {/* Rendered as text: details may contain user-controlled strings (file names, commands). */}

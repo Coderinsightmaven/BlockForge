@@ -11,18 +11,19 @@ import {
   Square,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { REALTIME_EVENT_PAYLOADS, canStartOperation } from "@blockforge/contracts";
+import { REALTIME_EVENT_PAYLOADS, SERVER_JOB_ERROR_CODES, canStartOperation } from "@blockforge/contracts";
 import type { JobLogLine, Server, ServerOperation } from "@blockforge/contracts";
 import { jobsApi, serversApi } from "@/lib/api/servers-api";
-import { newIdempotencyKey } from "@/lib/api/client";
 import { describeError } from "@/lib/api/errors";
-import { formatBytes, formatBytesPerSecond, formatDuration, formatTime } from "@/lib/format";
+import { formatBytes, formatBytesPerSecond, formatDuration } from "@/lib/format";
+import { useIdempotencyKeys } from "@/lib/idempotency";
 import { useApiMutation } from "@/lib/mutations";
 import { jobQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { useRealtimeClient, useRealtimeTopic } from "@/lib/realtime/provider";
 import { serverActionable } from "@/lib/server-permissions";
 import { cpuView, diskView, memoryView, playersView } from "@/lib/server-metrics";
+import { describeJobError } from "@/lib/job-errors";
 import { cn } from "@/lib/utils";
 import { Timestamp } from "@/components/common/timestamp";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
@@ -33,11 +34,12 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Meter } from "@/components/ui/meter";
 import { JOB_STATUS_META, StatusBadge, statusMeta } from "@/components/ui/status";
 import { InfoTip, Tooltip } from "@/components/ui/tooltip";
+import { JobLog } from "./job-log";
 
 // ---------------------------------------------------------------------------------------------
 // Power
 
-type PowerAction = "start" | "stop" | "restart" | "kill";
+export type PowerAction = "start" | "stop" | "restart" | "kill";
 
 const POWER: Array<{
   action: PowerAction;
@@ -73,14 +75,29 @@ export function powerActionState(
   return { enabled: true, reason: null };
 }
 
-export function PowerControls({ server, compact }: { server: Server; compact?: boolean }) {
+export function PowerControls({
+  server,
+  compact,
+  onJob,
+}: {
+  server: Server;
+  compact?: boolean;
+  /** Called with the job a power action started (to surface a failure later). */
+  onJob?: (jobId: string, action: PowerAction) => void;
+}) {
   const queryClient = useQueryClient();
   const [confirmKill, setConfirmKill] = useState(false);
+  // One key per action until its outcome is known: a lost response followed by a second click
+  // replays the first request instead of queueing a second job.
+  const keys = useIdempotencyKeys<PowerAction>();
   const run = useApiMutation({
-    mutationFn: (action: PowerAction) => serversApi.action(server.id, { action }, newIdempotencyKey()),
+    mutationFn: (action: PowerAction) => serversApi.action(server.id, { action }, keys.sent(action)),
     success: (_d, action) => `${action[0]!.toUpperCase()}${action.slice(1)} requested`,
     errorTitle: "Power action failed",
-    onSuccess: async () => {
+    onError: (error, action) => keys.settle(action, { ok: false, error }),
+    onSuccess: async (r, action) => {
+      keys.settle(action, { ok: true });
+      onJob?.(r.jobId, action);
       await queryClient.invalidateQueries({ queryKey: qk.servers.detail(server.id) });
     },
   });
@@ -288,11 +305,6 @@ export function JobProgress({ jobId, title }: { jobId: string; title: string }) 
   const data = job.data;
   const steps = data?.steps ?? [];
   const done = steps.filter((s) => s.status === "succeeded" || s.status === "skipped").length;
-  const logRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [logs]);
   const elapsed = useMemo(
     () => (data?.startedAt ? (data.finishedAt ?? Date.now()) - data.startedAt : null),
     [data?.startedAt, data?.finishedAt],
@@ -312,11 +324,7 @@ export function JobProgress({ jobId, title }: { jobId: string; title: string }) 
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         {job.isError ? <p className="text-sm text-danger">{describeError(job.error).title}</p> : null}
-        {data?.error ? (
-          <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm">
-            <span className="font-medium">{data.error.code}:</span> {data.error.message}
-          </p>
-        ) : null}
+        {data?.error ? <JobErrorNotice error={data.error} /> : null}
         {steps.length ? (
           <ol className="grid gap-1 sm:grid-cols-2">
             {steps.map((s) => {
@@ -348,31 +356,92 @@ export function JobProgress({ jobId, title }: { jobId: string; title: string }) 
         ) : job.isPending ? (
           <p className="text-xs text-muted-foreground">Loading job…</p>
         ) : null}
-        <div
-          ref={logRef}
-          role="log"
-          aria-label="Job log"
-          className="max-h-64 overflow-auto rounded-md bg-[#0d1117] p-2 font-mono text-[11px] leading-4 break-all whitespace-pre-wrap text-[#c9d1d9]"
-        >
-          {logs.length === 0 ? (
-            <span className="text-[#6b7280]">Waiting for output…</span>
-          ) : (
-            logs.map((l) => (
-              <div
-                key={l.id}
-                className={cn(
-                  l.level === "error" && "text-[#ff8080]",
-                  l.level === "warn" && "text-[#f0a92a]",
-                )}
-              >
-                <span className="mr-2 text-[#6b7280]">{formatTime(l.ts)}</span>
-                {l.message}
-              </div>
-            ))
-          )}
-        </div>
+        <JobLog logs={logs} />
       </CardContent>
     </Card>
+  );
+}
+
+/** A failed job's error: the classified description (SERVER_JOB_ERROR_CODES), the raw message, a hint. */
+export function JobErrorNotice({
+  error,
+  title,
+  onDismiss,
+}: {
+  error: { code: string; message: string };
+  title?: string;
+  onDismiss?: () => void;
+}) {
+  const view = describeJobError(error.code);
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm"
+    >
+      <CircleX className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="font-medium">
+          {title ? `${title}: ` : ""}
+          {view.description ?? error.code}
+        </p>
+        <p className="break-words text-muted-foreground">
+          {view.description ? <span className="mr-1 font-mono text-xs">{error.code}</span> : null}
+          {error.message}
+        </p>
+        {view.hint ? <p className="mt-1 text-xs">{view.hint}</p> : null}
+      </div>
+      {onDismiss ? (
+        <Button size="sm" variant="ghost" onClick={onDismiss}>
+          Dismiss
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+const TERMINAL_JOB = new Set(["succeeded", "failed", "cancelled"]);
+
+/**
+ * Follows a power job started from PowerControls and surfaces its failure (classified start-up
+ * errors such as EULA_NOT_ACCEPTED or OOM_KILLED). Success needs no notice: the state badge shows it.
+ */
+export function PowerJobNotice({
+  jobId,
+  action,
+  onFailed,
+  onDismiss,
+}: {
+  jobId: string;
+  action: PowerAction;
+  onFailed?: (code: string) => void;
+  onDismiss: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const job = useQuery({
+    ...jobQuery(jobId),
+    // Realtime updates normally settle it; the poll covers a missed event.
+    refetchInterval: (q) => (q.state.data && TERMINAL_JOB.has(q.state.data.status) ? false : 3_000),
+  });
+  useRealtimeTopic(`job:${jobId}`, (event) => {
+    if (event.type !== "job.updated") return;
+    const parsed = REALTIME_EVENT_PAYLOADS["job.updated"].safeParse(event.data);
+    if (parsed.success) queryClient.setQueryData(qk.jobs.detail(jobId), parsed.data);
+  });
+  const data = job.data;
+  const failedCode = data?.status === "failed" ? (data.error?.code ?? "UNKNOWN") : null;
+  const onFailedRef = useRef(onFailed);
+  onFailedRef.current = onFailed;
+  useEffect(() => {
+    if (failedCode) onFailedRef.current?.(failedCode);
+  }, [failedCode]);
+  if (!data || data.status !== "failed") return null;
+  const label = `${action[0]!.toUpperCase()}${action.slice(1)}`;
+  return (
+    <JobErrorNotice
+      title={`${label} failed`}
+      error={data.error ?? { code: "UNKNOWN", message: "The job failed without an error message." }}
+      onDismiss={onDismiss}
+    />
   );
 }
 
@@ -389,12 +458,27 @@ export function SuspendedBanner({ server }: { server: Server }) {
   );
 }
 
+/**
+ * Why the server last stopped, next to its state badge: crash time + exit code, and an explicit
+ * out-of-memory marker (`lastOomKilled`) — also while it sits stopped after an OOM kill.
+ */
 export function StateHint({ server }: { server: Server }) {
-  if (!server.lastCrashAt || server.state !== "crashed") return null;
-  return (
-    <Badge tone="danger" title="Last crash">
-      Crashed <Timestamp ts={server.lastCrashAt} />
-      {server.lastExitCode !== null ? ` · exit ${server.lastExitCode}` : ""}
-    </Badge>
-  );
+  const oomTitle = SERVER_JOB_ERROR_CODES.OOM_KILLED;
+  if (server.state === "crashed" && server.lastCrashAt) {
+    return (
+      <Badge tone="danger" title={server.lastOomKilled ? oomTitle : "Last crash"}>
+        Crashed <Timestamp ts={server.lastCrashAt} />
+        {server.lastExitCode !== null ? ` · exit ${server.lastExitCode}` : ""}
+        {server.lastOomKilled ? " · out of memory" : ""}
+      </Badge>
+    );
+  }
+  if (server.lastOomKilled && (server.state === "stopped" || server.state === "crashed")) {
+    return (
+      <Badge tone="warning" title={oomTitle}>
+        Last exit: out of memory
+      </Badge>
+    );
+  }
+  return null;
 }

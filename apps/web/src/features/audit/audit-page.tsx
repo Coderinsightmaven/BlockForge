@@ -252,8 +252,8 @@ export function AuditPage({ me }: { me: Me }) {
                           size="icon-sm"
                           variant="ghost"
                           aria-expanded={open}
-                          aria-controls={`audit-${e.id}`}
-                          aria-label={open ? "Hide details" : "Show details"}
+                          aria-controls={open ? `audit-${e.id}` : undefined}
+                          aria-label={`${open ? "Hide" : "Show"} details: ${e.action} by ${actorLabel(e)} at ${formatTimestamp(e.at)}`}
                           onClick={() => toggle(e.id)}
                         >
                           {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}

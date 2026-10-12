@@ -4,6 +4,7 @@ import { LogOut, Monitor, Moon, Settings, Sun } from "lucide-react";
 import { useState } from "react";
 import type { Me } from "@blockforge/contracts";
 import { apiClient } from "@/lib/api/client";
+import { clearConsoleHistories } from "@/lib/console-history";
 import { authApi } from "@/lib/api/endpoints";
 import { isApiError } from "@/lib/api/errors";
 import { toastError } from "@/lib/mutations";
@@ -49,6 +50,7 @@ export function useLogout() {
       }
     }
     apiClient.setCsrfToken(null);
+    clearConsoleHistories();
     // Drop the session first so /login does not bounce back, then wipe everything once the
     // authenticated views have unmounted.
     queryClient.removeQueries({ queryKey: qk.auth.me });

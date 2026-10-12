@@ -3,6 +3,7 @@ import type { RegisteredRouter } from "@tanstack/react-router";
 import { apiClient } from "./api/client";
 import type { ApiClient } from "./api/client";
 import { authRedirectFor } from "./auth";
+import { clearConsoleHistories } from "./console-history";
 import type { AuthRedirect } from "./auth";
 import { qk } from "./query-keys";
 
@@ -30,6 +31,7 @@ export function createSessionEndHandler(deps: SessionEndDeps): (code: string) =>
     const target = authRedirectFor(code, location.href);
     if (!target) return false;
     (deps.client ?? apiClient).setCsrfToken(null);
+    clearConsoleHistories();
     if (redirecting || location.pathname === target.to) return true;
     redirecting = true;
     deps.queryClient.removeQueries({ queryKey: qk.auth.me });

@@ -7,8 +7,8 @@ import { OPERATION_ALLOWED_FROM, UpdateServerBuildRequest } from "@blockforge/co
 import type { Me, Server } from "@blockforge/contracts";
 import type { z } from "zod";
 import { serversApi } from "@/lib/api/servers-api";
-import { newIdempotencyKey } from "@/lib/api/client";
 import { fieldErrorsFrom } from "@/lib/api/errors";
+import { useIdempotencyKeys } from "@/lib/idempotency";
 import { formatBytes } from "@/lib/format";
 import { useApiMutation } from "@/lib/mutations";
 import { hasGlobal } from "@/lib/permissions";
@@ -160,15 +160,16 @@ function SftpCard({ server }: { server: Server }) {
 function ReinstallCard({ server }: { server: Server }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [key, setKey] = useState(newIdempotencyKey);
+  const keys = useIdempotencyKeys<"reinstall">();
   const allowed = OPERATION_ALLOWED_FROM.reinstall.includes(server.state) && !server.activeOperation;
   const reinstall = useApiMutation({
-    mutationFn: () => serversApi.reinstall(server.id, key),
+    mutationFn: () => serversApi.reinstall(server.id, keys.sent("reinstall")),
     success: "Reinstall started",
     errorTitle: "Could not reinstall",
+    onError: (error) => keys.settle("reinstall", { ok: false, error }),
     onSuccess: async () => {
+      keys.settle("reinstall", { ok: true });
       setOpen(false);
-      setKey(newIdempotencyKey());
       await queryClient.invalidateQueries({ queryKey: qk.servers.detail(server.id) });
     },
   });
@@ -461,20 +462,24 @@ function AdminCard({ me, server }: { me: Me; server: Server }) {
   );
 }
 
-function DeleteCard({ server }: { server: Server }) {
+export function DeleteCard({ server }: { server: Server }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [deleteData, setDeleteData] = useState(true);
-  const [key, setKey] = useState(newIdempotencyKey);
+  // One key per request body: changing "also delete files" mints a new one, and once a request
+  // was sent the choice is frozen until its outcome is known (a retry must replay the same body).
+  const keys = useIdempotencyKeys<"delete">();
+  const locked = keys.isLocked("delete");
   const allowed = OPERATION_ALLOWED_FROM.delete.includes(server.state) && !server.activeOperation;
   const remove = useApiMutation({
-    mutationFn: () => serversApi.remove(server.id, deleteData, key),
+    mutationFn: () => serversApi.remove(server.id, deleteData, keys.sent("delete")),
     success: `${server.name} is being deleted`,
     errorTitle: "Could not delete the server",
+    onError: (error) => keys.settle("delete", { ok: false, error }),
     onSuccess: async () => {
+      keys.settle("delete", { ok: true });
       setOpen(false);
-      setKey(newIdempotencyKey());
       await queryClient.invalidateQueries({ queryKey: qk.servers.all });
       await navigate({ to: "/servers" });
     },
@@ -509,12 +514,23 @@ function DeleteCard({ server }: { server: Server }) {
               <Checkbox
                 id="delete-data"
                 checked={deleteData}
-                onCheckedChange={(c) => setDeleteData(c === true)}
+                disabled={locked}
+                onCheckedChange={(c) => {
+                  if (locked) return;
+                  setDeleteData(c === true);
+                  keys.invalidate("delete");
+                }}
               />
               <Label htmlFor="delete-data" className="font-normal text-foreground">
                 Also delete the server's files on the node
               </Label>
             </div>
+            {locked ? (
+              <p role="status" className="text-xs">
+                A delete request {deleteData ? "including" : "keeping"} the files was already sent and its
+                outcome is unknown; retrying sends exactly the same request.
+              </p>
+            ) : null}
             {!deleteData ? (
               <Callout tone="warning">
                 Files stay on the node's disk until an administrator removes them.
