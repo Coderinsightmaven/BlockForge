@@ -13,7 +13,7 @@ import { conflict, errorMessage, invalidState, notFound } from "../lib/errors.js
 import type { TimeIdCursor } from "../lib/pagination.js";
 import { redactDeep, redactString } from "../lib/redact.js";
 import type { RealtimeHub } from "../realtime/hub.js";
-import { JobError, type EnqueueOptions, type JobDefinition, type JobLogLevel, type StepContext } from "./types.js";
+import { JobError, SKIP_STEP, type EnqueueOptions, type JobDefinition, type JobLogLevel, type StepContext } from "./types.js";
 
 export const MAX_LOG_LINES_PER_JOB = 2000;
 const QUEUE_PREFIX = "bf.";
@@ -201,15 +201,16 @@ export class JobRunner {
             await this.publishJob(jobId);
           },
         };
+        let outcome: void | typeof SKIP_STEP;
         try {
-          await stepDef.run(ctx);
+          outcome = await stepDef.run(ctx);
         } catch (err) {
           await this.updateStep(row.id, { status: "failed", message: redactString(errorMessage(err)).slice(0, 1000), finishedAt: new Date(this.clock.now()) });
           throw err;
         } finally {
           await this.db.update(jobs).set({ state: toJsonSafe(state) ?? {} }).where(eq(jobs.id, jobId));
         }
-        await this.updateStep(row.id, { status: "succeeded", finishedAt: new Date(this.clock.now()) });
+        await this.updateStep(row.id, { status: outcome === SKIP_STEP ? "skipped" : "succeeded", finishedAt: new Date(this.clock.now()) });
         await this.publishJob(jobId);
       }
       const latest = await this.reload(jobId);
@@ -251,6 +252,9 @@ export class JobRunner {
   }
 
   private async finish(row: JobRow, status: "succeeded" | "failed" | "cancelled", error: { code: string; message: string } | null, result: unknown = null): Promise<void> {
+    // Finalize first: when a job is observed terminal, its target has already been settled (and an
+    // operation lock is never left behind by a crash between the two).
+    await this.runFinalize(row, status, error);
     const now = new Date(this.clock.now());
     await withTransaction(this.db, async (tx, after) => {
       await tx
@@ -275,6 +279,24 @@ export class JobRunner {
     });
     this.logCounts.delete(row.id);
     await this.publishJob(row.id);
+  }
+
+  private async runFinalize(row: JobRow, status: "succeeded" | "failed" | "cancelled", error: { code: string; message: string } | null): Promise<void> {
+    const def = this.definitions.get(row.type);
+    if (!def?.finalize) return;
+    try {
+      const fresh = await this.reload(row.id);
+      await def.finalize({
+        jobId: row.id,
+        input: def.input.parse((fresh ?? row).inputData),
+        state: ((fresh ?? row).state ?? {}) as Record<string, unknown>,
+        status,
+        error,
+        log: (level, message) => this.log(row.id, level, message),
+      });
+    } catch (err) {
+      this.logger.error({ err, jobId: row.id, type: row.type }, "job finalize hook failed");
+    }
   }
 
   private async reload(jobId: string): Promise<JobRow | null> {

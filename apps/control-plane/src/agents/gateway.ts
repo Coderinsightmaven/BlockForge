@@ -13,6 +13,7 @@ import {
   ProgressFrame,
   ResultErrFrame,
   ResultOkFrame,
+  SftpActivityEvent,
   WorkloadOomEvent,
   WorkloadStateEvent,
   redactCommandPayload,
@@ -38,7 +39,7 @@ import { encodeNodeSample, encodeWorkloadSample } from "../metrics/encode.js";
 import type { VmWriter } from "../metrics/vm-writer.js";
 import type { RealtimeHub } from "../realtime/hub.js";
 import { buildSignedCommand } from "./commands.js";
-import type { ConsoleBuffers } from "./console-buffer.js";
+import type { ConsoleBuffers, ConsoleLine } from "./console-buffer.js";
 import type { NodeStateTracker } from "./node-state.js";
 import type { ControlPlaneSigner } from "./signing-key.js";
 import type { WorkloadOwnership } from "./workload-ownership.js";
@@ -81,6 +82,8 @@ export class AgentCommandError extends Error {
 export interface SendOptions {
   /** Time to wait for the result (default 30 s, max 15 min); also bounds the command's expiry. */
   timeoutMs?: number;
+  /** Longer result wait for commands that keep running after they started (e.g. `workload.install`). */
+  resultTimeoutMs?: number;
   jobId?: string | null;
   userId?: string | null;
   onProgress?: (p: ProgressUpdate) => void;
@@ -172,6 +175,13 @@ export interface GatewayStats {
 
 export interface GatewayEvents {
   workloadState: [nodeId: string, status: WorkloadStatus];
+  /** Workload stdout/stderr appended to the console buffer (after ownership checks). */
+  consoleLines: [serverId: string, lines: ConsoleLine[]];
+  /** Output of a `workload.install` container (also mirrored into the console as `system` lines). */
+  installLines: [serverId: string, lines: { ts: number; stream: "stdout" | "stderr"; line: string }[]];
+  /** All workloads reported in a `hello` (resync after (re)connect). */
+  workloadsResync: [nodeId: string, workloads: WorkloadStatus[]];
+  sftpActivity: [nodeId: string, activity: z.infer<typeof SftpActivityEvent>];
   workloadOom: [nodeId: string, workloadId: string];
   sessionReady: [nodeId: string];
   sessionClosed: [nodeId: string];
@@ -482,7 +492,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       ip: session.ip,
     });
     const owned = await this.deps.ownership.owned(session.nodeId, frame.workloads.map((w) => w.workloadId));
-    for (const w of frame.workloads) if (owned.has(w.workloadId)) this.emit("workloadState", session.nodeId, w);
+    this.emit("workloadsResync", session.nodeId, frame.workloads.filter((w) => owned.has(w.workloadId)));
     const rt = this.tracker.get(session.nodeId);
     if (session.closed) return;
     session.sendFrame(this.welcomeFrame(session.nodeId, rt?.status !== "pending"));
@@ -587,6 +597,16 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
         this.emit("workloadOom", nodeId, s.data.workloadId);
         return;
       }
+      case "sftp.activity": {
+        const s = SftpActivityEvent.safeParse(frame.data);
+        if (!s.success) return this.malformed(session, "invalid sftp.activity event", zodDetails(s.error));
+        if (!(await this.deps.ownership.owned(nodeId, [s.data.workloadId])).has(s.data.workloadId)) {
+          this.stats.droppedWorkloadFrames++;
+          return;
+        }
+        this.emit("sftpActivity", nodeId, s.data);
+        return;
+      }
       case "agent.warning": {
         const s = AgentWarningEvent.safeParse(frame.data);
         if (!s.success) return this.malformed(session, "invalid agent.warning event", zodDetails(s.error));
@@ -607,7 +627,16 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     const lines = frame.lines.map((l) =>
       l.line.length > AGENT_LIMITS.logLineMaxBytes ? { ...l, line: l.line.slice(0, AGENT_LIMITS.logLineMaxBytes) } : l,
     );
+    if (frame.source === "install") {
+      // Install-container output: mirrored into the console as `system` lines, and to listeners
+      // (the running provision/reinstall job writes it to its job log).
+      const appended = lines.map((l) => this.deps.consoles.appendSystem(serverId, l.ts, `[install] ${l.line}`));
+      this.emit("installLines", serverId, lines);
+      this.deps.hub.publish(`console:${serverId}`, "console.lines", { serverId, lines: appended });
+      return;
+    }
     const appended = this.deps.consoles.append(serverId, lines, frame.dropped ?? 0);
+    this.emit("consoleLines", serverId, appended);
     this.deps.hub.publish(`console:${serverId}`, "console.lines", {
       serverId,
       lines: appended,
@@ -653,8 +682,11 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     if (!parsed.success) {
       throw new AgentCommandError("VALIDATION_FAILED", "invalid command payload", false, zodDetails(parsed.error));
     }
-    const timeoutMs = Math.max(1000, Math.min(opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, AGENT_LIMITS.commandMaxLifetimeMs));
-    const cmd = buildSignedCommand(this.deps.signer.privateKey, nodeId, type, parsed.data, this.deps.clock.now(), timeoutMs, opts.commandId);
+    // The signed lifetime (how long the agent may start executing it) is capped at 15 min; the result
+    // wait may be longer for commands that run long once started (install containers).
+    const lifetimeMs = Math.max(1000, Math.min(opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, AGENT_LIMITS.commandMaxLifetimeMs));
+    const timeoutMs = Math.max(lifetimeMs, opts.resultTimeoutMs ?? 0);
+    const cmd = buildSignedCommand(this.deps.signer.privateKey, nodeId, type, parsed.data, this.deps.clock.now(), lifetimeMs, opts.commandId);
     await this.deps.db.insert(agentCommands).values({
       id: cmd.id,
       nodeId,

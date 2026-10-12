@@ -103,6 +103,7 @@ export class NodesService {
         lastConnectedAt: rt?.lastConnectedAt ?? r.lastConnectedAt?.getTime() ?? null,
         clockSkewMs: rt?.clockSkewMs !== null && rt?.clockSkewMs !== undefined ? Math.round(rt.clockSkewMs) : (r.clockSkewMs ?? null),
         facts: r.facts ?? null,
+        warnings: latestWarningPerCode(rt?.warnings ?? []),
         capacity: computeCapacity(r, r.facts ?? null, {
           cpuMillicores: Number(rr?.cpu ?? 0),
           memoryBytes: Number(rr?.memory ?? 0),
@@ -229,4 +230,14 @@ export class NodesService {
     this.tracker.remove(id);
     this.latest.removeNode(id);
   }
+}
+
+/** Most recent warning per code, newest first (the tracker keeps a bounded history). */
+function latestWarningPerCode(history: readonly { at: number; code: string; message: string }[]): Node["warnings"] {
+  const byCode = new Map<string, { at: number; code: string; message: string }>();
+  for (const w of history) {
+    const prev = byCode.get(w.code);
+    if (!prev || prev.at <= w.at) byCode.set(w.code, w);
+  }
+  return [...byCode.values()].sort((a, b) => b.at - a.at).map((w) => ({ code: w.code, message: w.message, at: w.at }));
 }

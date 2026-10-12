@@ -29,7 +29,7 @@ const sB1 = server(SRV_B1, NODE_B, NET_1);
 function grant(roleKey: keyof typeof BUILTIN_ROLES, scopeType: ScopeType, scopeId: string | null): Grant {
   return { bindingId: `${roleKey}-${scopeType}-${scopeId}`, roleKey, scopeType, scopeId, permissions: new Set<Permission>(BUILTIN_ROLES[roleKey].permissions) };
 }
-const principal = (...grants: Grant[]): Principal => ({ userId: "u", email: "u@example.com", displayName: "U", grants });
+const principal = (...grants: Grant[]): Principal => ({ userId: "u", email: "u@example.com", username: "u-user", displayName: "U", grants });
 
 describe("scope resolution", () => {
   it("global covers everything", () => {

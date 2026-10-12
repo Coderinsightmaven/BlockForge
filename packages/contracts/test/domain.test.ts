@@ -184,3 +184,12 @@ describe("realtime topics", () => {
     expect(Topic.safeParse("admin").success).toBe(false);
   });
 });
+
+describe("query booleans", () => {
+  it("?free=false is false", async () => {
+    const { AllocationListQuery } = await import("../src/index.js");
+    expect(AllocationListQuery.parse({ free: "false" }).free).toBe(false);
+    expect(AllocationListQuery.parse({ free: "true" }).free).toBe(true);
+    expect(AllocationListQuery.parse({}).free).toBeUndefined();
+  });
+});

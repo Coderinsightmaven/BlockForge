@@ -1,5 +1,5 @@
 import type { Readable } from "node:stream";
-import { EnrollRequest } from "@blockforge/contracts";
+import { EnrollRequest, SftpAuthRequest } from "@blockforge/contracts";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -53,6 +53,14 @@ export function registerAgentRoutes(app: FastifyInstance, ctx: AppContext): void
       return;
     }
     ctx.gateway.attach(agent.nodeId, socket, req.ip ?? null);
+  });
+
+  // SFTP logins on the agent's SFTP server; 401 (no detail) for every refusal.
+  app.post("/sftp/auth", { onRequest: authenticate }, async (req) => {
+    const agent = req.agent;
+    if (!agent) throw new AppError(401, "UNAUTHENTICATED", "Invalid agent credentials");
+    const body = parse(SftpAuthRequest, req.body);
+    return ctx.sftp.authenticate(agent.nodeId, body);
   });
 
   app.post("/transfers/:id", { onRequest: authenticate, bodyLimit: Number.MAX_SAFE_INTEGER }, async (req, reply) => {

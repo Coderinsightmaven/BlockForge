@@ -6,7 +6,8 @@ import { actorOf, requirePermission, requirePrincipal } from "../http/auth-hooks
 import { parse } from "../http/validation.js";
 import { forbidden, notFound } from "../lib/errors.js";
 import { decodeCursor, encodeCursor, TimeIdCursor } from "../lib/pagination.js";
-import { permittedScopes, type Resource } from "../rbac/authorize.js";
+import type { Permission } from "@blockforge/contracts";
+import { authorize, permittedScopes, type Resource } from "../rbac/authorize.js";
 
 const IdParams = z.object({ id: z.uuid() });
 const JobListQuery = PageQuery.extend({
@@ -25,15 +26,30 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     return { row, resource };
   }
 
+  /** Server jobs: effective server permissions (roles ∪ ownership ∪ subuser); others: RBAC. */
+  async function requireJobPermission(req: FastifyRequest, row: { targetType: string | null; targetId: string | null }, resource: Resource, permission: Permission) {
+    if (row.targetType === "server" && row.targetId) {
+      const principal = requirePrincipal(req);
+      const perms = await ctx.serverAccess.permissionsOf(principal, row.targetId);
+      if (perms) {
+        if (perms.has(permission)) return;
+        await requirePermission(ctx.audit, req, permission, resource);
+        return;
+      }
+    }
+    await requirePermission(ctx.audit, req, permission, resource);
+  }
+
   app.get("/jobs", async (req) => {
     const principal = requirePrincipal(req);
     const q = parse(JobListQuery, req.query, "Query");
     const scopes = permittedScopes(principal, "jobs.view");
     let visible: { nodeIds: string[]; serverIds: string[] } | undefined;
-    if (!scopes.all) {
+    if (!scopes.all && !authorize(principal, "jobs.view", { type: "global" })) {
       const nodeIds = await ctx.rbac.visibleNodeIds(scopes);
       const serverIds = await ctx.rbac.visibleServerIds(scopes);
-      visible = { nodeIds: nodeIds === "all" ? [] : nodeIds, serverIds: serverIds === "all" ? [] : serverIds };
+      const personal = await ctx.serverAccess.personalServerIds(principal.userId, "jobs.view");
+      visible = { nodeIds: nodeIds === "all" ? [] : nodeIds, serverIds: [...new Set([...(serverIds === "all" ? [] : serverIds), ...personal])] };
       if (!visible.nodeIds.length && !visible.serverIds.length) throw forbidden();
     }
     const page = await ctx.jobs.list({
@@ -49,20 +65,20 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.get("/jobs/:id", async (req) => {
     const { row, resource } = await jobAndResource(req);
-    await requirePermission(ctx.audit, req, "jobs.view", resource);
+    await requireJobPermission(req, row, resource, "jobs.view");
     return ctx.jobs.getDto(row.id);
   });
 
   app.get("/jobs/:id/logs", async (req) => {
     const { row, resource } = await jobAndResource(req);
-    await requirePermission(ctx.audit, req, "jobs.view", resource);
+    await requireJobPermission(req, row, resource, "jobs.view");
     return ctx.jobs.logs(row.id, parse(LogsQuery, req.query, "Query").afterId);
   });
 
   app.post("/jobs/:id/cancel", async (req, reply) => {
     const { row, resource } = await jobAndResource(req);
     const permission = ctx.jobs.definition(row.type)?.cancelPermission ?? "settings.manage";
-    await requirePermission(ctx.audit, req, permission, resource);
+    await requireJobPermission(req, row, resource, permission);
     return ctx.idempotency.handle(req, reply, "POST /jobs/:id/cancel", async () => {
       await ctx.jobs.cancel(row.id);
       await ctx.audit.record({ ...actorOf(req), action: "job.cancel", targetType: "job", targetId: row.id, outcome: "success", details: { type: row.type } });

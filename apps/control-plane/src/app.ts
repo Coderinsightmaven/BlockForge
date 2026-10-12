@@ -70,6 +70,24 @@ import { seedBuiltinTemplates } from "./templates/builtin.js";
 import { SettingsService } from "./settings/service.js";
 import { registerUserRoutes } from "./users/routes.js";
 import { UsersService } from "./users/service.js";
+import { registerAccountRoutes } from "./account/routes.js";
+import { SshKeysService } from "./account/ssh-keys.js";
+import { registerAllocationRoutes } from "./allocations/routes.js";
+import { AllocationsService } from "./allocations/service.js";
+import { CatalogService } from "./catalog/service.js";
+import type { Catalog } from "@blockforge/minecraft";
+import { BrowserTransfers } from "./files/browser-transfers.js";
+import { registerFileRoutes } from "./files/routes.js";
+import { FilesService } from "./files/service.js";
+import { ServerAccessService } from "./servers/access.js";
+import { serverJobDefinitions } from "./servers/jobs.js";
+import { ServerReconciler } from "./servers/reconciler.js";
+import { registerServerRoutes } from "./servers/routes.js";
+import { ServersService } from "./servers/service.js";
+import { ServerStateService } from "./servers/state.js";
+import { SftpService } from "./sftp/service.js";
+import { registerTemplateRoutes } from "./templates/routes.js";
+import { TemplatesService } from "./templates/service.js";
 
 
 export interface BuildAppOptions {
@@ -92,6 +110,10 @@ export interface BuildAppOptions {
   /** Additional job types (tests exercise the runner with them). Input types vary per job, hence `any`. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   extraJobs?: JobDefinition<any>[];
+  /** Test seams for the software catalogue (adapter overrides, transport, DNS). */
+  catalog?: { adapters?: Partial<Catalog>; fetchImpl?: typeof fetch; lookup?: LookupFn; ttlMs?: number };
+  /** Server job timing (tests shorten the readiness wait). */
+  serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number };
 }
 
 export interface BuiltApp {
@@ -230,10 +252,39 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const alerts = new AlertService(db, clock, audit, bus, hub, rbac, notifications, logger.child({ module: "alerts" }));
   const alertEvaluator = new AlertEvaluator(db, clock, tracker, latest, alerts, notifications, bus, logger.child({ module: "alert-evaluator" }));
 
+  const templates = new TemplatesService(db, clock, audit);
+  const catalog = new CatalogService({
+    logger: logger.child({ module: "catalog" }),
+    ...(opts.catalog?.adapters ? { catalog: opts.catalog.adapters } : {}),
+    ...(opts.catalog?.fetchImpl ? { fetchImpl: opts.catalog.fetchImpl } : {}),
+    ...(opts.catalog?.lookup ? { lookup: opts.catalog.lookup } : {}),
+    ...(opts.catalog?.ttlMs !== undefined ? { ttlMs: opts.catalog.ttlMs } : {}),
+  });
+  const allocations = new AllocationsService(db, gateway, audit, logger.child({ module: "allocations" }));
+  const serverAccess = new ServerAccessService(db, audit);
+  const serverState = new ServerStateService(db, clock, bus, logger.child({ module: "server-state" }));
+  const reconciler = new ServerReconciler(db, clock, serverState, bus, logger.child({ module: "reconciler" }));
+  const servers = new ServersService({
+    db, clock, logger: logger.child({ module: "servers" }), audit, bus, hub, tracker, gateway, latest, consoles, ownership, jobs, catalog, templates,
+    access: serverAccess, state: serverState,
+  });
+  const browserTransfers = new BrowserTransfers(clock);
+  const files = new FilesService({ gateway, audit, templates, transfers, browser: browserTransfers, jobs, logger: logger.child({ module: "files" }) });
+  const sshKeys = new SshKeysService(db, audit);
+  const sftp = new SftpService(db, clock, rbac, audit, logger.child({ module: "sftp" }));
+  for (const def of serverJobDefinitions({
+    db, clock, logger: logger.child({ module: "server-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit,
+    ...(opts.serverJobs ?? {}),
+  })) {
+    jobs.define(def as JobDefinition<unknown>);
+  }
+  for (const def of files.jobDefinitions()) jobs.define(def as JobDefinition<unknown>);
+
   const ctx: AppContext = {
     config, logger, clock, pool, db, box, secrets, settings, audit, bus, hub, rbac, sessions, auth, users, idempotency, jobs,
     signer, authenticator, rotations, tracker, gateway, enrollment, ownership, consoles, transfers, nodes, latest, vmWriter,
     vmClient, metricsQuery, overview, overviewPublisher, alerts, alertEvaluator, notifications,
+    templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, sftp,
   };
 
   // --- Seed & wiring -------------------------------------------------------------------
@@ -253,6 +304,12 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   });
   gateway.on("nodeMetrics", () => overviewPublisher.markDirty());
   gateway.on("sessionReady", (nodeId) => void nodes.publishUpdated(nodeId));
+  reconciler.attach(gateway, tracker);
+  serverState.onChange((serverId) => {
+    void servers.publishUpdated(serverId);
+    overviewPublisher.markDirty();
+  });
+  gateway.on("sftpActivity", (nodeId, ev) => void sftp.recordActivity(nodeId, ev).catch((err: unknown) => logger.warn({ err }, "sftp activity not recorded")));
   bus.subscribe("job.updated", () => overviewPublisher.markDirty());
   bus.subscribe("alert.fired", () => overviewPublisher.markDirty());
   bus.subscribe("alert.resolved", () => overviewPublisher.markDirty());
@@ -304,6 +361,11 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
       registerMetricsRoutes(api, ctx);
       registerAlertRoutes(api, ctx);
       registerSettingsRoutes(api, ctx);
+      registerTemplateRoutes(api, ctx);
+      registerAllocationRoutes(api, ctx);
+      registerServerRoutes(api, ctx);
+      registerFileRoutes(api, ctx);
+      registerAccountRoutes(api, ctx);
       registerRealtimeRoutes(api, ctx);
     },
     { prefix: "/api/v1" },

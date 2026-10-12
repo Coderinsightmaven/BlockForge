@@ -34,6 +34,14 @@ export const Node = z.object({
   facts: NodeFacts.nullable(),
   capacity: NodeCapacity,
   serverCount: z.number().int().nonnegative(),
+  /**
+   * Active agent warnings (agent-protocol §5.1 codes: CLOCK_SKEW, SFTP_UNAVAILABLE, INSTALL_OWNERSHIP,
+   * WORKLOAD_RESTART_LIMIT, …), most recent per code. Cleared when the condition is reported resolved or
+   * on reconnect after `ttlMs` without a repeat.
+   */
+  warnings: z
+    .array(z.object({ code: z.string().max(64), message: z.string().max(1024), at: EpochMs }))
+    .default([]),
   /** Most recent metric sample held in memory by the control plane (null if none / stale). */
   latest: NodeMetricSample.nullable(),
   createdAt: EpochMs,

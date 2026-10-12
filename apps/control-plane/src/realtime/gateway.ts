@@ -173,5 +173,7 @@ function topicDeps(ctx: AppContext) {
       const row = await ctx.jobs.getRow(jobId).catch(() => null);
       return row ? { targetType: row.targetType, targetId: row.targetId } : null;
     },
+    serverPermissions: (principal: Principal, serverId: string) => ctx.serverAccess.permissionsOf(principal, serverId),
+    hasPersonalServers: async (userId: string) => (await ctx.serverAccess.personalServerIds(userId, "servers.view")).length > 0,
   };
 }

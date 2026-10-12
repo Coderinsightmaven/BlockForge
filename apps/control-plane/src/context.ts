@@ -32,6 +32,17 @@ import type { RealtimeHub } from "./realtime/hub.js";
 import type { SecretBox } from "./secrets/secret-box.js";
 import type { SecretsService } from "./secrets/service.js";
 import type { SettingsService } from "./settings/service.js";
+import type { SshKeysService } from "./account/ssh-keys.js";
+import type { AllocationsService } from "./allocations/service.js";
+import type { CatalogService } from "./catalog/service.js";
+import type { BrowserTransfers } from "./files/browser-transfers.js";
+import type { FilesService } from "./files/service.js";
+import type { ServerAccessService } from "./servers/access.js";
+import type { ServerReconciler } from "./servers/reconciler.js";
+import type { ServersService } from "./servers/service.js";
+import type { ServerStateService } from "./servers/state.js";
+import type { SftpService } from "./sftp/service.js";
+import type { TemplatesService } from "./templates/service.js";
 import type { UsersService } from "./users/service.js";
 
 /** Every long-lived service, created once by `buildApp` and shared by routes, jobs and timers. */
@@ -72,4 +83,15 @@ export interface AppContext {
   alerts: AlertService;
   alertEvaluator: AlertEvaluator;
   notifications: NotificationService;
+  templates: TemplatesService;
+  catalog: CatalogService;
+  allocations: AllocationsService;
+  serverAccess: ServerAccessService;
+  serverState: ServerStateService;
+  servers: ServersService;
+  reconciler: ServerReconciler;
+  files: FilesService;
+  browserTransfers: BrowserTransfers;
+  sshKeys: SshKeysService;
+  sftp: SftpService;
 }

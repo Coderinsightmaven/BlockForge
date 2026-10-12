@@ -104,7 +104,10 @@ fresh key per user action and reuses it on automatic retries.
 Effective permissions of a user on a server = union of (a) role bindings at global / the server's node /
 its network / the server itself, (b) `SERVER_OWNER_PERMISSIONS` if the user owns it, (c) the subuser
 permission set if they are a subuser. Suspended servers: only holders of `servers.admin` may act on them
-(view stays allowed). `Server.myPermissions` reports the effective set.
+(view stays allowed). `Server.myPermissions` reports the effective set. Servers (and server-scoped
+metric series) the requester cannot view answer **404**, not 403 (audited). Owners and subusers may
+subscribe to the `servers` realtime topic; delivery is filtered per user. Provision/reinstall jobs
+expire after 2 hours. World upload at creation is not implemented yet (`world.mode: "upload"` → 400).
 
 ## Templates & catalogue (Phase 3)
 | Method | Path | Body → Response | Permission |

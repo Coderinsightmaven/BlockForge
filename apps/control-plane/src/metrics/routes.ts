@@ -18,7 +18,8 @@ export function registerMetricsRoutes(app: FastifyInstance, ctx: AppContext): vo
     }
     if (scope === "server") {
       if (!q.serverId) throw badRequest("serverId is required for server series");
-      await requirePermission(ctx.audit, req, "monitoring.view", await ctx.rbac.serverOrThrow(q.serverId));
+      // Effective server permissions (owners and subusers see their server's graphs).
+      await ctx.serverAccess.require(req, q.serverId, "monitoring.view");
       return ctx.metricsQuery.range(range, { serverId: q.serverId });
     }
     // global.*: aggregate over every node the user can see.

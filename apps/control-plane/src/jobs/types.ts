@@ -20,10 +20,22 @@ export interface StepContext<I> {
   setMessage(message: string): Promise<void>;
 }
 
+/** Returned by a step that does not apply (recorded as `skipped`). */
+export const SKIP_STEP = Symbol("skip-step");
+
 export interface JobStepDefinition<I> {
   key: string;
   label: string;
-  run(ctx: StepContext<I>): Promise<void>;
+  run(ctx: StepContext<I>): Promise<void | typeof SKIP_STEP>;
+}
+
+export interface FinalizeContext<I> {
+  jobId: string;
+  input: I;
+  state: Record<string, unknown>;
+  status: "succeeded" | "failed" | "cancelled";
+  error: { code: string; message: string } | null;
+  log(level: JobLogLevel, message: string): Promise<void>;
 }
 
 export interface JobDefinition<I> {
@@ -39,6 +51,11 @@ export interface JobDefinition<I> {
   expireInSeconds?: number;
   /** Builds the user-visible result from the final state. */
   result?(state: Record<string, unknown>): unknown;
+  /**
+   * Runs once as the job reaches a terminal status, before that status is recorded (release
+   * operation locks, settle the target's state). Errors are logged and do not change the outcome.
+   */
+  finalize?(ctx: FinalizeContext<I>): Promise<void>;
 }
 
 /** A failure with a stable code. Non-retryable failures end the job immediately. */

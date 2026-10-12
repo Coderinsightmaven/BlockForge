@@ -71,6 +71,11 @@ restart until an owner exists.
 | `overview/` | scoped fleet summary + throttled realtime publisher |
 | `realtime/` | topic hub, per-topic authorisation, UI WebSocket gateway (Origin, 1 MiB buffer → 4008) |
 | `alerts/`, `notifications/` | rules/incidents, evaluator (duration, dedup, cooldown, auto-resolve), channels, Discord/webhook/email adapters, SSRF guard |
+| `templates/`, `catalog/` | built-in Minecraft/Velocity templates + egg import/edit/export (`@blockforge/eggs`); software catalogue (`@blockforge/minecraft` adapters) behind an HTTPS-only, host-allowlisted, DNS-checked fetch with a TTL cache |
+| `allocations/`, `scheduler/` | node port pools and server allocations; placement candidates (hard/soft constraints, scores) under a per-node advisory lock |
+| `servers/` | effective permissions (roles ∪ owner ∪ subuser), DTOs, create/settings/build/suspend/startup/subusers/console, operation locks + state transitions, provision/reinstall/power/delete jobs (Minecraft + eggs), reconciler from agent events |
+| `files/` | file manager over `fs.*` (template denylist, proxy-secret redaction, archive jobs), single-use session-bound browser transfer URLs streamed through the agent rendezvous |
+| `account/`, `sftp/` | SSH keys; `POST /agent/v1/sftp/auth` (username `<user>.<shortId>`, keys-only for MFA users, rate limits, audit) and `sftp.activity` → server activity |
 
 ## Security notes
 
@@ -84,6 +89,11 @@ restart until an owner exists.
 * **CSRF**: `x-blockforge-csrf` must match the sha256 stored on the session (constant-time);
   `/auth/login` and `/auth/setup` instead require `Content-Type: application/json`; any mutation
   carrying a foreign `Origin` is rejected.
+* **Transfer URLs** (`/api/v1/transfers/:token`): 256-bit, single use, bound to the issuing session,
+  5 minutes, in memory (a restart invalidates outstanding URLs); the token is the authorisation, so
+  the CSRF header is optional there (a foreign `Origin` is still rejected).
+* **Catalogue fetch**: the DNS check and the connection resolve separately (no address pinning);
+  acceptable because only the fixed upstream hosts in `CATALOG_HOSTS` are reachable.
 * **Webhooks**: HTTPS only, every resolved address must be public (IPv4/IPv6 incl. mapped/NAT64/
   6to4 forms, metadata ranges) unless the host is in `notifications.webhookAllowlist`; the socket is
   pinned to the validated address; redirects are **not followed**; 10 s timeout; 64 KiB response cap.

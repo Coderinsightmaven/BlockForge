@@ -11,6 +11,7 @@ export interface Grant {
 export interface Principal {
   userId: string;
   email: string;
+  username: string;
   displayName: string;
   grants: readonly Grant[];
 }

@@ -60,7 +60,8 @@ export const UpdateAllocationRequest = z.object({
 export const AllocationListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
   cursor: z.string().optional(),
-  free: z.coerce.boolean().optional(),
+  /** `?free=true|false` (`z.coerce.boolean` would treat "false" as true). */
+  free: z.stringbool().optional(),
 });
 
 /** Server-side allocation management (`servers.allocations.manage`). Changes apply on next restart. */

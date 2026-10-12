@@ -29,6 +29,12 @@ export class SlidingWindowLimiter {
     return 0;
   }
 
+  /** Milliseconds until `key` may try again (0 = allowed), without recording an attempt. */
+  wait(key: string, now: number): number {
+    const list = (this.hits.get(key) ?? []).filter((t) => t > now - this.windowMs);
+    return list.length >= this.max ? (list[0] ?? now) + this.windowMs - now : 0;
+  }
+
   reset(key: string): void {
     this.hits.delete(key);
   }

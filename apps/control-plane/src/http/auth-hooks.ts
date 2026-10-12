@@ -51,7 +51,7 @@ export function registerAuthHooks(app: FastifyInstance, deps: AuthHookDeps): voi
     if (mode === "public") return;
     const session = req.session;
     if (!session) throw unauthenticated();
-    if (unsafe && req.routeOptions.config.csrf !== false) {
+    if (unsafe && req.routeOptions.config.csrf !== false && req.routeOptions.config.csrf !== "token") {
       const header = req.headers[CSRF_HEADER];
       if (!deps.sessions.verifyCsrf(session, typeof header === "string" ? header : undefined)) {
         throw new AppError(403, "CSRF_INVALID", "Missing or invalid CSRF token");

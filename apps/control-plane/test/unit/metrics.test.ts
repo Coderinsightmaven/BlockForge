@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import { encodeNodeSample, encodeWorkloadSample, escapeLabelValue, metricLine } from "../../src/metrics/encode.js";
 import { LatestCache } from "../../src/metrics/latest.js";
 import { buildSeriesQueries, chooseStepMs, fillGrid, rateWindow, SeriesQueryError, stepGrid } from "../../src/metrics/series.js";
-import { OffsetClock } from "../support/clock.js";
 import { loadFixture } from "../support/fake-agent.js";
 
 const NODE = "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c";
@@ -115,7 +114,9 @@ describe("PromQL templates", () => {
 
 describe("latest cache", () => {
   it("treats samples older than 3 × the metrics interval as missing", () => {
-    const clock = new OffsetClock();
+    // Frozen time: the 15 000 ms boundary must not depend on how long the test takes.
+    let now = Date.now();
+    const clock = { now: () => now, advance: (ms: number) => void (now += ms) };
     const cache = new LatestCache(clock, 5000);
     const frame = MetricsFrame.parse(loadFixture("metrics.json"));
     cache.setNode(NODE, frame.node);

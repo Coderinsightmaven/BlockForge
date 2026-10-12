@@ -25,12 +25,12 @@ export class RbacService {
 
   async loadPrincipal(userId: string, tx: DbOrTx = this.db): Promise<Principal | null> {
     const [user] = await tx
-      .select({ id: users.id, email: users.email, displayName: users.displayName })
+      .select({ id: users.id, email: users.email, username: users.username, displayName: users.displayName })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
     if (!user) return null;
-    return { userId: user.id, email: user.email, displayName: user.displayName, grants: await this.loadGrants(userId, tx) };
+    return { userId: user.id, email: user.email, username: user.username, displayName: user.displayName, grants: await this.loadGrants(userId, tx) };
   }
 
   async loadGrants(userId: string, tx: DbOrTx = this.db): Promise<Grant[]> {

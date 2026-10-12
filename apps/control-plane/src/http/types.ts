@@ -31,8 +31,12 @@ export type AuthMode = "public" | "session" | "user";
 declare module "fastify" {
   interface FastifyContextConfig {
     auth?: AuthMode;
-    /** Set false to exempt a state-changing route from the CSRF header check (login/setup only). */
-    csrf?: boolean;
+    /**
+     * CSRF handling for state-changing routes: default = session-bound header required;
+     * `false` = pre-session route (login/setup: JSON content type + Origin instead);
+     * `"token"` = authorised by a single-use, session-bound token in the URL (transfers), header optional.
+     */
+    csrf?: boolean | "token";
   }
   interface FastifyRequest {
     session: SessionInfo | null;

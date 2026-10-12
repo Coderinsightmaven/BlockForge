@@ -150,7 +150,8 @@ describe("cross-scope authorisation", () => {
     expect((await srv.get("/nodes")).statusCode).toBe(403);
     const now = Date.now();
     const q = (serverId: string) => `/metrics/range?series=server.cpu&serverId=${serverId}&from=${now - 600_000}&to=${now}`;
-    expect((await srv.get(q(srvB))).statusCode).toBe(403);
+    // Server-scoped series follow the servers API: a server the user cannot view is not revealed (404, audited).
+    expect((await srv.get(q(srvB))).statusCode).toBe(404);
     const okRange = await srv.get(q(srvA));
     expect(okRange.statusCode).toBe(200);
     expect(okRange.json()).toMatchObject({ series: "server.cpu", unit: "percent", lines: [] });
