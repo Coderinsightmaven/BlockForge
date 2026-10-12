@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import { BACKUP_COUNTED_STATUSES, type Backup } from "@blockforge/contracts";
-import { and, asc, count, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, lt, ne, or } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { AgentGateway } from "../agents/gateway.js";
 import { commandErrorToHttp } from "../agents/errors.js";
 import type { TransferBroker } from "../agents/transfers.js";
 import { actorUserId, type AuditActor, type AuditService } from "../audit/service.js";
 import type { Db } from "../db/client.js";
-import { backups, users } from "../db/schema/index.js";
+import { backups, users, type S3StorageRef } from "../db/schema/index.js";
+import { decodeCursor, encodeCursor, TimeIdCursor } from "../lib/pagination.js";
 import { withTransaction } from "../db/tx.js";
 import type { BrowserTransfers } from "../files/browser-transfers.js";
 import type { JobRunner } from "../jobs/runner.js";
@@ -90,8 +91,28 @@ export class BackupsService {
     return r;
   }
 
-  async list(access: ServerAccess): Promise<Backup[]> {
-    return this.toDtos(await this.d.db.select().from(backups).where(eq(backups.serverId, access.server.id)).orderBy(desc(backups.createdAt)));
+  /** Newest first, `limit` per page; the next page's cursor is returned separately (`x-next-cursor`). */
+  async list(access: ServerAccess, q: { limit: number; cursor?: string | undefined } = { limit: 100 }): Promise<{ items: Backup[]; nextCursor: string | null }> {
+    const cursor = decodeCursor(TimeIdCursor, q.cursor);
+    const conds = [eq(backups.serverId, access.server.id)];
+    if (cursor) {
+      const t = new Date(cursor.t);
+      conds.push(or(lt(backups.createdAt, t), and(eq(backups.createdAt, t), lt(backups.id, cursor.id)))!);
+    }
+    const rows = await this.d.db.select().from(backups).where(and(...conds)).orderBy(desc(backups.createdAt), desc(backups.id)).limit(q.limit + 1);
+    const page = rows.slice(0, q.limit);
+    const last = page[page.length - 1];
+    return { items: await this.toDtos(page), nextCursor: rows.length > q.limit && last ? encodeCursor({ t: last.createdAt.getTime(), id: last.id }) : null };
+  }
+
+  /** S3 backups record where they are written (immutable; resolved from today's settings once). */
+  private async storageRefForNew(type: "local" | "s3"): Promise<S3StorageRef | null> {
+    if (type !== "s3") return null;
+    const cfg = await this.d.storage.current().catch((err: unknown) => {
+      throw new AppError(409, "PRECONDITION_FAILED", err instanceof StorageError ? err.message : "S3 storage is not usable");
+    });
+    if (cfg.type !== "s3") return null;
+    return this.d.storage.refOf(cfg);
   }
 
   /** `backup.updated` to subscribers of `server:<id>` who may view the server's backups. */
@@ -121,13 +142,14 @@ export class BackupsService {
    * Limit check: `backupLimit` 0 disables backups for non-administrators; at the limit, `rotate`
    * picks the oldest unlocked completed backup (deleted by the job), otherwise 409.
    */
-  private async limitCheck(access: ServerAccess, rotate: boolean, extra = 0): Promise<{ rotateBackupId: string | null }> {
-    if (access.permissions.has("servers.admin")) return { rotateBackupId: null };
+  private async limitCheck(access: ServerAccess, rotate: boolean, extra = 0): Promise<{ rotate: boolean; limit: number | null }> {
+    if (access.permissions.has("servers.admin")) return { rotate: false, limit: null };
     const limit = access.server.backupLimit;
     if (limit === 0) throw forbidden("Backups are disabled for this server");
     const [n] = await this.d.db.select({ n: count() }).from(backups).where(and(eq(backups.serverId, access.server.id), inArray(backups.status, COUNTED)));
-    if (Number(n?.n ?? 0) + extra < limit) return { rotateBackupId: null };
+    if (Number(n?.n ?? 0) + extra < limit) return { rotate: false, limit };
     if (!rotate) throw conflict(`The server has reached its backup limit (${limit})`, { limit });
+    // Something must be rotatable; the job deletes it only after the new backup is complete.
     const [oldest] = await this.d.db
       .select({ id: backups.id })
       .from(backups)
@@ -135,12 +157,15 @@ export class BackupsService {
       .orderBy(asc(backups.createdAt))
       .limit(1);
     if (!oldest) throw conflict(`The server has reached its backup limit (${limit}) and every backup is locked`, { limit });
-    return { rotateBackupId: oldest.id };
+    return { rotate: true, limit };
   }
 
   async create(access: ServerAccess, opts: CreateOptions, actor: AuditActor): Promise<{ backup: Backup; jobId: string }> {
-    const { rotateBackupId } = await this.limitCheck(access, opts.rotate);
+    // A locked backup can only be unlocked (or deleted) with servers.backups.delete.
+    if (opts.locked && !access.permissions.has("servers.backups.delete")) throw forbidden("Creating a locked backup requires servers.backups.delete");
+    const { rotate, limit } = await this.limitCheck(access, opts.rotate);
     const stored = await this.d.storage.view();
+    const storageRef = await this.storageRefForNew(stored.type);
     const now = new Date(this.d.clock.now());
     const id = randomUUID();
     const serverId = access.server.id;
@@ -154,6 +179,7 @@ export class BackupsService {
         status: "pending",
         locked: opts.locked,
         storage: stored.type,
+        storageRef,
         ignored: opts.ignore,
         // Schedule-created backups have no creating user (contract).
         createdBy: opts.scheduleId ? null : actorUserId(actor),
@@ -162,7 +188,7 @@ export class BackupsService {
       });
       const job = await this.d.jobs.enqueue(
         BACKUP_JOBS.create,
-        { serverId, backupId: id, stopServer: opts.stopServer, rotateBackupId, fromState: from },
+        { serverId, backupId: id, stopServer: opts.stopServer, rotate, limit, fromState: from },
         { targetType: "server", targetId: serverId, requestedBy: actorUserId(actor) },
         tx,
         after,
@@ -176,7 +202,7 @@ export class BackupsService {
           targetType: "server",
           targetId: serverId,
           outcome: "success",
-          details: { backupId: id, name, storage: stored.type, locked: opts.locked, stopServer: opts.stopServer, rotated: rotateBackupId, scheduleId: opts.scheduleId ?? null, jobId: job },
+          details: { backupId: id, name, storage: stored.type, locked: opts.locked, stopServer: opts.stopServer, rotate, scheduleId: opts.scheduleId ?? null, jobId: job },
         },
         tx,
       );
@@ -218,11 +244,14 @@ export class BackupsService {
     if (r.status !== "completed") throw conflict("The backup is not complete");
     await this.d.audit.record({ ...actor, action: "server.backup.download", targetType: "server", targetId: access.server.id, outcome: "success", details: { backupId, storage: r.storage } });
     if (r.storage === "s3") {
-      const cfg = await this.d.storage.current();
-      if (cfg.type !== "s3" || !r.objectKey) throw new AppError(409, "PRECONDITION_FAILED", "The backup's object storage is not configured");
-      const url = await this.d.storage.presignGet(cfg, r.objectKey, PRESIGN_DOWNLOAD_TTL_S, archiveName(r)).catch((err: unknown) => {
-        throw new AppError(502, "UPSTREAM_ERROR", err instanceof StorageError ? err.message : "presigning failed");
-      });
+      // The location the backup was written to (settings may have changed since).
+      if (!r.storageRef || !r.objectKey) throw new AppError(409, "PRECONDITION_FAILED", "The backup has no object storage reference");
+      const url = await this.d.storage
+        .fromRef(r.storageRef)
+        .then((cfg) => this.d.storage.presignGet(cfg, r.objectKey!, PRESIGN_DOWNLOAD_TTL_S, archiveName(r)))
+        .catch((err: unknown) => {
+          throw new AppError(502, "UPSTREAM_ERROR", err instanceof StorageError ? err.message : "presigning failed");
+        });
       return { url, expiresAt: this.d.clock.now() + PRESIGN_DOWNLOAD_TTL_S * 1000 };
     }
     const t = this.d.browser.issue({
@@ -271,6 +300,7 @@ export class BackupsService {
       }
     }
     const stored = await this.d.storage.view();
+    const storageRef = safetyBackupId ? await this.storageRefForNew(stored.type) : null;
     const now = new Date(this.d.clock.now());
     const serverId = access.server.id;
     const jobId = await withTransaction(this.d.db, async (tx, after) => {
@@ -283,6 +313,7 @@ export class BackupsService {
           status: "pending",
           locked: true,
           storage: stored.type,
+          storageRef,
           ignored: [],
           createdBy: actorUserId(actor),
           createdAt: now,

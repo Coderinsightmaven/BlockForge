@@ -73,6 +73,8 @@ export const servers = pgTable(
     /** Mojang EULA acceptance at creation (Minecraft templates and eggs with the `eula` feature). */
     eulaAcceptedAt: tsz("eula_accepted_at"),
     eulaAcceptedBy: text("eula_accepted_by"),
+    /** `save-off` was sent and `save-on` not yet acknowledged (retried on reconnect / startup). */
+    saveOnPending: boolean("save_on_pending").notNull().default(false),
     createdAt: tsz("created_at").notNull().defaultNow(),
     updatedAt: tsz("updated_at").notNull().defaultNow(),
     version: integer("version").notNull().default(1),

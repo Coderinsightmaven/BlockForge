@@ -73,7 +73,7 @@ import { UsersService } from "./users/service.js";
 import { registerAccountRoutes } from "./account/routes.js";
 import { SshKeysService } from "./account/ssh-keys.js";
 import { ApiKeysService } from "./apikeys/service.js";
-import { backupJobDefinitions, deleteAllBackups, type BackupJobDeps } from "./backups/jobs.js";
+import { abortStaleUploads, backupJobDefinitions, deleteAllBackups, pruneFailedBackups, retryPendingSaveOn, type BackupJobDeps } from "./backups/jobs.js";
 import { registerBackupRoutes } from "./backups/routes.js";
 import { BackupsService } from "./backups/service.js";
 import { BackupStorage } from "./backups/storage.js";
@@ -125,7 +125,7 @@ export interface BuildAppOptions {
   /** Scheduler test seams (task offsets). */
   scheduler?: { sleep?: (ms: number, signal: AbortSignal) => Promise<void> };
   /** Server job timing (tests shorten the readiness wait). */
-  serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number; saveTimeoutMs?: number };
+  serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number; saveTimeoutMs?: number; saveToggleTimeoutMs?: number };
 }
 
 export interface BuiltApp {
@@ -288,7 +288,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const sshKeys = new SshKeysService(db, audit);
   const apiKeys = new ApiKeysService(db, clock, rbac, audit, logger.child({ module: "api-keys" }), config.apiKeyRateLimitPerMin);
   const sftp = new SftpService(db, clock, rbac, audit, logger.child({ module: "sftp" }));
-  const backupStorage = new BackupStorage(settings, secrets);
+  const backupStorage = new BackupStorage(settings, secrets, db);
   const backupsService = new BackupsService({
     db, clock, logger: logger.child({ module: "backups" }), audit, hub, gateway, jobs, storage: backupStorage, access: serverAccess, state: serverState,
     browser: browserTransfers, transfers,
@@ -313,14 +313,14 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     schedules: () => schedulesService!,
     ...(opts.scheduler?.sleep ? { sleep: opts.scheduler.sleep } : {}),
   });
-  schedulesService = new SchedulesService({ db, clock, logger: logger.child({ module: "schedules" }), audit, hub, access: serverAccess, execute: (id) => scheduler.execute(id) });
+  schedulesService = new SchedulesService({ db, clock, logger: logger.child({ module: "schedules" }), audit, hub, access: serverAccess, execute: (id) => scheduler.execute(id), lease: () => scheduler.lease() });
   for (const def of files.jobDefinitions()) jobs.define(def as JobDefinition<unknown>);
 
   const ctx: AppContext = {
     config, logger, clock, pool, db, box, secrets, settings, audit, bus, hub, rbac, sessions, auth, users, idempotency, jobs,
     signer, authenticator, rotations, tracker, gateway, enrollment, ownership, consoles, transfers, nodes, latest, vmWriter,
     vmClient, metricsQuery, overview, overviewPublisher, alerts, alertEvaluator, notifications,
-    templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, apiKeys, sftp, backups: backupsService, backupStorage, schedules: schedulesService, scheduler, consoleBackfill,
+    templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, apiKeys, sftp, backups: backupsService, backupStorage, backupJobs: backupDeps, schedules: schedulesService, scheduler, consoleBackfill,
   };
 
   // --- Seed & wiring -------------------------------------------------------------------
@@ -339,7 +339,11 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     overviewPublisher.markDirty();
   });
   gateway.on("nodeMetrics", () => overviewPublisher.markDirty());
-  gateway.on("sessionReady", (nodeId) => void nodes.publishUpdated(nodeId));
+  gateway.on("sessionReady", (nodeId) => {
+    void nodes.publishUpdated(nodeId);
+    // A reconnected node may host servers still waiting for `save-on`.
+    setTimeout(() => void retryPendingSaveOn(backupDeps, nodeId).catch((err: unknown) => logger.warn({ err, nodeId }, "save-on retry failed")), 500).unref();
+  });
   reconciler.attach(gateway, tracker);
   serverState.onChange((serverId) => {
     void servers.publishUpdated(serverId);
@@ -438,6 +442,10 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
         await idempotency.prune();
         await runRetention({ db, clock, latest, consoles });
         await scheduler.prune();
+        await pruneFailedBackups(backupDeps);
+        await abortStaleUploads(backupDeps);
+        await retryPendingSaveOn(backupDeps);
+        await apiKeys.pruneUsage();
       },
       logger,
     ),
@@ -449,6 +457,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   if (startBackground) {
     await jobs.start();
     await scheduler.recover();
+    // Multipart uploads of jobs that died with the previous process; save-on still owed to servers.
+    await abortStaleUploads(backupDeps).catch((err: unknown) => logger.warn({ err }, "aborting stale uploads failed"));
+    void retryPendingSaveOn(backupDeps).catch((err: unknown) => logger.warn({ err }, "save-on retry failed"));
     for (const t of Object.values(tasks)) t.start();
   }
 

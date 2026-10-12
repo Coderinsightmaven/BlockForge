@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { ScheduleRun, ScheduleTask } from "@blockforge/contracts";
-import { and, asc, eq, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { AuditActor } from "../audit/service.js";
 import type { BackupsService } from "../backups/service.js";
 import type { Db } from "../db/client.js";
-import { scheduleRuns, schedules, servers } from "../db/schema/index.js";
+import { scheduleRuns, schedules, servers, type RunDefinition } from "../db/schema/index.js";
 import { withTransaction } from "../db/tx.js";
 import type { EventBus } from "../events/bus.js";
 import type { JobRunner } from "../jobs/runner.js";
@@ -21,7 +21,13 @@ import { pendingTasks, TASK_PERMISSION, type SchedulesService } from "./service.
 export const CATCH_UP_MS = 5 * 60_000;
 export const RUN_RETENTION_MS = 30 * 86_400_000;
 export const RUNS_KEPT_PER_SCHEDULE = 100;
+/** A run's lease; renewed by its runner while it executes. Expired leases are recovered by any replica. */
+export const RUN_LEASE_MS = 60_000;
+const HEARTBEAT_MS = RUN_LEASE_MS / 3;
+const CLAIM_BATCH = 20;
+const MAX_BATCHES_PER_TICK = 50;
 const JOB_WAIT_MS = 6 * 3600_000;
+const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 
 export interface SchedulerDeps {
   db: Db;
@@ -47,40 +53,75 @@ const defaultSleep = (ms: number, signal: AbortSignal) =>
 
 type TaskResult = { status: "succeeded" | "failed" | "skipped"; message: string | null; jobId: string | null };
 
+/** The definition a run executes: snapshot at claim time (pre-snapshot runs fall back to the schedule). */
+export function definitionOf(s: Pick<typeof schedules.$inferSelect, "name" | "tasks" | "updatedBy" | "onlyWhenOnline">): RunDefinition {
+  return { name: s.name, tasks: s.tasks, updatedBy: s.updatedBy, onlyWhenOnline: s.onlyWhenOnline };
+}
+
 /**
  * Runs schedules (api.md "Schedules"): every tick claims due schedules with `FOR UPDATE SKIP LOCKED`
- * (several control planes never run one twice), at most one run per schedule, a single catch-up for a
- * time missed within the last 5 minutes. Tasks run in order with their offsets; each one re-checks the
- * last editor's current permissions on the server.
+ * in bounded batches (several control planes never run one twice), at most one run per schedule, a
+ * single catch-up for a time missed within the last 5 minutes. Each run is leased by its runner and
+ * executes the definition snapshotted when it was claimed; tasks run in order with their offsets and
+ * re-check the snapshot editor's current permissions on the server.
  */
 export class Scheduler {
+  readonly runnerId = randomUUID();
   private readonly running = new Set<Promise<void>>();
   private readonly abort = new AbortController();
 
   constructor(private readonly d: SchedulerDeps) {}
 
-  /** Runs left `running` by a previous process are failed and their schedules unlocked. */
-  async recover(): Promise<void> {
-    const stale = await this.d.db.select().from(scheduleRuns).where(eq(scheduleRuns.status, "running"));
-    for (const r of stale) {
-      const tasks = r.tasks.map((t) => (t.status === "running" || t.status === "pending" ? { ...t, status: "failed" as const, message: t.status === "running" ? "interrupted" : t.message } : t));
-      await this.d.db.update(scheduleRuns).set({ status: "failed", reason: "interrupted by a control-plane restart", tasks, finishedAt: new Date(this.d.clock.now()) }).where(eq(scheduleRuns.id, r.id));
-      await this.d.db.update(schedules).set({ runningRunId: null, lastRunStatus: "failed" }).where(eq(schedules.runningRunId, r.id));
-    }
-    if (stale.length) this.d.logger.warn({ n: stale.length }, "interrupted schedule runs marked failed");
+  /** Lease fields for a run claimed by this process. */
+  lease(): { runnerId: string; leaseExpiresAt: Date } {
+    return { runnerId: this.runnerId, leaseExpiresAt: new Date(this.d.clock.now() + RUN_LEASE_MS) };
   }
 
-  /** Claims due schedules and starts their runs. Returns the started run ids. */
+  /** Runs whose lease expired (their runner died) are failed and their schedules unlocked. */
+  async recover(): Promise<number> {
+    const now = new Date(this.d.clock.now());
+    const stale = await this.d.db
+      .select()
+      .from(scheduleRuns)
+      .where(and(eq(scheduleRuns.status, "running"), or(isNull(scheduleRuns.leaseExpiresAt), lte(scheduleRuns.leaseExpiresAt, now))));
+    for (const r of stale) {
+      const tasks = r.tasks.map((t) => (t.status === "running" || t.status === "pending" ? { ...t, status: "failed" as const, message: t.status === "running" ? "interrupted" : t.message } : t));
+      const [updated] = await this.d.db
+        .update(scheduleRuns)
+        .set({ status: "failed", reason: "interrupted by a control-plane restart", tasks, finishedAt: now })
+        .where(and(eq(scheduleRuns.id, r.id), eq(scheduleRuns.status, "running"), or(isNull(scheduleRuns.leaseExpiresAt), lte(scheduleRuns.leaseExpiresAt, now))))
+        .returning({ id: scheduleRuns.id });
+      if (!updated) continue;
+      await this.d.db.update(schedules).set({ runningRunId: null, lastRunStatus: "failed" }).where(eq(schedules.runningRunId, r.id));
+      void this.d.schedules().publish(r.scheduleId);
+    }
+    if (stale.length) this.d.logger.warn({ n: stale.length }, "interrupted schedule runs marked failed");
+    return stale.length;
+  }
+
+  /** Claims every due schedule (bounded batches) and starts their runs. Returns the started run ids. */
   async tick(): Promise<string[]> {
+    await this.recover();
+    const started: string[] = [];
+    for (let i = 0; i < MAX_BATCHES_PER_TICK; i++) {
+      const { ids, claimed } = await this.claimBatch();
+      started.push(...ids);
+      if (claimed < CLAIM_BATCH) break;
+    }
+    for (const id of started) this.execute(id);
+    return started;
+  }
+
+  private async claimBatch(): Promise<{ ids: string[]; claimed: number }> {
     const now = this.d.clock.now();
     const nowDate = new Date(now);
-    const started = await withTransaction(this.d.db, async (tx) => {
+    return withTransaction(this.d.db, async (tx) => {
       const due = await tx
         .select()
         .from(schedules)
         .where(and(eq(schedules.enabled, true), isNull(schedules.runningRunId), lte(schedules.nextRunAt, nowDate)))
         .orderBy(asc(schedules.nextRunAt))
-        .limit(20)
+        .limit(CLAIM_BATCH)
         .for("update", { skipLocked: true });
       const ids: string[] = [];
       for (const s of due) {
@@ -100,14 +141,12 @@ export class Scheduler {
           continue;
         }
         const runId = randomUUID();
-        await tx.insert(scheduleRuns).values({ id: runId, scheduleId: s.id, trigger: "cron", status: "running", tasks: pendingTasks(s.tasks), startedAt: nowDate });
+        await tx.insert(scheduleRuns).values({ id: runId, scheduleId: s.id, trigger: "cron", status: "running", tasks: pendingTasks(s.tasks), definition: definitionOf(s), ...this.lease(), startedAt: nowDate });
         await tx.update(schedules).set({ runningRunId: runId, lastRunAt: nowDate, nextRunAt: next }).where(eq(schedules.id, s.id));
         ids.push(runId);
       }
-      return ids;
+      return { ids, claimed: due.length };
     });
-    for (const id of started) this.execute(id);
-    return started;
   }
 
   /** Starts a claimed run in the background. */
@@ -133,12 +172,34 @@ export class Scheduler {
     if (!run) return;
     const [s] = await this.d.db.select().from(schedules).where(eq(schedules.id, run.scheduleId)).limit(1);
     if (!s) return;
+    const def = run.definition ?? definitionOf(s);
     void this.d.schedules().publish(s.id);
+
+    // Lease: renewed while running; losing it (another replica recovered the run) stops the run.
+    let leaseLost = false;
+    const renew = async () => {
+      const [ok] = await this.d.db
+        .update(scheduleRuns)
+        .set({ leaseExpiresAt: new Date(this.d.clock.now() + RUN_LEASE_MS) })
+        .where(and(eq(scheduleRuns.id, runId), eq(scheduleRuns.status, "running"), eq(scheduleRuns.runnerId, this.runnerId)))
+        .returning({ id: scheduleRuns.id });
+      if (!ok) leaseLost = true;
+    };
+    const heartbeat = setInterval(() => void renew().catch(() => undefined), HEARTBEAT_MS);
+    heartbeat.unref();
+
     const tasks: ScheduleRun["tasks"] = run.tasks.map((t) => ({ ...t }));
+    /** Our run still owns the schedule (not deleted, not recovered by another replica). */
+    const fenced = async () => {
+      if (leaseLost) return false;
+      const [cur] = await this.d.db.select({ runningRunId: schedules.runningRunId }).from(schedules).where(eq(schedules.id, s.id));
+      return cur?.runningRunId === runId;
+    };
     const save = async (patch: Partial<typeof scheduleRuns.$inferInsert> = {}) => {
-      await this.d.db.update(scheduleRuns).set({ tasks, ...patch }).where(eq(scheduleRuns.id, runId));
+      await this.d.db.update(scheduleRuns).set({ tasks, ...patch }).where(and(eq(scheduleRuns.id, runId), eq(scheduleRuns.status, "running")));
     };
     const finish = async (status: "succeeded" | "failed" | "skipped", reason: string | null) => {
+      clearInterval(heartbeat);
       await save({ status, reason, finishedAt: new Date(this.d.clock.now()) });
       await this.d.db.update(schedules).set({ runningRunId: null, lastRunStatus: status }).where(and(eq(schedules.id, s.id), eq(schedules.runningRunId, runId)));
       if (status !== "skipped") {
@@ -152,49 +213,54 @@ export class Scheduler {
       void this.d.schedules().publish(s.id);
     };
 
-    const [srv] = await this.d.db.select({ state: servers.state }).from(servers).where(eq(servers.id, s.serverId)).limit(1);
-    if (s.onlyWhenOnline && srv?.state !== "running" && srv?.state !== "degraded") {
-      for (const t of tasks) t.status = "skipped";
-      return finish("skipped", "server offline");
-    }
+    try {
+      const [srv] = await this.d.db.select({ state: servers.state }).from(servers).where(eq(servers.id, s.serverId)).limit(1);
+      if (def.onlyWhenOnline && srv?.state !== "running" && srv?.state !== "degraded") {
+        for (const t of tasks) t.status = "skipped";
+        return await finish("skipped", "server offline");
+      }
 
-    const actor: AuditActor = { actorType: "system", actorId: null, actorName: `schedule ${s.name}`.slice(0, 120), userId: s.updatedBy };
-    let failed = false;
-    let stopAfterFailure = false;
-    for (let i = 0; i < s.tasks.length; i++) {
-      const task = s.tasks[i]!;
-      const t = tasks[i]!;
-      if (stopAfterFailure) {
-        t.status = "skipped";
-        t.message = "skipped after an earlier task failed";
-        continue;
+      const actor: AuditActor = { actorType: "system", actorId: null, actorName: `schedule ${def.name}`.slice(0, 120), userId: def.updatedBy };
+      let failed = false;
+      let stopAfterFailure = false;
+      for (let i = 0; i < def.tasks.length; i++) {
+        const task = def.tasks[i]!;
+        const t = tasks[i]!;
+        if (stopAfterFailure) {
+          t.status = "skipped";
+          t.message = "skipped after an earlier task failed";
+          continue;
+        }
+        if (task.offsetSeconds > 0) await (this.d.sleep ?? defaultSleep)(task.offsetSeconds * 1000, this.abort.signal);
+        const interrupted = this.abort.signal.aborted ? "interrupted (control plane stopping)" : !(await fenced()) ? "interrupted (the schedule was deleted or the run was recovered elsewhere)" : null;
+        if (interrupted) {
+          t.status = "failed";
+          t.message = interrupted;
+          failed = true;
+          stopAfterFailure = true;
+          continue;
+        }
+        t.status = "running";
+        t.startedAt = this.d.clock.now();
+        await save();
+        const r = await this.runTask(s.serverId, def.updatedBy, task, s.id, actor).catch((err: unknown): TaskResult => ({ status: "failed", message: errorText(err), jobId: null }));
+        t.status = r.status;
+        t.message = r.message;
+        t.jobId = r.jobId;
+        t.finishedAt = this.d.clock.now();
+        await save();
+        if (r.status === "failed") {
+          failed = true;
+          if (!task.continueOnFailure) stopAfterFailure = true;
+        }
       }
-      if (task.offsetSeconds > 0) await (this.d.sleep ?? defaultSleep)(task.offsetSeconds * 1000, this.abort.signal);
-      if (this.abort.signal.aborted) {
-        t.status = "failed";
-        t.message = "interrupted (control plane stopping)";
-        failed = true;
-        stopAfterFailure = true;
-        continue;
-      }
-      t.status = "running";
-      t.startedAt = this.d.clock.now();
-      await save();
-      const r = await this.runTask(s.serverId, s.updatedBy, task, s.id, actor).catch((err: unknown): TaskResult => ({ status: "failed", message: errorText(err), jobId: null }));
-      t.status = r.status;
-      t.message = r.message;
-      t.jobId = r.jobId;
-      t.finishedAt = this.d.clock.now();
-      await save();
-      if (r.status === "failed") {
-        failed = true;
-        if (!task.continueOnFailure) stopAfterFailure = true;
-      }
+      return await finish(failed ? "failed" : "succeeded", failed ? (tasks.find((t) => t.status === "failed")?.message ?? "a task failed") : null);
+    } finally {
+      clearInterval(heartbeat);
     }
-    return finish(failed ? "failed" : "succeeded", failed ? (tasks.find((t) => t.status === "failed")?.message ?? "a task failed") : null);
   }
 
-  /** One task with the last editor's current permissions on the server (re-checked at run time). */
+  /** One task with the snapshot editor's current permissions on the server (re-checked at run time). */
   private async runTask(serverId: string, editorId: string | null, task: ScheduleTask, scheduleId: string, actor: AuditActor): Promise<TaskResult> {
     const principal = editorId ? await this.d.rbac.loadPrincipal(editorId) : null;
     const access = principal ? await this.d.access.load(serverId, principal) : null;
@@ -226,10 +292,43 @@ export class Scheduler {
     }
   }
 
-  private async awaitJob(jobId: string): Promise<TaskResult> {
-    const row = await this.d.jobs.waitForCompletion(jobId, JOB_WAIT_MS);
-    if (row.status === "succeeded") return { status: "succeeded", message: null, jobId };
-    return { status: "failed", message: row.error ? `${row.error.code}: ${row.error.message}` : row.status, jobId };
+  /**
+   * Waits for a job: woken by its `job.updated` event, with a backing-off poll (250 ms → 30 s) as a
+   * safety net; shutdown and the 6 h cap end the wait.
+   */
+  private awaitJob(jobId: string): Promise<TaskResult> {
+    return new Promise<TaskResult>((resolve) => {
+      const deadline = Date.now() + JOB_WAIT_MS;
+      let delay = 250;
+      let timer: NodeJS.Timeout | undefined;
+      let finished = false;
+      const finish = (r: TaskResult) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        unsubscribe();
+        this.abort.signal.removeEventListener("abort", onAbort);
+        resolve(r);
+      };
+      const check = async () => {
+        if (finished) return;
+        const row = await this.d.jobs.getRow(jobId).catch(() => null);
+        if (row && TERMINAL.has(row.status)) {
+          return finish(row.status === "succeeded" ? { status: "succeeded", message: null, jobId } : { status: "failed", message: row.error ? `${row.error.code}: ${row.error.message}` : row.status, jobId });
+        }
+        if (Date.now() > deadline) return finish({ status: "failed", message: "TIMEOUT: the job did not finish in time", jobId });
+        clearTimeout(timer);
+        timer = setTimeout(() => void check(), delay);
+        timer.unref();
+        delay = Math.min(delay * 2, 30_000);
+      };
+      const unsubscribe = this.d.bus.subscribe("job.updated", (ev) => {
+        if (ev.subjectId === jobId) void check();
+      });
+      const onAbort = () => finish({ status: "failed", message: "interrupted (control plane stopping)", jobId });
+      this.abort.signal.addEventListener("abort", onAbort, { once: true });
+      void check();
+    });
   }
 
   /** Retention: 30 days and the last 100 runs per schedule. */

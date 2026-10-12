@@ -38,6 +38,17 @@ export interface SimOptions {
   delay?: Partial<Record<AgentCommandType, number>>;
   /** Answer `save-all flush` with "Saved the game" (default true). */
   saveConfirm?: boolean;
+  /** Answer `save-all flush` with the disk-full failure instead. */
+  saveFailure?: boolean;
+  /** Raw console lines printed right after `save-all flush`, before the server's progress line (forged / stray confirmations). */
+  saveStrayLines?: string[];
+  /** Acknowledge `save-off` / `save-on` (default true). */
+  saveOffConfirm?: boolean;
+  saveOnConfirm?: boolean;
+  /** The workload exits (crash) while it is being archived (no event: only `workload.status` shows it). */
+  exitDuringBackup?: boolean;
+  /** Offset of the agent's clock in console line timestamps (clock skew between node and control plane). */
+  clockSkewMs?: number;
   /** What `workload.logs.tail` returns (the agent's ring buffer / Docker logs). */
   logTail?: string[];
 }
@@ -226,13 +237,17 @@ export class SimNode {
       const line = String(p.line);
       this.consoleLines.push({ workloadId: id, line });
       // Minecraft responses (vanilla/Paper wording) for the backup save cycle.
-      const out = (msg: string) => this.agent.trySend({ t: "logs", workloadId: id, lines: [{ ts: Date.now(), stream: "stdout", line: `[12:00:00 INFO]: ${msg}` }] });
-      if (line === "save-off") setTimeout(() => out("Automatic saving is now disabled"), 5);
-      if (line === "save-on") setTimeout(() => out("Automatic saving is now enabled"), 5);
+      const out = (msg: string) =>
+        this.agent.trySend({ t: "logs", workloadId: id, lines: [{ ts: Date.now() + (this.options.clockSkewMs ?? 0), stream: "stdout", line: `[12:00:00 INFO]: ${msg}` }] });
+      if (line === "save-off" && this.options.saveOffConfirm !== false) setTimeout(() => out("Automatic saving is now disabled"), 5);
+      if (line === "save-on" && this.options.saveOnConfirm !== false) setTimeout(() => out("Automatic saving is now enabled"), 5);
       if (line === "save-all flush") {
         setTimeout(() => {
+          const stray = this.options.saveStrayLines ?? [];
+          if (stray.length) this.agent.trySend({ t: "logs", workloadId: id, lines: stray.map((l) => ({ ts: Date.now(), stream: "stdout", line: l })) });
           out("Saving the game (this may take a moment!)");
-          if (this.options.saveConfirm !== false) out("Saved the game");
+          if (this.options.saveFailure) out("Unable to save the game (is there enough disk space?)");
+          else if (this.options.saveConfirm !== false) out("Saved the game");
         }, 10);
       }
       return {};
@@ -261,6 +276,7 @@ export class SimNode {
       }
       const bytes = Buffer.from(JSON.stringify(files));
       const archive = { bytes, sha256: sha(bytes), files };
+      if (this.options.exitDuringBackup) this.exit(id, 1, false);
       this.backupArchives.set(`${id}:${String(p.backupId)}`, archive);
       return { sizeBytes: bytes.length, sha256: archive.sha256, files: Object.keys(files).length, skippedSymlinks, durationMs: 5 };
     });

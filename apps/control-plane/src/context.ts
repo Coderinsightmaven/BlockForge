@@ -34,6 +34,7 @@ import type { SecretsService } from "./secrets/service.js";
 import type { SettingsService } from "./settings/service.js";
 import type { SshKeysService } from "./account/ssh-keys.js";
 import type { ApiKeysService } from "./apikeys/service.js";
+import type { BackupJobDeps } from "./backups/jobs.js";
 import type { BackupsService } from "./backups/service.js";
 import type { BackupStorage } from "./backups/storage.js";
 import type { Scheduler } from "./schedules/scheduler.js";
@@ -102,6 +103,8 @@ export interface AppContext {
   apiKeys: ApiKeysService;
   backups: BackupsService;
   backupStorage: BackupStorage;
+  /** Backup job dependencies (maintenance helpers: pruning, stale uploads, pending save-on). */
+  backupJobs: BackupJobDeps;
   schedules: SchedulesService;
   scheduler: Scheduler;
   consoleBackfill: ConsoleBackfill;

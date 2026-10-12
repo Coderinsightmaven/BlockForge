@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { ALL_PERMISSIONS, API_KEY_FORBIDDEN_PERMISSIONS, API_KEY_PATTERN, SERVER_OWNER_PERMISSIONS, type ApiKey, type Permission } from "@blockforge/contracts";
-import { and, asc, count, eq } from "drizzle-orm";
+import { and, asc, count, eq, lt, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import { SlidingWindowLimiter } from "../auth/throttle.js";
 import type { AuditActor, AuditService } from "../audit/service.js";
 import type { Db } from "../db/client.js";
-import { apiTokens, servers, serverSubusers, users } from "../db/schema/index.js";
+import { apiKeyUsage, apiTokens, servers, serverSubusers, users } from "../db/schema/index.js";
 import type { Clock } from "../lib/clock.js";
 import { safeEqual, sha256Hex } from "../lib/crypto.js";
 import { AppError, badRequest, conflict, notFound, rateLimited, unauthenticated, validationDetails } from "../lib/errors.js";
@@ -15,6 +15,9 @@ import type { RbacService } from "../rbac/service.js";
 
 const FORBIDDEN = new Set<string>(API_KEY_FORBIDDEN_PERMISSIONS);
 const MAX_KEYS_PER_USER = 50;
+/** Failed key attempts per client IP (checked before any lookup). */
+const INVALID_PER_IP = 30;
+const INVALID_WINDOW_MS = 5 * 60_000;
 /** `lastUsedAt/Ip` are written at most this often per key (unless the IP changes). */
 const LAST_USED_WRITE_INTERVAL_MS = 60_000;
 
@@ -55,7 +58,8 @@ export function ipAllowed(ip: string, allowed: readonly string[]): boolean {
  * rate-limited per key.
  */
 export class ApiKeysService {
-  private readonly limiter: SlidingWindowLimiter;
+  /** Invalid-key attempts per IP (per process; a cheap first line before any database work). */
+  private readonly invalid = new SlidingWindowLimiter(INVALID_PER_IP, INVALID_WINDOW_MS);
   private readonly lastWrite = new Map<string, { at: number; ip: string }>();
 
   constructor(
@@ -64,9 +68,32 @@ export class ApiKeysService {
     private readonly rbac: RbacService,
     private readonly audit: AuditService,
     private readonly logger: Logger,
-    rateLimitPerMin: number,
-  ) {
-    this.limiter = new SlidingWindowLimiter(rateLimitPerMin, 60_000);
+    private readonly rateLimitPerMin: number,
+  ) {}
+
+  /**
+   * Shared per-key limit (every control-plane replica counts in the same row): fixed one-minute windows
+   * in `api_key_usage`.
+   */
+  private async countRequest(keyId: string, now: number): Promise<number> {
+    const windowStart = new Date(Math.floor(now / 60_000) * 60_000);
+    const [r] = await this.db
+      .insert(apiKeyUsage)
+      .values({ keyId, windowStart, count: 1 })
+      .onConflictDoUpdate({ target: [apiKeyUsage.keyId, apiKeyUsage.windowStart], set: { count: sql`${apiKeyUsage.count} + 1` } })
+      .returning({ count: apiKeyUsage.count });
+    if ((r?.count ?? 0) <= this.rateLimitPerMin) return 0;
+    return windowStart.getTime() + 60_000 - now;
+  }
+
+  /** Old usage windows (maintenance). */
+  async pruneUsage(): Promise<void> {
+    await this.db.delete(apiKeyUsage).where(lt(apiKeyUsage.windowStart, new Date(this.clock.now() - 10 * 60_000)));
+  }
+
+  private rejectInvalid(ip: string, now: number, message: string): never {
+    this.invalid.hit(ip, now);
+    throw unauthenticated(message);
   }
 
   private dto(r: Row): ApiKey {
@@ -159,18 +186,20 @@ export class ApiKeysService {
 
   /** Resolves `Authorization: Bearer bfk_…` to the capped principal of the key owner. */
   async authenticate(header: string, ip: string): Promise<Principal> {
+    const now = this.clock.now();
+    const blocked = this.invalid.wait(ip, now);
+    if (blocked > 0) throw rateLimited(blocked / 1000);
     const token = header.replace(/^Bearer\s+/i, "").trim();
     const m = API_KEY_PATTERN.exec(token);
-    if (!m) throw unauthenticated("Invalid API key");
+    if (!m) this.rejectInvalid(ip, now, "Invalid API key");
     const [row] = await this.db.select().from(apiTokens).where(eq(apiTokens.prefix, `bfk_${m[1]}`)).limit(1);
     // Constant-time comparison of the secret hash (also computed for unknown prefixes).
     const presented = sha256Hex(m[2]!);
     const ok = safeEqual(presented, row?.tokenHash ?? "0".repeat(64));
-    if (!row || !ok) throw unauthenticated("Invalid API key");
-    const now = this.clock.now();
-    if (row.expiresAt && row.expiresAt.getTime() <= now) throw unauthenticated("The API key has expired");
+    if (!row || !ok) this.rejectInvalid(ip, now, "Invalid API key");
+    if (row.expiresAt && row.expiresAt.getTime() <= now) this.rejectInvalid(ip, now, "The API key has expired");
     if (!ipAllowed(ip, row.allowedIps)) throw new AppError(403, "FORBIDDEN", "The API key is not allowed from this address");
-    const wait = this.limiter.hit(row.id, now);
+    const wait = await this.countRequest(row.id, now);
     if (wait > 0) throw rateLimited(wait / 1000);
     const [owner] = await this.db.select({ status: users.status }).from(users).where(eq(users.id, row.userId)).limit(1);
     if (!owner || owner.status !== "active") throw unauthenticated("Invalid API key");

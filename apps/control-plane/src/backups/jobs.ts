@@ -1,12 +1,12 @@
-import type { ServerState, WorkloadStatus } from "@blockforge/contracts";
-import { isSaveConfirmation } from "@blockforge/minecraft";
-import { and, asc, eq } from "drizzle-orm";
+import { BACKUP_COUNTED_STATUSES, type ServerState, type WorkloadStatus } from "@blockforge/contracts";
+import { createSaveTracker, isSaveConfirmation, isSaveOffConfirmation, isSaveOnConfirmation } from "@blockforge/minecraft";
+import { and, asc, count, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import { AgentCommandError } from "../agents/gateway.js";
 import type { ConsoleLine } from "../agents/console-buffer.js";
-import { backups, servers } from "../db/schema/index.js";
+import { backups, jobs, servers } from "../db/schema/index.js";
 import { JobError, SKIP_STEP, type FinalizeContext, type JobDefinition, type StepContext } from "../jobs/types.js";
-import { exitColumns, settleFromRuntime, startServerAndWait, stopWorkload, type ServerJobDeps } from "../servers/jobs.js";
+import { exitColumns, settleFromRuntime, startServerAndWait, stopWorkload, withLockRelease, type ServerJobDeps } from "../servers/jobs.js";
 import { loadRuntimeContext, minecraftGame } from "../servers/runtime.js";
 import { StorageError, type BackupStorage, type S3Config } from "./storage.js";
 
@@ -15,6 +15,8 @@ export const BACKUP_JOBS = { create: "server.backup", restore: "server.backup.re
 /** Archive size limit sent to the agent (contract maximum). */
 const MAX_ARCHIVE_BYTES = 512 * 1024 ** 3;
 const ARCHIVE_TIMEOUT_MS = 6 * 3600_000;
+/** How long `save-off` / `save-on` acknowledgements may take. */
+const SAVE_TOGGLE_TIMEOUT_MS = 15_000;
 
 export interface BackupJobDeps extends ServerJobDeps {
   storage: BackupStorage;
@@ -24,16 +26,28 @@ export interface BackupJobDeps extends ServerJobDeps {
   publishDeleted(serverId: string, backupId: string): Promise<void>;
   /** How long to wait for "Saved the game" after `save-all flush`. */
   saveTimeoutMs?: number;
+  /** How long `save-off` / `save-on` acknowledgements may take (default 15 s). */
+  saveToggleTimeoutMs?: number;
 }
 
 type BackupRow = typeof backups.$inferSelect;
+type ServerRow = typeof servers.$inferSelect;
 type Ctx<I> = StepContext<I>;
+type LogCtx = { jobId: string; signal?: AbortSignal; log: Ctx<unknown>["log"] };
 
 /** Save confirmation after `save-all flush` (vanilla/Paper/Forge, 26.x "System chat:" prefix) — from @blockforge/minecraft. */
 export { isSaveConfirmation };
 
 function wrap(err: unknown, what: string): never {
-  if (err instanceof AgentCommandError) throw new JobError(err.code, `${what}: ${err.message}`, err.retryable);
+  if (err instanceof AgentCommandError) {
+    if (err.code === "QUOTA_EXCEEDED") {
+      throw new JobError(
+        "QUOTA_EXCEEDED",
+        `${what}: the node does not have enough free disk space for another backup (older backups are only rotated out after the new one is complete — free space or delete a backup): ${err.message}`,
+      );
+    }
+    throw new JobError(err.code, `${what}: ${err.message}`, err.retryable);
+  }
   if (err instanceof StorageError) throw new JobError("STORAGE_ERROR", `${what}: ${err.message}`);
   throw err;
 }
@@ -57,29 +71,73 @@ async function workloadStatus(deps: BackupJobDeps, nodeId: string, serverId: str
 
 const isRunning = (st: WorkloadStatus | null) => st?.state === "running" || st?.state === "restarting";
 
-/** Waits for a console line matching `match` (ts ≥ since). */
-function waitForConsole(deps: BackupJobDeps, serverId: string, since: number, match: (line: string) => boolean, timeoutMs: number, signal: AbortSignal): Promise<boolean> {
+/** The newest console seq of a server (lines after it are newer output). */
+function lastSeq(deps: BackupJobDeps, serverId: string): number {
+  return deps.consoles.tail(serverId, 1).lines.at(-1)?.seq ?? 0;
+}
+
+type ConsoleVerdict = "ok" | "failed" | null;
+
+/** A stateless matcher: `ok` when a line matches. */
+const confirmedBy =
+  (ok: (line: string) => boolean) =>
+  (line: string): ConsoleVerdict =>
+    ok(line) ? "ok" : null;
+
+/**
+ * `save-all flush`: "Saved the game" counts only after this save's own progress line ("Saving the
+ * game …") — a stray or forged confirmation before it is ignored; a save failure fails at once.
+ * Only the server's own logger is trusted (@blockforge/minecraft `createSaveTracker`).
+ */
+function saveAllOutcome(): (line: string) => ConsoleVerdict {
+  const tracker = createSaveTracker();
+  return (line) => {
+    const e = tracker.push(line);
+    return e === "saved" ? "ok" : e === "failed" ? "failed" : null;
+  };
+}
+
+/**
+ * Waits for a console line after `afterSeq` (seq, not timestamps: agent and control-plane clocks may
+ * differ) for which `match` returns a verdict. Every line is passed to `match` once, in seq order
+ * (matchers may be stateful).
+ */
+function waitForConsole(
+  deps: BackupJobDeps,
+  serverId: string,
+  afterSeq: number,
+  match: (line: string) => ConsoleVerdict,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<"ok" | "failed" | "timeout"> {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (v: boolean) => {
+    let cursor = afterSeq;
+    const done = (v: "ok" | "failed" | "timeout") => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       deps.gateway.off("consoleLines", onLines);
-      signal.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
       resolve(v);
     };
     const check = (lines: readonly ConsoleLine[]) => {
-      if (lines.some((l) => l.ts >= since && l.stream !== "system" && match(l.line))) done(true);
+      for (const l of lines) {
+        if (settled || l.seq <= cursor) continue;
+        cursor = l.seq;
+        if (l.stream === "system") continue;
+        const v = match(l.line);
+        if (v) return done(v);
+      }
     };
     const onLines = (id: string, lines: ConsoleLine[]) => {
       if (id === serverId) check(lines);
     };
-    const onAbort = () => done(false);
-    const timer = setTimeout(() => done(false), timeoutMs);
+    const onAbort = () => done("timeout");
+    const timer = setTimeout(() => done("timeout"), timeoutMs);
     timer.unref();
     deps.gateway.on("consoleLines", onLines);
-    signal.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
     check(deps.consoles.tail(serverId, 2000).lines);
   });
 }
@@ -88,12 +146,20 @@ async function consoleCommand(deps: BackupJobDeps, nodeId: string, serverId: str
   await deps.gateway.send(nodeId, "workload.console", { workloadId: serverId, line }, { timeoutMs: 15_000, ...opts });
 }
 
+// --- Storage --------------------------------------------------------------------------------
+
+/** The S3 configuration a backup was (or is being) written with — never today's settings. */
+async function s3For(deps: BackupJobDeps, b: BackupRow): Promise<S3Config> {
+  if (b.storageRef) return deps.storage.fromRef(b.storageRef).catch((err: unknown) => wrap(err, "storage"));
+  throw new JobError("STORAGE_ERROR", "the backup has no storage reference");
+}
+
 /** `backup.create` for a row; records size, sha256 and skipped symlinks. */
-export async function archiveBackup(deps: BackupJobDeps, ctx: { jobId: string; signal: AbortSignal; log: Ctx<unknown>["log"] }, b: BackupRow, nodeId: string): Promise<BackupRow> {
+export async function archiveBackup(deps: BackupJobDeps, ctx: LogCtx, b: BackupRow, nodeId: string): Promise<BackupRow> {
   await setRow(deps, b.id, { status: "running" });
   const started = deps.clock.now();
   const r = await deps.gateway
-    .send(nodeId, "backup.create", { workloadId: b.serverId, backupId: b.id, ignore: b.ignored, maxBytes: MAX_ARCHIVE_BYTES }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 900_000, resultTimeoutMs: ARCHIVE_TIMEOUT_MS })
+    .send(nodeId, "backup.create", { workloadId: b.serverId, backupId: b.id, ignore: b.ignored, maxBytes: MAX_ARCHIVE_BYTES }, { jobId: ctx.jobId, ...(ctx.signal ? { signal: ctx.signal } : {}), timeoutMs: 900_000, resultTimeoutMs: ARCHIVE_TIMEOUT_MS })
     .catch((err: unknown) => wrap(err, "backup.create"));
   await ctx.log("info", `Archived ${r.files} files (${r.sizeBytes} bytes, sha256 ${r.sha256}) in ${Math.round((r.durationMs || deps.clock.now() - started) / 1000)} s`);
   if (r.skippedSymlinks) await ctx.log("warn", `${r.skippedSymlinks} symbolic link(s) were not archived`);
@@ -102,34 +168,36 @@ export async function archiveBackup(deps: BackupJobDeps, ctx: { jobId: string; s
 }
 
 /**
- * S3: presigned multipart upload by the agent, completed here with its ETags, verified by size, then
- * the local archive is deleted. The multipart upload is aborted on any failure.
+ * S3: the upload id and key are persisted before the agent uploads (a crash leaves an abortable
+ * upload, not an orphan); presigned multipart parts PUT by the agent, completed here with its ETags,
+ * verified by size, then the local archive is deleted. Aborted on any failure.
  */
-export async function uploadBackup(
-  deps: BackupJobDeps,
-  ctx: { jobId: string; signal: AbortSignal; log: Ctx<unknown>["log"]; state?: Record<string, unknown> },
-  b: BackupRow,
-  nodeId: string,
-  cfg: S3Config,
-): Promise<string> {
+export async function uploadBackup(deps: BackupJobDeps, ctx: LogCtx, b: BackupRow, nodeId: string): Promise<string> {
   if (b.sizeBytes === null) throw new JobError("INTERNAL", "the archive size is unknown");
-  await setRow(deps, b.id, { status: "uploading" });
+  const cfg = await s3For(deps, b);
   const key = deps.storage.objectKey(cfg, b.serverId, b.id);
-  const mp = await deps.storage.startMultipart(cfg, key, b.sizeBytes).catch((err: unknown) => wrap(err, "upload"));
-  if (ctx.state) ctx.state.multipart = { key, uploadId: mp.uploadId };
+  if (b.uploadId) {
+    // An earlier attempt (control plane restarted mid-upload) left an open upload.
+    await deps.storage.abortMultipart(cfg, b.objectKey ?? key, b.uploadId).catch(() => undefined);
+    await deps.db.update(backups).set({ uploadId: null }).where(eq(backups.id, b.id));
+  }
+  const uploadId = await deps.storage.createMultipart(cfg, key).catch((err: unknown) => wrap(err, "upload"));
+  await deps.db.update(backups).set({ uploadId, objectKey: key }).where(eq(backups.id, b.id));
+  await setRow(deps, b.id, { status: "uploading" });
   try {
-    await ctx.log("info", `Uploading to object storage in ${mp.parts.length} part(s) of ${Math.round(mp.partSize / 1024 ** 2)} MiB`);
+    const plan = await deps.storage.presignParts(cfg, key, uploadId, b.sizeBytes).catch((err: unknown) => wrap(err, "upload"));
+    await ctx.log("info", `Uploading to object storage in ${plan.parts.length} part(s) of ${Math.round(plan.partSize / 1024 ** 2)} MiB`);
     const r = await deps.gateway
-      .send(nodeId, "backup.upload", { workloadId: b.serverId, backupId: b.id, partSize: mp.partSize, parts: mp.parts, deleteLocal: false }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 900_000, resultTimeoutMs: ARCHIVE_TIMEOUT_MS })
+      .send(nodeId, "backup.upload", { workloadId: b.serverId, backupId: b.id, partSize: plan.partSize, parts: plan.parts, deleteLocal: false }, { jobId: ctx.jobId, ...(ctx.signal ? { signal: ctx.signal } : {}), timeoutMs: 900_000, resultTimeoutMs: ARCHIVE_TIMEOUT_MS })
       .catch((err: unknown) => wrap(err, "backup.upload"));
-    if (r.parts.length !== mp.parts.length) throw new JobError("UPLOAD_FAILED", `the agent uploaded ${r.parts.length} of ${mp.parts.length} parts`);
-    await deps.storage.completeMultipart(cfg, key, mp.uploadId, r.parts).catch((err: unknown) => wrap(err, "upload"));
+    if (r.parts.length !== plan.parts.length) throw new JobError("UPLOAD_FAILED", `the agent uploaded ${r.parts.length} of ${plan.parts.length} parts`);
+    await deps.storage.completeMultipart(cfg, key, uploadId, r.parts).catch((err: unknown) => wrap(err, "upload"));
   } catch (err) {
-    await deps.storage.abortMultipart(cfg, key, mp.uploadId).catch(() => undefined);
-    if (ctx.state) delete ctx.state.multipart;
+    await deps.storage.abortMultipart(cfg, key, uploadId).catch(() => undefined);
+    await deps.db.update(backups).set({ uploadId: null }).where(eq(backups.id, b.id));
     throw err;
   }
-  if (ctx.state) delete ctx.state.multipart;
+  await deps.db.update(backups).set({ uploadId: null }).where(eq(backups.id, b.id));
   const size = await deps.storage.objectSize(cfg, key).catch((err: unknown) => wrap(err, "verification"));
   if (size !== b.sizeBytes) {
     await deps.storage.deleteObject(cfg, key).catch(() => undefined);
@@ -138,67 +206,171 @@ export async function uploadBackup(
   await deps.gateway.send(nodeId, "backup.delete", { workloadId: b.serverId, backupId: b.id }, { jobId: ctx.jobId, timeoutMs: 60_000 }).catch(async (err: unknown) => {
     await ctx.log("warn", `The local copy could not be removed: ${(err as Error).message}`);
   });
-  await deps.db.update(backups).set({ objectKey: key }).where(eq(backups.id, b.id));
   await ctx.log("info", "Upload verified");
   return key;
 }
 
-/** Removes a backup's data (S3 object or local archive). Missing data is not an error. */
-export async function deleteBackupData(deps: BackupJobDeps, b: BackupRow, nodeId: string, opts: { jobId?: string; signal?: AbortSignal } = {}): Promise<void> {
-  if (b.storage === "s3") {
-    if (!b.objectKey) return;
-    const cfg = await deps.storage.current().catch((err: unknown) => wrap(err, "storage settings"));
-    if (cfg.type !== "s3") throw new JobError("STORAGE_ERROR", "the backup is stored in S3 but S3 storage is no longer configured");
-    await deps.storage.deleteObject(cfg, b.objectKey).catch((err: unknown) => wrap(err, "delete"));
+/**
+ * Removes a backup's data: its S3 object (with its own storage reference) and/or an open upload, and
+ * the node-local archive (also present for S3 backups that never finished uploading).
+ */
+export async function deleteBackupData(deps: BackupJobDeps, b: BackupRow, nodeId: string | null, opts: { jobId?: string; signal?: AbortSignal } = {}): Promise<void> {
+  if (b.storage === "s3" && b.storageRef && (b.objectKey || b.uploadId)) {
+    const cfg = await s3For(deps, b);
+    if (b.uploadId && b.objectKey) await deps.storage.abortMultipart(cfg, b.objectKey, b.uploadId).catch(() => undefined);
+    if (b.objectKey) await deps.storage.deleteObject(cfg, b.objectKey).catch((err: unknown) => wrap(err, "delete"));
+  }
+  const localMayExist = b.storage === "local" || b.status !== "completed";
+  if (!localMayExist || !nodeId) return;
+  if (!deps.gateway.isReady(nodeId)) {
+    if (b.storage === "local" && b.status === "completed") throw new JobError("NODE_UNAVAILABLE", "the server's node is not connected", true);
     return;
   }
-  if (!deps.gateway.isReady(nodeId)) throw new JobError("NODE_UNAVAILABLE", "the server's node is not connected", true);
   await deps.gateway.send(nodeId, "backup.delete", { workloadId: b.serverId, backupId: b.id }, { timeoutMs: 60_000, ...opts }).catch((err: unknown) => {
     if (err instanceof AgentCommandError && err.code === "NOT_FOUND") return;
     wrap(err, "backup.delete");
   });
 }
 
-type ServerRow = typeof servers.$inferSelect;
+/** Deletes a backup row (unlocked only unless `force`), then its data; the row goes first (no race with a lock). */
+export async function removeBackup(
+  deps: BackupJobDeps,
+  backupId: string,
+  opts: { force?: boolean; state?: Record<string, unknown> } & { jobId?: string; signal?: AbortSignal } = {},
+): Promise<BackupRow | null> {
+  // A retry after the row was deleted continues with the data of the persisted row.
+  let deleted = (opts.state?.deletedRow as BackupRow | undefined) ?? null;
+  if (!deleted) {
+    const conds = [eq(backups.id, backupId)];
+    if (!opts.force) conds.push(eq(backups.locked, false));
+    deleted = (await deps.db.delete(backups).where(and(...conds)).returning())[0] ?? null;
+    if (!deleted) return null;
+    if (opts.state) opts.state.deletedRow = deleted;
+    void deps.publishDeleted(deleted.serverId, deleted.id).catch(() => undefined);
+  }
+  const [s] = await deps.db.select({ nodeId: servers.nodeId }).from(servers).where(eq(servers.id, deleted.serverId));
+  await deleteBackupData(deps, deleted, s?.nodeId ?? null, { ...(opts.jobId ? { jobId: opts.jobId } : {}), ...(opts.signal ? { signal: opts.signal } : {}) });
+  await deps.storage.releaseSecret(deleted.storageRef?.secretId);
+  if (opts.state) delete opts.state.deletedRow;
+  return deleted;
+}
+
+// --- Minecraft save cycle ---------------------------------------------------------------------
+
+async function setSaveOnPending(deps: BackupJobDeps, serverId: string, pending: boolean): Promise<void> {
+  await deps.db.update(servers).set({ saveOnPending: pending }).where(eq(servers.id, serverId));
+}
 
 /**
- * Minecraft save cycle for a running server: `save-off`, `save-all flush`, wait for the confirmation.
- * Returns the consistency of the archive taken afterwards; `save-on` follows via {@link resumeSaving}
- * (and the job's finalize hook if anything fails in between).
+ * `save-off` (acknowledged) → `save-all flush` → "Saved the game"; a save failure fails at once.
+ * `save_on_pending` is set first, so `save-on` is retried until acknowledged even if this process dies.
  */
 async function saveCycle(deps: BackupJobDeps, ctx: Ctx<unknown>, s: ServerRow): Promise<"save-flush" | "live"> {
   const rt = await loadRuntimeContext(deps.db, s.id);
   if (minecraftGame(rt) !== "java") return "live";
-  const since = deps.clock.now();
   ctx.state.saveOff = true;
+  await setSaveOnPending(deps, s.id, true);
+  const beforeOff = lastSeq(deps, s.id);
   await consoleCommand(deps, s.nodeId, s.id, "save-off", { jobId: ctx.jobId, signal: ctx.signal }).catch((err: unknown) => wrap(err, "save-off"));
+  if ((await waitForConsole(deps, s.id, beforeOff, confirmedBy(isSaveOffConfirmation), deps.saveToggleTimeoutMs ?? SAVE_TOGGLE_TIMEOUT_MS, ctx.signal)) !== "ok") {
+    throw new JobError("SAVE_OFF_TIMEOUT", "the server did not confirm save-off");
+  }
+  // Only output after this point counts (an earlier "Saved the game" is not this save).
+  const beforeSave = lastSeq(deps, s.id);
   await consoleCommand(deps, s.nodeId, s.id, "save-all flush", { jobId: ctx.jobId, signal: ctx.signal }).catch((err: unknown) => wrap(err, "save-all"));
-  const saved = await waitForConsole(deps, s.id, since, isSaveConfirmation, deps.saveTimeoutMs ?? 120_000, ctx.signal);
-  if (!saved) throw new JobError("SAVE_TIMEOUT", `the server did not confirm "save-all flush" within ${Math.round((deps.saveTimeoutMs ?? 120_000) / 1000)} s`);
+  const timeout = deps.saveTimeoutMs ?? 120_000;
+  const r = await waitForConsole(deps, s.id, beforeSave, saveAllOutcome(), timeout, ctx.signal);
+  if (r === "failed") throw new JobError("SAVE_FAILED", "the server could not save the world (is there enough disk space?)");
+  if (r === "timeout") throw new JobError("SAVE_TIMEOUT", `the server did not confirm "save-all flush" within ${Math.round(timeout / 1000)} s`);
   await ctx.log("info", "World saved and automatic saving paused");
   return "save-flush";
 }
 
+/** `save-on`, acknowledged by the server; otherwise left pending for {@link retryPendingSaveOn}. */
+async function sendSaveOn(deps: BackupJobDeps, s: Pick<ServerRow, "id" | "nodeId">, log: (msg: string, level: "info" | "warn") => Promise<void>, jobId?: string): Promise<boolean> {
+  const before = lastSeq(deps, s.id);
+  try {
+    await consoleCommand(deps, s.nodeId, s.id, "save-on", jobId ? { jobId } : {});
+  } catch (err) {
+    await log(`save-on could not be sent (will be retried): ${(err as Error).message}`, "warn");
+    return false;
+  }
+  if ((await waitForConsole(deps, s.id, before, confirmedBy(isSaveOnConfirmation), deps.saveToggleTimeoutMs ?? SAVE_TOGGLE_TIMEOUT_MS)) !== "ok") {
+    await log("save-on was not acknowledged (will be retried)", "warn");
+    return false;
+  }
+  await setSaveOnPending(deps, s.id, false);
+  await log("Automatic saving resumed", "info");
+  return true;
+}
+
 async function resumeSaving(deps: BackupJobDeps, ctx: Ctx<unknown>, s: ServerRow): Promise<void> {
   if (!ctx.state.saveOff || ctx.state.saveOnSent) return;
-  await consoleCommand(deps, s.nodeId, s.id, "save-on", { jobId: ctx.jobId, signal: ctx.signal }).catch((err: unknown) => wrap(err, "save-on"));
   ctx.state.saveOnSent = true;
-  await ctx.log("info", "Automatic saving resumed");
+  await sendSaveOn(deps, s, (m, l) => ctx.log(l, m), ctx.jobId);
 }
 
 /** finalize: `save-on` is never skipped, also after a failed or cancelled job. */
 async function ensureSaveOn(deps: BackupJobDeps, f: FinalizeContext<{ serverId: string }>, s: ServerRow | undefined): Promise<void> {
   if (!s || !f.state.saveOff || f.state.saveOnSent) return;
-  await consoleCommand(deps, s.nodeId, s.id, "save-on", { jobId: f.jobId })
-    .then(() => f.log("info", "Automatic saving resumed"))
-    .catch((err: unknown) => f.log("error", `save-on could not be sent: ${(err as Error).message}`));
+  await sendSaveOn(deps, s, (m, l) => f.log(l, m), f.jobId);
 }
+
+/**
+ * Durable `save-on`: servers whose `save-on` was never acknowledged (node disconnected, control plane
+ * restarted) get it again once their node is connected and no backup/restore is running. A server
+ * that is no longer running had autosave re-enabled by its restart.
+ */
+export async function retryPendingSaveOn(deps: BackupJobDeps, nodeId?: string): Promise<number> {
+  const conds = [eq(servers.saveOnPending, true)];
+  if (nodeId) conds.push(eq(servers.nodeId, nodeId));
+  const rows = await deps.db.select().from(servers).where(and(...conds));
+  let resumed = 0;
+  for (const s of rows) {
+    if (s.activeOperation === "backup" || s.activeOperation === "restore") continue;
+    if (!deps.gateway.isReady(s.nodeId)) continue;
+    const st = await workloadStatus(deps, s.nodeId, s.id).catch(() => null);
+    if (!isRunning(st)) {
+      await setSaveOnPending(deps, s.id, false);
+      continue;
+    }
+    if (await sendSaveOn(deps, s, async (m, l) => void deps.logger[l === "warn" ? "warn" : "info"]({ serverId: s.id }, m))) resumed++;
+  }
+  return resumed;
+}
+
+/** Multipart uploads left open by crashed or finished jobs are aborted (startup + periodically). */
+export async function abortStaleUploads(deps: BackupJobDeps): Promise<number> {
+  const rows = await deps.db
+    .select({ b: backups, jobStatus: jobs.status })
+    .from(backups)
+    .leftJoin(jobs, eq(jobs.id, backups.jobId))
+    .where(isNotNull(backups.uploadId));
+  let aborted = 0;
+  for (const { b, jobStatus } of rows) {
+    const active = jobStatus === "running" || jobStatus === "queued";
+    if (active && b.status === "uploading") continue;
+    if (b.storageRef && b.objectKey && b.uploadId) {
+      const cfg = await deps.storage.fromRef(b.storageRef).catch(() => null);
+      if (cfg) await deps.storage.abortMultipart(cfg, b.objectKey, b.uploadId).catch(() => undefined);
+    }
+    await deps.db.update(backups).set({ uploadId: null }).where(eq(backups.id, b.id));
+    aborted++;
+  }
+  return aborted;
+}
+
+// --- Jobs -----------------------------------------------------------------------------------
 
 const BackupInput = z.object({
   serverId: z.uuid(),
   backupId: z.uuid(),
   stopServer: z.boolean().default(false),
+  /** At the limit: rotate out the oldest unlocked completed backup once this one is complete. */
+  rotate: z.boolean().default(false),
+  /** Legacy (pre-review) input: a pre-chosen rotation target meant "rotate". */
   rotateBackupId: z.uuid().nullable().default(null),
+  limit: z.number().int().nonnegative().nullable().default(null),
   /** The server's state before the backup (a stopped/crashed server returns to it). */
   fromState: z.string().default("stopped"),
 });
@@ -244,21 +416,6 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
     expireInSeconds: 8 * 3600,
     steps: [
       {
-        key: "rotate",
-        label: "Rotate out the oldest backup",
-        run: async (ctx) => {
-          if (!ctx.input.rotateBackupId) return SKIP_STEP;
-          const [old] = await deps.db.select().from(backups).where(eq(backups.id, ctx.input.rotateBackupId)).limit(1);
-          if (!old) return SKIP_STEP;
-          if (old.locked) throw new JobError("BACKUP_LOCKED", "the backup chosen for rotation was locked in the meantime");
-          const s = await server(ctx.input.serverId);
-          await deleteBackupData(deps, old, s.nodeId, { jobId: ctx.jobId, signal: ctx.signal });
-          await deps.db.delete(backups).where(eq(backups.id, old.id));
-          void deps.publishDeleted(s.id, old.id).catch(() => undefined);
-          await ctx.log("info", `Rotated out backup "${old.name}"`);
-        },
-      },
-      {
         key: "prepare",
         label: "Prepare the server",
         run: async (ctx) => {
@@ -272,15 +429,13 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
           }
           if (ctx.input.stopServer) {
             await ctx.setMessage("Stopping the server");
-            const rt = await loadRuntimeContext(deps.db, s.id);
-            const stopped = await stopWorkload(deps, ctx, rt, 60_000);
+            const stopped = await stopWorkload(deps, ctx, await loadRuntimeContext(deps.db, s.id), 60_000);
             await deps.db.update(servers).set(exitColumns(stopped)).where(eq(servers.id, s.id));
             ctx.state.stoppedForBackup = true;
             await setRow(deps, ctx.input.backupId, { consistency: "stopped" });
             await ctx.log("info", "Server stopped for the backup");
             return;
           }
-          // Minecraft: stop automatic saving, flush everything to disk, wait for the confirmation.
           const consistency = await saveCycle(deps, ctx, s);
           await setRow(deps, ctx.input.backupId, { consistency });
           if (consistency === "live") await ctx.log("info", "Archiving the running server live");
@@ -291,33 +446,19 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
         label: "Archive the server files",
         run: async (ctx) => {
           const s = await server(ctx.input.serverId);
-          await archiveBackup(deps, ctx, await row(deps, ctx.input.backupId), s.nodeId);
-        },
-      },
-      {
-        key: "upload",
-        label: "Upload to object storage",
-        run: async (ctx) => {
-          const b = await row(deps, ctx.input.backupId);
-          if (b.storage !== "s3") {
-            await setRow(deps, b.id, { status: "completed", completedAt: new Date(deps.clock.now()) });
-            return SKIP_STEP;
-          }
-          const cfg = await deps.storage.current().catch((err: unknown) => wrap(err, "storage settings"));
-          if (cfg.type !== "s3") throw new JobError("STORAGE_ERROR", "S3 storage is no longer configured");
-          const s = await server(ctx.input.serverId);
-          await uploadBackup(deps, ctx, b, s.nodeId, cfg);
-          await setRow(deps, b.id, { status: "completed", completedAt: new Date(deps.clock.now()) });
+          const b = await archiveBackup(deps, ctx, await row(deps, ctx.input.backupId), s.nodeId);
+          if (b.storage === "local") await setRow(deps, b.id, { status: "completed", completedAt: new Date(deps.clock.now()) });
         },
       },
       {
         key: "resume",
         label: "Resume the server",
         run: async (ctx) => {
+          // Right after archiving: the upload below may take long.
           const s = await server(ctx.input.serverId);
           await resumeSaving(deps, ctx, s);
           if (ctx.state.stoppedForBackup) {
-            await deps.state.transition(s.id, "stopped", {}, { reason: "backup done" });
+            await deps.state.transition(s.id, "stopped", {}, { reason: "backup archived" });
             await startServerAndWait(deps, ctx);
             ctx.state.restarted = true;
             return;
@@ -325,46 +466,79 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
           if (!ctx.state.saveOff) return SKIP_STEP;
         },
       },
+      {
+        key: "upload",
+        label: "Upload to object storage",
+        run: async (ctx) => {
+          const b = await row(deps, ctx.input.backupId);
+          if (b.storage !== "s3") return SKIP_STEP;
+          const s = await server(ctx.input.serverId);
+          await uploadBackup(deps, ctx, b, s.nodeId);
+          await setRow(deps, b.id, { status: "completed", completedAt: new Date(deps.clock.now()) });
+        },
+      },
+      {
+        key: "rotate",
+        label: "Rotate out the oldest backup",
+        run: async (ctx) => {
+          if (!ctx.input.rotate && !ctx.input.rotateBackupId) return SKIP_STEP;
+          // Only now that the new backup is complete and verified does the oldest one go.
+          const s = await server(ctx.input.serverId);
+          const limit = ctx.input.limit ?? s.backupLimit;
+          const [n] = await deps.db.select({ n: count() }).from(backups).where(and(eq(backups.serverId, s.id), inArray(backups.status, [...BACKUP_COUNTED_STATUSES])));
+          if (Number(n?.n ?? 0) <= limit) return SKIP_STEP;
+          const candidates = await deps.db
+            .select({ id: backups.id, name: backups.name })
+            .from(backups)
+            .where(and(eq(backups.serverId, s.id), eq(backups.locked, false), eq(backups.status, "completed"), ne(backups.id, ctx.input.backupId)))
+            .orderBy(asc(backups.createdAt))
+            .limit(5);
+          for (const c of candidates) {
+            const gone = await removeBackup(deps, c.id, { state: ctx.state, jobId: ctx.jobId, signal: ctx.signal });
+            if (gone) {
+              await ctx.log("info", `Rotated out backup "${gone.name}"`);
+              return;
+            }
+          }
+          await ctx.log("warn", "Every older backup is locked: the server is over its backup limit");
+        },
+      },
     ],
     async finalize(f) {
       const id = f.input.serverId;
-      const s = await deps.db.select().from(servers).where(eq(servers.id, id)).limit(1).then((r) => r[0]);
-      if (s) {
-        // `save-on` is never skipped: also after a failed or cancelled backup.
-        await ensureSaveOn(deps, f, s);
-        // Abort a multipart upload left open (S3 would keep the parts).
-        const mp = f.state.multipart as { key: string; uploadId: string } | undefined;
-        if (mp) {
-          const cfg = await deps.storage.current().catch(() => null);
-          if (cfg?.type === "s3") await deps.storage.abortMultipart(cfg, mp.key, mp.uploadId).catch(() => undefined);
+      try {
+        const [s] = await deps.db.select().from(servers).where(eq(servers.id, id)).limit(1);
+        if (s) {
+          await ensureSaveOn(deps, f, s);
+          if (f.state.stoppedForBackup && !f.state.restarted) {
+            // The server was stopped for the backup: bring it back up even though the backup failed.
+            await deps.state.transition(id, "stopped", {}, { reason: "backup ended" });
+            await startServerAndWait(deps, finalizeCtx(f, deps.readyTimeoutMs ?? 15 * 60_000)).catch((err: unknown) =>
+              f.log("error", `The server could not be started again: ${(err as Error).message}`),
+            );
+          }
+          const [cur] = await deps.db.select({ state: servers.state }).from(servers).where(eq(servers.id, id));
+          if (cur?.state === "backing_up") {
+            // From the workload's real state (a crash during the backup is not hidden).
+            await settleFromRuntime(deps, id, (f.input.fromState === "crashed" ? "crashed" : "stopped") as ServerState);
+          }
         }
-        if (f.state.stoppedForBackup && !f.state.restarted) {
-          // The server was stopped for the backup: bring it back up even though the backup failed.
-          await deps.state.transition(id, "stopped", {}, { reason: "backup ended" });
-          await startServerAndWait(deps, finalizeCtx(f, deps.readyTimeoutMs ?? 15 * 60_000)).catch((err: unknown) =>
-            f.log("error", `The server could not be started again: ${(err as Error).message}`),
-          );
+        const [b] = await deps.db.select().from(backups).where(eq(backups.id, f.input.backupId)).limit(1);
+        if (b && b.status !== "completed") {
+          await setRow(deps, b.id, { status: "failed", error: f.error?.message ?? f.status, completedAt: new Date(deps.clock.now()) });
+          // No partial data: the local archive (also of S3 backups that never finished uploading) and any open upload.
+          await deleteBackupData(deps, b, s?.nodeId ?? null).catch((err: unknown) => f.log("warn", `Cleaning up the failed backup: ${(err as Error).message}`));
         }
-        const [cur] = await deps.db.select({ state: servers.state }).from(servers).where(eq(servers.id, id));
-        if (cur?.state === "backing_up") {
-          const before: ServerState = f.input.fromState === "crashed" ? "crashed" : "stopped";
-          if (f.status === "succeeded") await deps.state.transition(id, f.state.wasRunning ? "running" : before, {}, { reason: "backup done" });
-          else await settleFromRuntime(deps, id, before);
-        }
+        const ok = b?.status === "completed";
+        await deps.bus.publish({
+          type: ok ? "backup.completed" : "backup.failed",
+          subjectType: "server",
+          subjectId: id,
+          data: { backupId: f.input.backupId, jobId: f.jobId, ...(ok ? {} : { error: f.error?.message ?? f.status }) },
+        });
+      } finally {
+        await deps.state.end(id, f.jobId);
       }
-      const [b] = await deps.db.select().from(backups).where(eq(backups.id, f.input.backupId)).limit(1);
-      if (b && b.status !== "completed") {
-        await setRow(deps, b.id, { status: "failed", error: f.error?.message ?? f.status, completedAt: new Date(deps.clock.now()) });
-        if (b.storage === "local" && s) await deleteBackupData(deps, b, s.nodeId).catch(() => undefined);
-      }
-      const ok = b?.status === "completed" || (b && f.status === "succeeded");
-      await deps.bus.publish({
-        type: ok ? "backup.completed" : "backup.failed",
-        subjectType: "server",
-        subjectId: id,
-        data: { backupId: f.input.backupId, jobId: f.jobId, ...(ok ? {} : { error: f.error?.message ?? f.status }) },
-      });
-      await deps.state.end(id, f.jobId);
     },
   };
 
@@ -392,14 +566,11 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
             await setRow(deps, b.id, { consistency });
             b = await archiveBackup(deps, ctx, b, s.nodeId);
             await resumeSaving(deps, ctx, s);
-            if (b.storage === "s3") {
-              const cfg = await deps.storage.current().catch((err: unknown) => wrap(err, "storage settings"));
-              if (cfg.type !== "s3") throw new JobError("STORAGE_ERROR", "S3 storage is no longer configured");
-              await uploadBackup(deps, ctx, b, s.nodeId, cfg);
-            }
+            if (b.storage === "s3") await uploadBackup(deps, ctx, b, s.nodeId);
             await setRow(deps, b.id, { status: "completed", completedAt: new Date(deps.clock.now()) });
           } catch (err) {
             await setRow(deps, b.id, { status: "failed", error: (err as Error).message, completedAt: new Date(deps.clock.now()) });
+            await deleteBackupData(deps, await row(deps, b.id), s.nodeId).catch(() => undefined);
             throw err;
           }
           await ctx.log("info", `Safety backup "${b.name}" created (locked)`);
@@ -434,8 +605,8 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
           if (b.status !== "completed" || !b.sha256) throw new JobError("BACKUP_UNAVAILABLE", "the backup is not complete");
           let source: { type: "local" } | { type: "url"; url: string } = { type: "local" };
           if (b.storage === "s3") {
-            const cfg = await deps.storage.current().catch((err: unknown) => wrap(err, "storage settings"));
-            if (cfg.type !== "s3" || !b.objectKey) throw new JobError("STORAGE_ERROR", "the backup's object storage is not configured");
+            if (!b.objectKey) throw new JobError("STORAGE_ERROR", "the backup has no object");
+            const cfg = await s3For(deps, b);
             source = { type: "url", url: await deps.storage.presignGet(cfg, b.objectKey, 6 * 3600) };
           }
           const r = await deps.gateway
@@ -462,17 +633,20 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
     ],
     async finalize(f) {
       const id = f.input.serverId;
-      await ensureSaveOn(deps, f, (await deps.db.select().from(servers).where(eq(servers.id, id)).limit(1))[0]);
-      const [cur] = await deps.db.select({ state: servers.state }).from(servers).where(eq(servers.id, id));
-      // Whatever happened, a server left in `restoring`/`stopping` ends up stopped (a failed restore never auto-starts).
-      if (cur?.state === "restoring") await deps.state.transition(id, "stopped", {}, { reason: f.status === "succeeded" ? "restored" : "restore failed" });
-      else if (cur?.state === "starting" || cur?.state === "stopping") await settleFromRuntime(deps, id, "stopped");
-      if (f.state.restored) {
-        await deps.bus.publish({ type: "backup.restored", subjectType: "server", subjectId: id, data: { backupId: f.input.backupId, jobId: f.jobId } });
+      try {
+        await ensureSaveOn(deps, f, (await deps.db.select().from(servers).where(eq(servers.id, id)).limit(1))[0]);
+        const [cur] = await deps.db.select({ state: servers.state }).from(servers).where(eq(servers.id, id));
+        // Whatever happened, a server left in `restoring`/`stopping` ends up stopped (a failed restore never auto-starts).
+        if (cur?.state === "restoring") await deps.state.transition(id, "stopped", {}, { reason: f.status === "succeeded" ? "restored" : "restore failed" });
+        else if (cur?.state === "starting" || cur?.state === "stopping") await settleFromRuntime(deps, id, "stopped");
+        if (f.state.restored) {
+          await deps.bus.publish({ type: "backup.restored", subjectType: "server", subjectId: id, data: { backupId: f.input.backupId, jobId: f.jobId } });
+        }
+        if (f.status !== "succeeded" && !f.state.restored) await f.log("error", "The restore did not complete; the server was left stopped");
+        if (f.status !== "succeeded" && f.state.restored) await f.log("warn", "The files were restored but the server did not start");
+      } finally {
+        await deps.state.end(id, f.jobId);
       }
-      if (f.status !== "succeeded" && !f.state.restored) await f.log("error", "The restore did not complete; the server was left stopped");
-      if (f.status !== "succeeded" && f.state.restored) await f.log("warn", "The files were restored but the server did not start");
-      await deps.state.end(id, f.jobId);
     },
   };
 
@@ -487,31 +661,43 @@ export function backupJobDefinitions(deps: BackupJobDeps): JobDefinition<never>[
         key: "delete",
         label: "Delete the backup",
         run: async (ctx) => {
-          const [b] = await deps.db.select().from(backups).where(eq(backups.id, ctx.input.backupId)).limit(1);
-          if (!b) return SKIP_STEP;
-          if (b.locked) throw new JobError("BACKUP_LOCKED", "the backup is locked");
-          const s = await server(ctx.input.serverId);
-          await deleteBackupData(deps, b, s.nodeId, { jobId: ctx.jobId, signal: ctx.signal });
-          await deps.db.delete(backups).where(eq(backups.id, b.id));
-          void deps.publishDeleted(s.id, b.id).catch(() => undefined);
-          await ctx.log("info", `Deleted backup "${b.name}"`);
+          // Conditional row delete (locked=false) first, then the data — a lock set meanwhile wins.
+          const gone = await removeBackup(deps, ctx.input.backupId, { state: ctx.state, jobId: ctx.jobId, signal: ctx.signal });
+          if (!gone) {
+            const [still] = await deps.db.select({ locked: backups.locked }).from(backups).where(eq(backups.id, ctx.input.backupId));
+            if (still?.locked) throw new JobError("BACKUP_LOCKED", "the backup was locked");
+            return SKIP_STEP;
+          }
+          await ctx.log("info", `Deleted backup "${gone.name}"`);
         },
       },
     ],
   };
 
-  return [create, restore, remove] as unknown as JobDefinition<never>[];
+  return [withLockRelease(create, deps.state), withLockRelease(restore, deps.state), remove] as unknown as JobDefinition<never>[];
+}
+
+/** Failed backups kept for diagnosis: the newest 10 per server, at most 7 days. */
+export const FAILED_BACKUPS_KEPT = 10;
+export const FAILED_BACKUP_RETENTION_MS = 7 * 86_400_000;
+
+export async function pruneFailedBackups(deps: BackupJobDeps): Promise<number> {
+  const cutoff = new Date(deps.clock.now() - FAILED_BACKUP_RETENTION_MS);
+  const r = await deps.db.execute<{ id: string }>(sql`
+    SELECT id FROM (
+      SELECT id, created_at, locked, row_number() OVER (PARTITION BY server_id ORDER BY created_at DESC) AS rn
+        FROM backups WHERE status = 'failed') x
+     WHERE NOT x.locked AND (x.rn > ${FAILED_BACKUPS_KEPT} OR x.created_at < ${cutoff})`);
+  let n = 0;
+  for (const { id } of r.rows) {
+    if (await removeBackup(deps, id).catch((err: unknown) => (deps.logger.warn({ err, backupId: id }, "pruning a failed backup"), null))) n++;
+  }
+  return n;
 }
 
 /** Server deletion: every backup's data goes first (locked ones too — the server is going away). */
 export async function deleteAllBackups(deps: BackupJobDeps, serverId: string, ctx: { jobId: string; signal: AbortSignal; log: Ctx<unknown>["log"] }): Promise<void> {
-  const rows = await deps.db.select().from(backups).where(eq(backups.serverId, serverId)).orderBy(asc(backups.createdAt));
-  if (!rows.length) return;
-  const [s] = await deps.db.select({ nodeId: servers.nodeId }).from(servers).where(eq(servers.id, serverId));
-  for (const b of rows) {
-    await deleteBackupData(deps, b, s?.nodeId ?? "", { jobId: ctx.jobId, signal: ctx.signal });
-    await deps.db.delete(backups).where(and(eq(backups.id, b.id), eq(backups.serverId, serverId)));
-  }
-  await ctx.log("info", `Deleted ${rows.length} backup(s)`);
+  const rows = await deps.db.select({ id: backups.id }).from(backups).where(eq(backups.serverId, serverId)).orderBy(asc(backups.createdAt));
+  for (const b of rows) await removeBackup(deps, b.id, { force: true, jobId: ctx.jobId, signal: ctx.signal });
+  if (rows.length) await ctx.log("info", `Deleted ${rows.length} backup(s)`);
 }
-

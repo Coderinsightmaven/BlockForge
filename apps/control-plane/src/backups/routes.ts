@@ -9,6 +9,7 @@ import { GLOBAL } from "../rbac/authorize.js";
 import { StorageError, type BackupStorage } from "./storage.js";
 
 const IdParams = z.object({ id: z.uuid() });
+const ListQuery = z.object({ limit: z.coerce.number().int().min(1).max(500).default(100), cursor: z.string().max(512).optional() });
 const BackupParams = IdParams.extend({ backupId: z.uuid() });
 /** api.md `{name?, locked?}` (no contract schema yet — requested). */
 const UpdateBackupRequest = z.object({ name: z.string().trim().min(1).max(120).optional(), locked: z.boolean().optional() });
@@ -20,7 +21,14 @@ export function registerBackupRoutes(app: FastifyInstance, ctx: AppContext): voi
   const b = ctx.backups;
   const access = ctx.serverAccess;
 
-  app.get("/servers/:id/backups", async (req) => b.list(await access.require(req, parse(IdParams, req.params, "Path").id, "servers.backups.view")));
+  // `Backup[]` (api.md), newest first and paginated: `?limit=` (≤ 500) / `?cursor=`, next page in `x-next-cursor`.
+  app.get("/servers/:id/backups", async (req, reply) => {
+    const a = await access.require(req, parse(IdParams, req.params, "Path").id, "servers.backups.view");
+    const q = parse(ListQuery, req.query, "Query");
+    const page = await b.list(a, { limit: q.limit, cursor: q.cursor });
+    if (page.nextCursor) reply.header("x-next-cursor", page.nextCursor);
+    return page.items;
+  });
 
   app.post("/servers/:id/backups", async (req, reply) => {
     const a = await access.require(req, parse(IdParams, req.params, "Path").id, "servers.backups.create");

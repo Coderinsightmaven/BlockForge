@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { actorOf, requirePrincipal } from "../http/auth-hooks.js";
 import { parse } from "../http/validation.js";
+import { accountPermissions } from "./permissions.js";
 
 const KeyParams = z.object({ id: z.uuid() });
 
@@ -18,6 +19,9 @@ export function registerAccountRoutes(app: FastifyInstance, ctx: AppContext): vo
     reply.status(201);
     return key;
   });
+
+  // Session or API key (the one /account route keys may use; limited to the key's permissions).
+  app.get("/account/permissions", async (req) => accountPermissions(ctx.db, requirePrincipal(req)));
 
   // --- Personal API keys (session only: /account refuses API keys; creation needs an MFA-verified session) ---
   app.get("/account/api-keys", async (req) => ctx.apiKeys.list(requirePrincipal(req).userId));

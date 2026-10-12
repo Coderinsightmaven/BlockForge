@@ -3,6 +3,8 @@ import { ipAllowed } from "../../src/apikeys/service.js";
 import { isSaveConfirmation } from "../../src/backups/jobs.js";
 import { MIN_PART_SIZE, partPlan } from "../../src/backups/storage.js";
 import { cronError, nextRuns, validTimezone } from "../../src/schedules/cron.js";
+import { withLockRelease } from "../../src/servers/jobs.js";
+import type { JobDefinition } from "../../src/jobs/types.js";
 
 describe("Minecraft save confirmation", () => {
   it("matches vanilla/Paper/Forge wording, not chat or other lines", () => {
@@ -64,5 +66,28 @@ describe("cron helpers", () => {
     expect(cronError({ ...cron, minute: "75" }, "UTC")).toMatch(/minute/);
     expect(validTimezone("America/New_York")).toBe(true);
     expect(validTimezone("Mars/Olympus")).toBe(false);
+  });
+});
+
+describe("server job operation lock (H9)", () => {
+  it("is released even when a finalize hook throws, and the error still surfaces", async () => {
+    const ended: string[] = [];
+    const state = { end: async (serverId: string, jobId: string) => void ended.push(`${serverId}:${jobId}`) };
+    const def = withLockRelease(
+      {
+        type: "test.finalize-throws",
+        steps: [],
+        finalize: async () => {
+          throw new Error("finalize failed");
+        },
+      } as unknown as JobDefinition<{ serverId: string }>,
+      state as never,
+    );
+    const f = { jobId: "job-1", input: { serverId: "server-1" }, status: "failed", error: null, state: {}, log: async () => undefined };
+    await expect(def.finalize!(f as never)).rejects.toThrow("finalize failed");
+    expect(ended).toEqual(["server-1:job-1"]);
+    // Without a finalize hook nothing is wrapped (the runner's default path applies).
+    const bare = { type: "test.bare", steps: [] } as unknown as JobDefinition<{ serverId: string }>;
+    expect(withLockRelease(bare, state as never)).toBe(bare);
   });
 });

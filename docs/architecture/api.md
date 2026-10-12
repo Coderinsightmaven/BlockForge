@@ -188,7 +188,7 @@ expire after 2 hours. World upload at creation is not implemented yet (`world.mo
 ## Backups (Phase 4) — see `api/backups.ts`
 | Method | Path | Body → Response | Permission |
 |--------|------|-----------------|------------|
-| GET | `/servers/:id/backups` | → `Backup[]` | servers.backups.view |
+| GET | `/servers/:id/backups` | `?limit=` (≤ 500, default 100) `&cursor=` → `Backup[]`, next page cursor in the `x-next-cursor` header | servers.backups.view |
 | POST | `/servers/:id/backups` | `CreateBackupRequest` → `{backup, jobId}` (202, idempotent); at the limit without `rotate` → 409 | servers.backups.create |
 | PATCH | `/servers/:id/backups/:backupId` | `{name?, locked?}` → `Backup` | servers.backups.delete (lock/unlock, as Pterodactyl) |
 | DELETE | `/servers/:id/backups/:backupId` | → `{jobId}`; locked → 409 | servers.backups.delete |
@@ -207,9 +207,9 @@ failed ones don't. Restore may start from running/degraded: the job stops the se
 | Method | Path | Body → Response | Permission |
 |--------|------|-----------------|------------|
 | GET | `/servers/:id/schedules` | → `Schedule[]` | schedules.view |
-| POST | `/servers/:id/schedules` | `UpsertScheduleRequest` → `Schedule` | schedules.manage |
+| POST | `/servers/:id/schedules` | `UpsertScheduleRequest` → `Schedule`; 409 above 50 schedules per server | schedules.manage |
 | GET · PUT · DELETE | `/servers/:id/schedules/:scheduleId` | → `Schedule` / `UpsertScheduleRequest` / 204 | schedules.view / manage |
-| POST | `/servers/:id/schedules/:scheduleId/run` | → `ScheduleRun` (202) | schedules.manage |
+| POST | `/servers/:id/schedules/:scheduleId/run` | → `ScheduleRun` (202); also requires every task's permission on the server (power → `servers.control`, command → `servers.console.send`, backup → `servers.backups.create`), else 403 naming the missing ones; a manual run executes as the caller (re-checked per task), scheduled runs as the last editor; 409 while a run is in progress | schedules.manage |
 | GET | `/servers/:id/schedules/:scheduleId/runs` | `?limit=&cursor=` → `Page<ScheduleRun>` | schedules.view |
 | POST | `/schedules/preview` | `CronPreviewRequest` → `CronPreviewResponse` | session or API key |
 
@@ -223,7 +223,7 @@ permission, the task fails with FORBIDDEN and the run is recorded as failed.
 | GET | `/account/api-keys` | → `ApiKey[]` | session only |
 | POST | `/account/api-keys` | `CreateApiKeyRequest` → `CreatedApiKey` (secret shown once) | session only (MFA-verified) |
 | DELETE | `/account/api-keys/:id` | → 204 | session only |
-| GET | `/account/permissions` | → `AccountPermissions` (role grants + per-server owner/subuser grants) | session or API key |
+| GET | `/account/permissions` | → `AccountPermissions` (role grants + per-server owner/subuser grants; for an API key, limited to the key) | session or API key (the only `/account` route keys may use) |
 
 Every other route accepts `Authorization: Bearer bfk_…` (no CSRF). Key requests are limited to
 `permissions ∩ owner's current effective permissions`, minus `API_KEY_FORBIDDEN_PERMISSIONS`; account routes

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Permission, Schedule, ScheduleCron, ScheduleRun, ScheduleTask } from "@blockforge/contracts";
-import { and, desc, eq, isNull, lt, or } from "drizzle-orm";
+import { and, count, desc, eq, isNull, lt, or } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { AuditActor, AuditService } from "../audit/service.js";
 import type { Db } from "../db/client.js";
@@ -40,7 +40,12 @@ export interface SchedulesDeps {
   access: ServerAccessService;
   /** Starts a claimed run (the scheduler executes it asynchronously). */
   execute(runId: string): void;
+  /** Lease of a run claimed by this process. */
+  lease(): { runnerId: string; leaseExpiresAt: Date };
 }
+
+/** At most this many schedules per server. */
+export const MAX_SCHEDULES_PER_SERVER = 50;
 
 export function runDto(r: RunRow): ScheduleRun {
   return {
@@ -136,6 +141,8 @@ export class SchedulesService {
 
   async create(access: ServerAccess, input: UpsertInput, actor: AuditActor): Promise<Schedule> {
     const { timezone } = this.validate(access, input);
+    const [n] = await this.d.db.select({ n: count() }).from(schedules).where(eq(schedules.serverId, access.server.id));
+    if (Number(n?.n ?? 0) >= MAX_SCHEDULES_PER_SERVER) throw conflict(`A server can have at most ${MAX_SCHEDULES_PER_SERVER} schedules`);
     const now = new Date(this.d.clock.now());
     const [row] = await this.d.db
       .insert(schedules)
@@ -192,12 +199,20 @@ export class SchedulesService {
   /** Manual trigger; refused while a run is in progress (at most one per schedule). */
   async runNow(access: ServerAccess, id: string, actor: AuditActor): Promise<ScheduleRun> {
     const r = await this.rowOf(access.server.id, id);
+    // Running a schedule by hand needs every task's permission (no delegation through the last editor);
+    // the manual run then executes as the caller.
+    const missing = [...new Set(r.tasks.map((t) => TASK_PERMISSION[t.action]))].filter((p) => !access.permissions.has(p));
+    if (missing.length) throw forbidden(`Running this schedule needs ${missing.join(", ")}`);
     const runId = randomUUID();
     const now = new Date(this.d.clock.now());
+    const definition = { name: r.name, tasks: r.tasks, updatedBy: access.principal.userId, onlyWhenOnline: r.onlyWhenOnline };
     const claimed = await this.d.db.transaction(async (tx) => {
       const [locked] = await tx.update(schedules).set({ runningRunId: runId, lastRunAt: now }).where(and(eq(schedules.id, id), isNull(schedules.runningRunId))).returning({ id: schedules.id });
       if (!locked) return null;
-      const [run] = await tx.insert(scheduleRuns).values({ id: runId, scheduleId: id, trigger: "manual", status: "running", tasks: pendingTasks(r.tasks), startedAt: now }).returning();
+      const [run] = await tx
+        .insert(scheduleRuns)
+        .values({ id: runId, scheduleId: id, trigger: "manual", status: "running", tasks: pendingTasks(r.tasks), definition, ...this.d.lease(), startedAt: now })
+        .returning();
       return run!;
     });
     if (!claimed) throw conflict("The schedule is already running");

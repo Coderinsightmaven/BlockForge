@@ -165,7 +165,11 @@ describe("schedules", () => {
     const sub = await owner.post(`/servers/${id}/subusers`, { user: "bob", permissions: ["servers.view", "schedules.view", "schedules.manage", "servers.console.send"] });
     const bobs = Schedule.parse((await bob.post(`/servers/${id}/schedules`, schedule())).json());
     expect((await owner.put(`/servers/${id}/subusers/${sub.json().id}`, { permissions: ["servers.view", "schedules.view", "schedules.manage"] })).statusCode).toBe(200);
-    await bob.post(`/servers/${id}/schedules/${bobs.id}/run`);
+    // Running it by hand needs the task permissions (H2) ...
+    expect((await bob.post(`/servers/${id}/schedules/${bobs.id}/run`)).statusCode).toBe(403);
+    // ... and a scheduled run re-checks the editor's permissions at run time.
+    await testPool().query("UPDATE schedules SET next_run_at = now() - interval '1 second' WHERE id = $1", [bobs.id]);
+    expect(await t.ctx.scheduler.tick()).toHaveLength(1);
     await t.ctx.scheduler.idle();
     const br = (await runs(owner, id, bobs.id))[0]!;
     expect(br).toMatchObject({ status: "failed" });
@@ -181,7 +185,8 @@ describe("schedules", () => {
     expect((await owner.post(`/servers/${id}/schedules/${s.id}/run`)).statusCode).toBe(409);
     expect((await get(owner, id, s.id)).running).toBe(true);
     // While running, a due time does not start a second run.
-    clock.advance(s.nextRunAt! - Date.now() + 1000);
+    // (Due via the database, not the clock: advancing the clock would also expire the run's lease.)
+    await testPool().query("UPDATE schedules SET next_run_at = $1 WHERE id = $2", [new Date(clock.now() - 1000), s.id]);
     expect(await t.ctx.scheduler.tick()).toEqual([]);
     release();
     gate = null;

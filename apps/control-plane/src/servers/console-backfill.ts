@@ -1,7 +1,7 @@
 import { AGENT_LIMITS } from "@blockforge/contracts";
 import { eq } from "drizzle-orm";
 import type { Logger } from "pino";
-import type { ConsoleBuffers } from "../agents/console-buffer.js";
+import { CONSOLE_BUFFER_LINES, type ConsoleBuffers } from "../agents/console-buffer.js";
 import { AgentCommandError, type AgentGateway } from "../agents/gateway.js";
 import type { Db } from "../db/client.js";
 import { servers } from "../db/schema/index.js";
@@ -28,15 +28,21 @@ export class ConsoleBackfill {
     },
   ) {}
 
-  ensure(serverId: string, lines = BACKFILL_MAX_LINES): Promise<void> {
+  /** `_requested` is ignored: the backfill always fetches BACKFILL_MAX_LINES, whatever the first request asked for. */
+  ensure(serverId: string, _requested?: number): Promise<void> {
     if (this.d.consoles.isBackfilled(serverId)) return Promise.resolve();
-    if (this.d.consoles.tail(serverId, 1).lines.length) return Promise.resolve();
+    // Control-plane `system` lines ("[install] …", notices) do not count as server output.
+    if (this.hasOutput(serverId)) return Promise.resolve();
     let p = this.inflight.get(serverId);
     if (!p) {
-      p = this.run(serverId, Math.max(1, Math.min(lines, BACKFILL_MAX_LINES))).finally(() => this.inflight.delete(serverId));
+      p = this.run(serverId, BACKFILL_MAX_LINES).finally(() => this.inflight.delete(serverId));
       this.inflight.set(serverId, p);
     }
     return p;
+  }
+
+  private hasOutput(serverId: string): boolean {
+    return this.d.consoles.tail(serverId, CONSOLE_BUFFER_LINES).lines.some((l) => l.stream !== "system");
   }
 
   private async run(serverId: string, n: number): Promise<void> {
@@ -47,7 +53,7 @@ export class ConsoleBackfill {
       const r = await this.d.gateway.send(s.nodeId, "workload.logs.tail", { workloadId: serverId, lines: n }, { timeoutMs: 10_000 });
       const secrets = await this.d.masks.forServer(serverId);
       // Live output may have arrived meanwhile: then the buffer is already the better source.
-      if (!this.d.consoles.tail(serverId, 1).lines.length && r.lines.length) {
+      if (!this.hasOutput(serverId) && r.lines.length) {
         this.d.consoles.append(
           serverId,
           r.lines.map((l) => ({ ...l, line: maskSecrets(l.line.length > AGENT_LIMITS.logLineMaxBytes ? l.line.slice(0, AGENT_LIMITS.logLineMaxBytes) : l.line, secrets) })),

@@ -1,11 +1,43 @@
 import { BackupConsistency, BackupStatus, type ScheduleCron, type ScheduleRun, type ScheduleTask } from "@blockforge/contracts";
 import { sql } from "drizzle-orm";
-import { bigint, boolean, index, integer, jsonb, pgTable, text, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, index, integer, jsonb, pgTable, primaryKey, text, uuid } from "drizzle-orm/pg-core";
 import { enumCheck, nullableEnumCheck, tsz } from "./_helpers.js";
-import { users } from "./identity.js";
+import { apiTokens, users } from "./identity.js";
 import { servers } from "./servers.js";
 
 export const SCHEDULE_RUN_STATUSES = ["running", "succeeded", "failed", "skipped"] as const;
+
+export interface RunDefinition {
+  name: string;
+  tasks: ScheduleTask[];
+  /** The editor whose permissions the tasks run with. */
+  updatedBy: string | null;
+  onlyWhenOnline: boolean;
+}
+
+export interface S3StorageRef {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  forcePathStyle: boolean;
+  accessKeyId: string;
+  /** `secrets` row holding the secret access key (kept while referenced). */
+  secretId: string;
+}
+
+/** Shared (multi-replica) per-key request counters, one row per key and minute. */
+export const apiKeyUsage = pgTable(
+  "api_key_usage",
+  {
+    keyId: uuid("key_id")
+      .notNull()
+      .references(() => apiTokens.id, { onDelete: "cascade" }),
+    windowStart: tsz("window_start").notNull(),
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [primaryKey({ name: "api_key_usage_pk", columns: [t.keyId, t.windowStart] })],
+);
 
 export const schedules = pgTable(
   "schedules",
@@ -49,6 +81,11 @@ export const scheduleRuns = pgTable(
     status: text("status").notNull(),
     reason: text("reason"),
     tasks: jsonb("tasks").$type<ScheduleRun["tasks"]>().notNull(),
+    /** Snapshot taken when the run was claimed: later edits of the schedule do not affect it. */
+    definition: jsonb("definition").$type<RunDefinition>(),
+    /** Control-plane process executing the run, and its lease (renewed by heartbeats). */
+    runnerId: text("runner_id"),
+    leaseExpiresAt: tsz("lease_expires_at"),
     startedAt: tsz("started_at").notNull(),
     finishedAt: tsz("finished_at"),
   },
@@ -72,6 +109,10 @@ export const backups = pgTable(
     storage: text("storage").notNull(),
     /** S3 object key (null for local backups). */
     objectKey: text("object_key"),
+    /** Immutable S3 location + credentials reference used for this backup (settings may change later). */
+    storageRef: jsonb("storage_ref").$type<S3StorageRef>(),
+    /** Open multipart upload (aborted if the upload does not complete). */
+    uploadId: text("upload_id"),
     consistency: text("consistency"),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
     sha256: text("sha256"),

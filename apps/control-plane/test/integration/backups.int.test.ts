@@ -73,7 +73,8 @@ describe("backups (local storage)", () => {
     expect(b!.sizeBytes).toBe(archive.bytes.length);
     expect(Object.keys(archive.files)).toContain("world/level.dat");
     expect(Object.keys(archive.files).some((f) => f.startsWith("logs/"))).toBe(false);
-    expect(trail(node, id).slice(before)).toEqual(["workload.status", "console:save-off", "console:save-all flush", "backup.create", "console:save-on"]);
+    // save-off is confirmed before save-all; the final state comes from the real workload status (H8).
+    expect(trail(node, id).slice(before)).toEqual(["workload.status", "console:save-off", "console:save-all flush", "backup.create", "console:save-on", "workload.status"]);
     expect(await state(owner, id)).toBe("running");
     const frame = await ui.waitForEvent(`server:${id}`, "backup.updated", 5000, (d) => (d as Backup).status === "completed");
     expect((frame.data as Backup).id).toBe(b!.id);

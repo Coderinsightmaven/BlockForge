@@ -336,6 +336,22 @@ async function convertHold(deps: ServerJobDeps, serverId: string): Promise<void>
     .where(and(eq(resourceReservations.serverId, serverId), eq(resourceReservations.kind, "hold")));
 }
 
+/** The operation lock is released even when a finalize hook throws (`state.end` is idempotent). */
+export function withLockRelease<I extends { serverId: string }>(def: JobDefinition<I>, state: Pick<ServerStateService, "end">): JobDefinition<I> {
+  const finalize = def.finalize;
+  if (!finalize) return def;
+  return {
+    ...def,
+    async finalize(f) {
+      try {
+        await finalize(f);
+      } finally {
+        await state.end(f.input.serverId, f.jobId);
+      }
+    },
+  };
+}
+
 /** Ensures the container (current spec) and re-applies egg config files before a start. */
 export async function prepareServerStart(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>): Promise<void> {
   const rt = await loadRuntimeContext(deps.db, ctx.input.serverId);
@@ -592,5 +608,5 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
     },
   };
 
-  return [provision, reinstall, start, stop, restart, kill, del] as unknown as JobDefinition<never>[];
+  return [provision, reinstall, start, stop, restart, kill, del].map((d) => withLockRelease(d as JobDefinition<{ serverId: string }>, deps.state)) as unknown as JobDefinition<never>[];
 }

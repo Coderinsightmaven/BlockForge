@@ -63,7 +63,7 @@ describe("backup storage settings", () => {
     expect((await owner.put("/settings/backups.storage", { value: { ...noSecret, prefix: "bf/" } })).json()).toMatchObject({ value: { prefix: "bf/" }, secretAccessKeySet: true });
     expect((await owner.get("/settings/backups.storage")).body).not.toContain(TEST_S3.secretAccessKey);
     expect((await owner.put("/settings/backups.storage.x", { value: 1 })).statusCode).toBe(404);
-    const { rows: secretRows } = await testPool().query("SELECT ciphertext FROM secrets WHERE name = 'backups.s3.secretAccessKey'");
+    const { rows: secretRows } = await testPool().query("SELECT ciphertext FROM secrets WHERE name LIKE 'backups.s3.secretAccessKey%'");
     expect(secretRows).toHaveLength(1);
     expect(Buffer.from(secretRows[0].ciphertext).toString("utf8")).not.toContain(TEST_S3.secretAccessKey);
     const { rows: audit } = await testPool().query("SELECT details FROM audit_events WHERE target_id = 'backups.storage'");

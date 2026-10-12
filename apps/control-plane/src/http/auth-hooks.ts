@@ -23,6 +23,7 @@ export interface AuthHookDeps {
 /** Routes that refuse API keys: the account itself, authentication, and the UI realtime socket. */
 function refusesApiKeys(url: string | undefined): boolean {
   if (!url) return true;
+  if (url === "/api/v1/account/permissions") return false;
   return url.startsWith("/api/v1/auth/") || url.startsWith("/api/v1/account/") || url === "/api/v1/realtime";
 }
 

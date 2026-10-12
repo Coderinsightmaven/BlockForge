@@ -9,7 +9,11 @@ export const SETTINGS = {
   /** Hostnames generic webhooks may reach even when they resolve to private/loopback addresses. */
   "notifications.webhookAllowlist": z.array(z.string().toLowerCase().regex(/^[a-z0-9.-]{1,253}$/)).max(100),
   /** Stored without the S3 secret (secrets table); managed by the dedicated `/settings/backups.storage` routes. */
-  "backups.storage": z.discriminatedUnion("type", [z.object({ type: z.literal("local") }), BackupStorageSettings.options[1].omit({ secretAccessKey: true })]),
+  "backups.storage": z.discriminatedUnion("type", [
+    z.object({ type: z.literal("local") }),
+    // `secretId`: the current secret version (backups.storage.ts); the secret itself never is in settings.
+    BackupStorageSettings.options[1].omit({ secretAccessKey: true }).extend({ secretId: z.uuid().optional() }),
+  ]),
 } as const;
 
 /** Keys with dedicated routes (not writable through the generic `/settings/:key`). */
