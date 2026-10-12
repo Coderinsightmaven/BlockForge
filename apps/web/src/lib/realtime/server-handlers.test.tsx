@@ -122,7 +122,7 @@ describe("useServerRealtime", () => {
 });
 
 describe("useServerRealtime Phase 4 events", () => {
-  it("applies backup.updated and schedule.updated to the open tabs' lists", () => {
+  it("applies backup/schedule updated and deleted events to the open tabs' lists", () => {
     const { client, last } = makeClient();
     const qc = new QueryClient();
     qc.setQueryData(qk.servers.detail(SERVER_ID), makeServer());
@@ -148,7 +148,12 @@ describe("useServerRealtime Phase 4 events", () => {
     send("backup.updated", makeBackup({ id: OTHER, serverId: OTHER }));
     const backups = qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)!;
     expect(backups.map((b) => [b.status, b.sizeBytes])).toEqual([["completed", 99]]);
-    expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)![0]).toMatchObject({
+    const updatedSchedule = qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)![0];
+    send("schedule.deleted", { serverId: SERVER_ID, scheduleId: makeSchedule().id });
+    send("backup.deleted", { serverId: SERVER_ID, backupId: makeBackup().id });
+    expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)).toEqual([]);
+    expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)).toEqual([]);
+    expect(updatedSchedule).toMatchObject({
       running: true,
       lastRunAt: 5,
     });

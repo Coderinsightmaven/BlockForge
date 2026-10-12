@@ -42,9 +42,6 @@ export const qk = {
     backups: ["server", id, "backups"] as const,
     schedules: ["server", id, "schedules"] as const,
     scheduleRunsAll: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId] as const,
-    /** Keyed by the schedule's last run so a new run refetches it. */
-    scheduleLastRun: (scheduleId: string, lastRunAt: number | null, running: boolean) =>
-      ["server", id, "schedule-runs", scheduleId, "last", lastRunAt, running] as const,
     scheduleRuns: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId, "history"] as const,
   }),
   schedules: {

@@ -15,7 +15,12 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { CreateBackupRequest, OPERATION_ALLOWED_FROM, REALTIME_EVENT_PAYLOADS } from "@blockforge/contracts";
+import {
+  BACKUP_COUNTED_STATUSES,
+  CreateBackupRequest,
+  OPERATION_ALLOWED_FROM,
+  REALTIME_EVENT_PAYLOADS,
+} from "@blockforge/contracts";
 import type { Backup, Me, Schedule, Server } from "@blockforge/contracts";
 import { backupsApi, schedulesApi } from "@/lib/api/phase4-api";
 import { ApiError, describeError } from "@/lib/api/errors";
@@ -107,9 +112,11 @@ export const CONSISTENCY_INFO: Record<NonNullable<Backup["consistency"]>, { labe
 
 const ACTIVE: ReadonlySet<Backup["status"]> = new Set(["pending", "running", "uploading"]);
 
-/** Backups that occupy a slot toward `backupLimit` (failed ones hold no archive). */
+const COUNTED: ReadonlySet<string> = new Set(BACKUP_COUNTED_STATUSES);
+
+/** Backups that occupy a slot toward `backupLimit` (contract: failed ones don't count). */
 export function backupsUsed(backups: readonly Backup[]): number {
-  return backups.filter((b) => b.status !== "failed").length;
+  return backups.filter((b) => COUNTED.has(b.status)).length;
 }
 
 /** Whether a rotation could free a slot: an unlocked, completed backup exists. */
@@ -143,10 +150,8 @@ async function downloadBackup(serverId: string, backup: Backup): Promise<void> {
   a.remove();
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 export function createdByLabel(
-  backup: Pick<Backup, "createdBy" | "scheduleId">,
+  backup: Pick<Backup, "createdBy" | "createdByName" | "scheduleId">,
   me: Pick<Me, "user">,
   schedules: readonly Pick<Schedule, "id" | "name">[] = [],
 ): string {
@@ -156,7 +161,8 @@ export function createdByLabel(
   }
   if (!backup.createdBy) return "System";
   if (backup.createdBy === me.user.id) return "You";
-  return UUID.test(backup.createdBy) ? "Another user" : backup.createdBy;
+  // The name is resolved at read time; null when the account no longer exists.
+  return backup.createdByName ?? "A deleted user";
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -436,7 +442,8 @@ function RestoreDialog({
       await queryClient.invalidateQueries({ queryKey: qk.servers.detail(server.id) });
     },
   });
-  const running = !["stopped", "crashed"].includes(server.state);
+  // Restore may start from running/degraded: the job stops the server first.
+  const running = server.state === "running" || server.state === "degraded";
   const confirmed = !truncate || typed === server.name;
   return (
     <Dialog
@@ -457,7 +464,7 @@ function RestoreDialog({
         </DialogHeader>
         {running ? (
           <Callout tone="warning">
-            The server is {server.state.replace("_", " ")}; it is stopped before restoring.
+            The server is running; it will be stopped before the files are restored.
           </Callout>
         ) : null}
         <SwitchRow
@@ -540,9 +547,7 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
   const list = useQuery({
     queryKey: qk.server(server.id).backups,
     queryFn: ({ signal }) => backupsApi.list(server.id, signal),
-    // Live updates arrive as backup.updated; this only backs up a missed event while work runs.
-    refetchInterval: (q) =>
-      deleting.size > 0 || (q.state.data ?? []).some((b) => ACTIVE.has(b.status)) ? 10_000 : false,
+    // Kept live by backup.updated / backup.deleted on server:<id> (no polling).
   });
   const backups = list.data ?? [];
   const scheduled = backups.some((b) => b.scheduleId);
@@ -560,7 +565,7 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
   const disabled = server.backupLimit === 0;
   const used = backupsUsed(backups);
   const backupAllowed = OPERATION_ALLOWED_FROM.backup.includes(server.state) && !server.activeOperation;
-  const restoreAllowed = !server.activeOperation && !["provisioning", "deleting"].includes(server.state);
+  const restoreAllowed = OPERATION_ALLOWED_FROM.restore.includes(server.state) && !server.activeOperation;
 
   const lock = useApiMutation({
     mutationFn: (b: Backup) => backupsApi.update(server.id, b.id, { locked: !b.locked }),

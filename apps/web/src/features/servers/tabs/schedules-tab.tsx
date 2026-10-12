@@ -141,21 +141,13 @@ export function RunTime({ ts, timezone }: { ts: number | null; timezone: string 
   );
 }
 
-function LastRun({ server, schedule }: { server: Server; schedule: Schedule }) {
-  // Keyed by lastRunAt/running so each new run refetches the latest entry.
-  const q = useQuery({
-    queryKey: qk.server(server.id).scheduleLastRun(schedule.id, schedule.lastRunAt, schedule.running),
-    queryFn: ({ signal }) => schedulesApi.runs(server.id, schedule.id, { limit: 1 }, signal),
-    enabled: schedule.lastRunAt !== null || schedule.running,
-    staleTime: 60_000,
-  });
-  if (schedule.lastRunAt === null && !schedule.running)
-    return <span className="text-xs text-muted-foreground">Never run</span>;
-  const run = q.data?.items[0];
+/** Most recent finished run, from the schedule itself (`lastRunStatus`, kept live by schedule.updated). */
+function LastRun({ schedule }: { schedule: Schedule }) {
+  if (schedule.lastRunAt === null) return <span className="text-xs text-muted-foreground">Never run</span>;
   return (
     <span className="flex flex-wrap items-center gap-1.5 text-xs">
-      {run ? (
-        <StatusBadge meta={statusMeta(RUN_STATUS_META, run.status)} title={run.reason ?? undefined} />
+      {schedule.lastRunStatus ? (
+        <StatusBadge meta={statusMeta(RUN_STATUS_META, schedule.lastRunStatus)} />
       ) : null}
       <Timestamp ts={schedule.lastRunAt} />
     </span>
@@ -755,7 +747,7 @@ export default function SchedulesTab({ server }: { server: Server }) {
                 <dd>{s.enabled ? <RunTime ts={s.nextRunAt} timezone={s.timezone} /> : "—"}</dd>
                 <dt className="text-muted-foreground">Last run</dt>
                 <dd>
-                  <LastRun server={server} schedule={s} />
+                  <LastRun schedule={s} />
                 </dd>
                 <dt className="text-muted-foreground">Zone</dt>
                 <dd>{s.timezone}</dd>

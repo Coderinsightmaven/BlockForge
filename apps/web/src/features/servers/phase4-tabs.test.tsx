@@ -196,9 +196,11 @@ describe("Backups tab", () => {
       ["POST", /\/restore$/, ok({ jobId: JOB_ID }, 202)],
     ]);
     const user = userEvent.setup();
-    wrap(<BackupsTab server={makeServer({ state: "stopped" })} me={makeMe()} />);
+    // Restore may start while running: the job stops the server first.
+    wrap(<BackupsTab server={makeServer({ state: "running" })} me={makeMe()} />);
     await user.click(await screen.findByRole("button", { name: "Restore Before 1.21 update" }));
     const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/it will be stopped before the files are restored/)).toBeTruthy();
     expect(
       within(dialog).getByRole("switch", { name: "Take a safety backup first" }).getAttribute("aria-checked"),
     ).toBe("true");
@@ -307,14 +309,13 @@ describe("Schedules tab", () => {
   };
 
   it("lists schedules in words with next run in the schedule's zone and the last run's status", async () => {
-    const s = makeSchedule({ lastRunAt: 1_760_000_000_000 });
-    routeFetch([
+    const s = makeSchedule({ lastRunAt: 1_760_000_000_000, lastRunStatus: "failed" });
+    const calls = routeFetch([
       [
         "GET",
         /\/schedules$/,
         ok([s, makeSchedule({ id: ID(5), name: "Paused one", enabled: false, running: true })]),
       ],
-      ["GET", /\/runs/, ok({ items: [run], nextCursor: null })],
     ]);
     wrap(<SchedulesTab server={makeServer()} />);
     expect(await screen.findByText("Nightly restart")).toBeTruthy();
@@ -325,6 +326,8 @@ describe("Schedules tab", () => {
     expect(screen.getByText("Running")).toBeTruthy();
     expect(await screen.findByText("Failed")).toBeTruthy();
     expect(screen.getAllByText(/Restart the server after 300s/)).toHaveLength(2);
+    // lastRunStatus comes with the schedule: no per-schedule runs request.
+    expect(calls.some((c) => c.url.includes("/runs"))).toBe(false);
   });
 
   it("view-only users get no management controls", async () => {

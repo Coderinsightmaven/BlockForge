@@ -4,7 +4,12 @@ import { API_KEY_FORBIDDEN_PERMISSIONS, SERVER_OWNER_PERMISSIONS } from "@blockf
 import type { Backup, Schedule } from "@blockforge/contracts";
 import { SERVER_ID, USER_ID, makeBackup, makeMe, makeSchedule, makeServer } from "@/test/fixtures";
 import { CRON_PRESETS, describeCron, formatInZone, isValidTimeZone, presetFor } from "@/lib/cron";
-import { applyBackupEvent, applyScheduleEvent } from "@/lib/phase4-cache";
+import {
+  applyBackupEvent,
+  applyScheduleEvent,
+  removeBackupFromCache,
+  removeScheduleFromCache,
+} from "@/lib/phase4-cache";
 import { qk } from "@/lib/query-keys";
 import {
   backupsUsed,
@@ -159,7 +164,11 @@ describe("backups", () => {
       makeBackup({ id: "a0000000-0000-4000-8000-000000000002", locked: true }),
       makeBackup({ id: "a0000000-0000-4000-8000-000000000003", status: "failed", error: "disk full" }),
     ];
+    // BACKUP_COUNTED_STATUSES: in-progress backups hold a slot, failed ones don't.
     expect(backupsUsed(list)).toBe(2);
+    expect(
+      backupsUsed([...list, makeBackup({ id: "a0000000-0000-4000-8000-000000000004", status: "uploading" })]),
+    ).toBe(3);
     expect(canRotate(list)).toBe(true);
     expect(canRotate([list[1]!, list[2]!])).toBe(false);
   });
@@ -176,11 +185,11 @@ describe("backups", () => {
   it("names who created a backup", () => {
     const me = makeMe();
     expect(createdByLabel(makeBackup({ createdBy: USER_ID }), me)).toBe("You");
-    expect(createdByLabel(makeBackup({ createdBy: "44444444-4444-4444-8444-444444444444" }), me)).toBe(
-      "Another user",
-    );
-    expect(createdByLabel(makeBackup({ createdBy: null }), me)).toBe("System");
-    const scheduled = makeBackup({ createdBy: null, scheduleId: makeSchedule().id });
+    const other = "44444444-4444-4444-8444-444444444444";
+    expect(createdByLabel(makeBackup({ createdBy: other, createdByName: "alex" }), me)).toBe("alex");
+    expect(createdByLabel(makeBackup({ createdBy: other, createdByName: null }), me)).toBe("A deleted user");
+    expect(createdByLabel(makeBackup({ createdBy: null, createdByName: null }), me)).toBe("System");
+    const scheduled = makeBackup({ createdBy: null, createdByName: null, scheduleId: makeSchedule().id });
     expect(createdByLabel(scheduled, me, [makeSchedule()])).toBe("Schedule “Nightly restart”");
     expect(createdByLabel(scheduled, me)).toBe("A schedule");
   });
@@ -201,6 +210,12 @@ describe("backups", () => {
     qc.setQueryData<Schedule[]>(qk.server(SERVER_ID).schedules, [makeSchedule()]);
     applyScheduleEvent(qc, makeSchedule({ running: true }));
     expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)![0]!.running).toBe(true);
+    removeBackupFromCache(qc, SERVER_ID, older.id);
+    removeScheduleFromCache(qc, SERVER_ID, makeSchedule().id);
+    expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)!.map((b) => b.id)).toEqual([
+      makeBackup().id,
+    ]);
+    expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)).toEqual([]);
   });
 });
 

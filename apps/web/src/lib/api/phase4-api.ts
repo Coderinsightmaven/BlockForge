@@ -2,6 +2,8 @@ import {
   ApiKey,
   Backup,
   BackupStorageSettings,
+  BackupStorageTestResult,
+  CreateBackupResponse,
   CreatedApiKey,
   CronPreviewResponse,
   Id,
@@ -30,9 +32,7 @@ type In<T extends z.ZodType> = z.input<T>;
 const enc = encodeURIComponent;
 const JobRef = z.object({ jobId: Id });
 
-export const CreateBackupResponse = z.object({ backup: Backup, jobId: Id });
-export const StorageTestResponse = z.object({ ok: z.boolean(), error: z.string().nullable() });
-export type StorageTestResponse = z.infer<typeof StorageTestResponse>;
+export type BackupStorageTestResult = z.infer<typeof BackupStorageTestResult>;
 
 export const backupsApi = {
   list: (serverId: string, signal?: AbortSignal) =>
@@ -97,5 +97,5 @@ export const backupStorageApi = {
   put: (body: In<typeof BackupStorageSettings>) =>
     apiClient.put("/settings/backups.storage", { body, schema: BackupStorageSettings }),
   /** Tests the saved configuration (HEAD bucket + put/delete a probe object). */
-  test: () => apiClient.post("/settings/backups.storage/test", { schema: StorageTestResponse }),
+  test: () => apiClient.post("/settings/backups.storage/test", { schema: BackupStorageTestResult }),
 };

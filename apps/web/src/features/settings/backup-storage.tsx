@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { BackupStorageSettings } from "@blockforge/contracts";
 import { backupStorageApi } from "@/lib/api/phase4-api";
-import type { StorageTestResponse } from "@/lib/api/phase4-api";
+import type { BackupStorageTestResult } from "@/lib/api/phase4-api";
 import { fieldErrorsFrom } from "@/lib/api/errors";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
@@ -89,7 +89,7 @@ export default function BackupStorageCard() {
   });
   const [form, setForm] = useState<StorageForm>(() => formFromSettings(undefined));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [result, setResult] = useState<StorageTestResponse | null>(null);
+  const [result, setResult] = useState<BackupStorageTestResult | null>(null);
   useEffect(() => {
     if (q.data) setForm(formFromSettings(q.data));
   }, [q.data]);
