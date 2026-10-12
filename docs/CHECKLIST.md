@@ -144,6 +144,9 @@ Contracts: `api/backups.ts`, `api/schedules.ts`, identity `ApiKey*`, agent `back
 ## Current focus
 **Phase 3 signed off** (code + four cross-model reviews fixed + live E2E: Paper, Vanilla egg, SFTP, browser walkthrough).
 **Phase 4a implemented and verified live on the test node** (backups + restore, schedules, API keys; evidence in
-`docs/development/test-node.md`); cross-model reviews running (control plane, agent backups, web, Minecraft 4b libs).
-Phase 4b libraries done (Modrinth, extension metadata, player files, 26.3 console prefix) — next: contracts + agent
-`fs.hash`/`jar.readEntries` + control-plane routes + web UI for Plugins & Mods and Players, then Phase 5 (databases).
+`docs/development/test-node.md`). Cross-model reviews: agent backups (6/6 fixed, d265046), web Phase 4a (11/11
+fixed, 8394357), control plane Phase 4a (fixes in progress), Minecraft 4b libs (Grok: 1 high, 4 major — fixes in
+progress, `docs/reviews/2026-10-12-minecraft-phase4b-libs.md`). Phase 4a sign-off after a live re-run on the test node.
+Phase 4b: contracts being drafted (extensions/players API, agent `fs.hash`/`jar.readEntries`), then agent commands,
+control-plane routes and web UI for Plugins & Mods and Players, then Phase 5 (databases).
+Web follow-ups: CI bundle-budget check; `/monitoring` (325.7 KiB) and `/nodes/$id` (320.1 KiB) over the 300 KiB route target.
