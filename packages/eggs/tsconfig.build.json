@@ -1,0 +1,8 @@
+{
+  "extends": "../../tsconfig.base.json",
+  // Pure library: src must only use web-standard globals that Node 24 and browsers both provide
+  // (fetch, Response, TextEncoder, Web Crypto) — never Node APIs (Buffer, fs, process), even though
+  // the workspace build enables Node typings.
+  "compilerOptions": { "rootDir": "src", "outDir": "dist", "types": ["node"], "lib": ["ES2023", "DOM"] },
+  "include": ["src"]
+}

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@blockforge/contracts": "workspace:*",
+    "@blockforge/eggs": "workspace:*",
     "@blockforge/minecraft": "workspace:*",
     "@blockforge/velocity": "workspace:*",
     "@fastify/cookie": "^11.1.3",

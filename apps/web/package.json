@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@blockforge/contracts": "workspace:*",
+    "@blockforge/eggs": "workspace:*",
+    "@blockforge/minecraft": "workspace:*",
     "@tanstack/react-query": "^5.104.2",
     "@tanstack/react-router": "^1.170.42",
     "@tanstack/react-virtual": "^3.14.15",
