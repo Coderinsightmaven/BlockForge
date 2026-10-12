@@ -95,6 +95,9 @@ func TestCommandFixtures(t *testing.T) {
 		"cmd-backup-create.json":              "ok",
 		"cmd-backup-restore-url.json":         "ok",
 		"cmd-backup-upload.json":              "ok",
+		"cmd-fs-hash.json":                    "ok",
+		"cmd-jar-read-entries.json":           "ok",
+		"cmd-reject-jar-entry-traversal.json": "invalid-payload",
 	}
 	for file, want := range cases {
 		t.Run(file, func(t *testing.T) {
@@ -175,6 +178,8 @@ func TestAgentFrameFixturesRoundTrip(t *testing.T) {
 		"result-ok.json":                 func() any { return &protocol.ResultFrame{} },
 		"result-error.json":              func() any { return &protocol.ResultFrame{} },
 		"result-credentials-rotate.json": func() any { return &protocol.ResultFrame{} },
+		"result-fs-hash.json":            func() any { return &protocol.ResultFrame{} },
+		"result-jar-read-entries.json":   func() any { return &protocol.ResultFrame{} },
 		"event-workload-state.json":      func() any { return &protocol.EventFrame{} },
 		"logs.json":                      func() any { return &protocol.LogsFrame{} },
 		"metrics.json":                   func() any { return &protocol.MetricsFrame{} },
@@ -373,6 +378,60 @@ func TestEggAndInstallFixturesDecode(t *testing.T) {
 	if in.Image != "ghcr.io/pterodactyl/installers:debian" || in.Entrypoint != "bash" || in.TimeoutMs != 1_800_000 ||
 		in.CPULimitMillicores != nil || in.MemoryLimitBytes != 1<<30 || !strings.Contains(in.Script, "marker.txt") {
 		t.Fatalf("install %+v", in)
+	}
+}
+
+func TestExtensionScanFixtures(t *testing.T) {
+	h := decodeFixturePayload(t, "cmd-fs-hash.json").(*protocol.FsHashPayload)
+	if len(h.Paths) != 4 || h.Paths[3] != "plugins/link.jar" || strings.Join(h.Algorithms, ",") != "sha1,sha512" ||
+		h.MaxBytesPerFile != 268435456 || h.MaxTotalBytes != 17179869184 {
+		t.Fatalf("fs.hash %+v", h)
+	}
+	j := decodeFixturePayload(t, "cmd-jar-read-entries.json").(*protocol.JarReadEntriesPayload)
+	if len(j.Paths) != 2 || strings.Join(j.Entries, ",") != "paper-plugin.yml,plugin.yml,META-INF/MANIFEST.MF" ||
+		j.MaxEntryBytes != 262144 || j.MaxJarBytes != 268435456 || j.MaxTotalBytes != 4194304 || len(j.Hash) != 1 || j.Hash[0] != "sha512" {
+		t.Fatalf("jar.readEntries %+v", j)
+	}
+
+	// The result fixtures decode into the agent's result types and re-encode to the same JSON — with
+	// the agent's encoder, byte-identical to the fixture's untrusted text (no HTML escaping).
+	var rf protocol.ResultFrame
+	_ = json.Unmarshal(load(t, "result-fs-hash.json"), &rf)
+	roundTrip(t, rf.Data, &protocol.FsHashResult{})
+	var hr protocol.FsHashResult
+	_ = json.Unmarshal(rf.Data, &hr)
+	if !hr.Files[0].OK || hr.Files[0].SizeBytes != 1503210 || len(hr.Files[0].Sha512) != 128 || hr.Files[0].Sha256 != "" ||
+		hr.Files[2].OK || hr.Files[2].Error != "NOT_FOUND" || hr.Files[3].Error != "NOT_REGULAR" {
+		t.Fatalf("fs.hash result %+v", hr)
+	}
+
+	_ = json.Unmarshal(load(t, "result-jar-read-entries.json"), &rf)
+	roundTrip(t, rf.Data, &protocol.JarReadEntriesResult{})
+	var jr protocol.JarReadEntriesResult
+	_ = json.Unmarshal(rf.Data, &jr)
+	if !jr.Jars[0].OK || len(jr.Jars[0].Entries) != 2 || jr.Jars[0].Missing[0] != "paper-plugin.yml" || jr.Jars[0].Sha1 != "" ||
+		jr.Jars[1].OK || jr.Jars[1].Error != "NOT_A_ZIP" {
+		t.Fatalf("jar result %+v", jr)
+	}
+	out, err := protocol.Marshal(jr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := protocol.Marshal(jr.Jars[0].Entries[0].Content)
+	if !strings.Contains(string(out), "<b>bold?</b>") || !strings.Contains(string(out), string(content)) {
+		t.Fatalf("agent encoding escapes untrusted text: %s", out)
+	}
+	if int64(protocol.JSONStringLen(jr.Jars[0].Entries[0].Content)) != int64(len(content)) {
+		t.Fatal("JSONStringLen disagrees with the encoder")
+	}
+	// An ok jar without entries still sends both arrays (they are required).
+	b, _ := protocol.Marshal(protocol.JarReadResult{OK: true, Path: "a.jar"})
+	if string(b) != `{"ok":true,"path":"a.jar","sizeBytes":0,"mtime":0,"entries":[],"missing":[]}` {
+		t.Fatal(string(b))
+	}
+	b, _ = protocol.Marshal(protocol.FsHashEntry{OK: true, Path: "empty", Sha256: strings.Repeat("e", 64)})
+	if string(b) != `{"ok":true,"path":"empty","sizeBytes":0,"mtime":0,"sha256":"`+strings.Repeat("e", 64)+`"}` {
+		t.Fatal(string(b))
 	}
 }
 

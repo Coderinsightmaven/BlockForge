@@ -15,7 +15,8 @@ internal/journal          durable command seen-set (commands.journal)
 internal/agent            executor (verify → replay → validate → run), handlers, wiring, fake control plane tests
 internal/transport        WebSocket session, reconnect backoff (full jitter), priority outbox
 internal/workload         Docker driver, hardening, egg runtime, install containers, restart policy, events, logs, console
-internal/fsops            os.Root sandbox, atomic writes, archive extraction, copy/compress/chmod/find
+internal/fsops            os.Root sandbox, atomic writes, archive extraction, copy/compress/chmod/find, fs.hash / jar.readEntries
+internal/jarread          bounded zip/jar central-directory + entry reader (jar.readEntries)
 internal/artifact         artifact.fetch (+ content-addressed cache) and fs.transfer.push/pull
 internal/sftpd            built-in SFTP server (control-plane auth, sandboxed sessions, activity events)
 internal/metrics, facts   host (gopsutil) and workload (Docker stats, JVM probe, SLP) telemetry
@@ -250,14 +251,44 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
   `BUSY` while one of these holds the workload. **`workload.remove` with `deleteData` never touches `<dataRoot>/backups/<id>`**: the
   control plane deletes backups explicitly with `backup.delete`.
 
+## Extension scans (`fs.hash`, `jar.readEntries`)
+
+Read-only (opened `O_RDONLY`, nothing created or written), not serialised with mutations and no workload
+claim, so they run next to a running server. Per-file outcomes in request order; the command itself only
+fails for an invalid payload, a missing data dir or cancellation.
+
+* **Opening**: `fsops.OpenNoFollow` walks from the sandbox root with the backup walker's primitives — each
+  directory opened relative to its parent with `O_NOFOLLOW|O_DIRECTORY`, the file with `O_NOFOLLOW|O_NONBLOCK`,
+  each checked to be the object `lstat` saw (device + inode) and, on Linux, the file's real location
+  (`/proc/self/fd`) must still be the requested path. A symlink anywhere on the path, a directory, FIFO,
+  socket or device → `NOT_REGULAR`; a component swapped meanwhile → `IO_ERROR`; the denylist uses the same
+  semantics as the other `fs.*` commands (→ `PATH_FORBIDDEN`). `sizeBytes`/`mtime` come from fstat; a file
+  whose size or mtime changes while it is read → `IO_ERROR`.
+* **`fs.hash`**: sha1/sha256/sha512 in one pass (lowercase hex, only the requested ones). Over
+  `maxBytesPerFile` → `TOO_LARGE` (not read). Once a file would push the bytes hashed past `maxTotalBytes`,
+  it and every later file are `BUDGET_EXCEEDED`; the first file is always attempted.
+* **`jar.readEntries`** (`internal/jarread`): size vs `maxJarBytes` first; optional whole-file sha1/sha512;
+  then the central directory is authoritative, located like `java.util.zip.ZipFile` (end record in the last
+  64 KiB + 22 bytes, Zip64 end record when consistent, stub prefixes and trailing bytes as Java accepts them).
+  It is streamed, never loaded: > 65 536 records (declared or counted) or > 16 MiB → `TOO_LARGE`; records must
+  fill the directory exactly. Names match byte-exactly; a requested name present twice → `AMBIGUOUS_ENTRY`.
+  A requested entry's local header must carry the same name and its data must end before the central
+  directory; stored/deflate only, no encryption; decompression stops after `maxEntryBytes` (+1 probe byte),
+  allocations never exceed that; a fully read entry must match the declared size and CRC-32, a partly read
+  one must not exceed its declared size — all else `NOT_A_ZIP`. `content`: UTF-8 with invalid bytes and
+  control characters except TAB/LF/CR → U+FFFD, cut at a code point so the JSON string as sent (quotes
+  included) is ≤ `maxEntryBytes`. Results are encoded without HTML escaping (all frames are). Budget: the
+  first jar whose content would push the total past `maxTotalBytes` — or the frame past 16 MiB − 64 KiB —
+  and every later jar → `BUDGET_EXCEEDED`; the first jar is always returned.
+
 ## Denylist (template `fileDenylist`)
 
 Semantics: `packages/contracts/src/denylist.ts` (gitignore subset), implemented in `internal/denylist` and
 pinned by `packages/contracts/fixtures/denylist.json` (both implementations run it). Matching is memoised
 (O(pattern segments × path segments)); patterns with more than 64 segments or more than 8 `**` never match
 (ignore files are workload-controlled); path depth is not capped. Enforced by SFTP
-sessions and by `fs.read/write/mkdir/rename/delete/copy/compress/chmod/extract/transfer.push/transfer.pull`
-when the payload carries `denylist`: a path is refused (`PATH_FORBIDDEN`, `details.reason: "denylist"`) if
+sessions and by `fs.read/write/mkdir/rename/delete/copy/compress/chmod/extract/transfer.push/transfer.pull/hash`
+and `jar.readEntries` when the payload carries `denylist`: a path is refused (`PATH_FORBIDDEN`, `details.reason: "denylist"`) if
 the requested path, any symlink it passes through, or its symlink-resolved location inside the sandbox is
 denied; recursive delete, rename, copy and compress also refuse if any entry below the source is denied;
 extract refuses archives whose entries would land on a denied path (also through symlinks in the

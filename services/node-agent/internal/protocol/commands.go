@@ -42,6 +42,28 @@ const (
 	CmdFsTransferPull     = "fs.transfer.pull"
 	CmdArtifactFetch      = "artifact.fetch"
 	CmdCredentialsRotate  = "credentials.rotate"
+	CmdFsHash             = "fs.hash"
+	CmdJarReadEntries     = "jar.readEntries"
+)
+
+// JAR_READ_LIMITS in commands.ts (bounds of the jar reader).
+const (
+	JarMaxCentralDirectoryRecords = 65_536
+	JarMaxCentralDirectoryBytes   = 16 * 1024 * 1024
+	JarMaxEntryBytes              = 256 * 1024
+	JarMaxTotalBytes              = 8 * 1024 * 1024
+)
+
+// Per-file / per-jar error codes of fs.hash and jar.readEntries (FsHashEntry / JarReadResult).
+const (
+	ScanNotFound       = "NOT_FOUND"
+	ScanNotRegular     = "NOT_REGULAR"
+	ScanTooLarge       = "TOO_LARGE"
+	ScanPathForbidden  = "PATH_FORBIDDEN"
+	ScanIOError        = "IO_ERROR"
+	ScanBudgetExceeded = "BUDGET_EXCEEDED"
+	ScanNotAZip        = "NOT_A_ZIP"
+	ScanAmbiguousEntry = "AMBIGUOUS_ENTRY"
 )
 
 // ---------------------------------------------------------------------------
@@ -354,6 +376,150 @@ type ArtifactFetchPayload struct {
 	Cache      bool      `json:"cache"`
 }
 
+// FsHashPayload is the payload of fs.hash.
+type FsHashPayload struct {
+	WorkloadID string `json:"workloadId"`
+	// Denylist is the template fileDenylist the agent enforces.
+	Denylist        []string `json:"denylist,omitempty"`
+	Paths           []string `json:"paths"`
+	Algorithms      []string `json:"algorithms"`
+	MaxBytesPerFile int64    `json:"maxBytesPerFile"`
+	MaxTotalBytes   int64    `json:"maxTotalBytes"`
+}
+
+// FsHashEntry is one per-file outcome of fs.hash (commands.ts FsHashEntry, discriminated by ok).
+type FsHashEntry struct {
+	OK        bool
+	Path      string
+	SizeBytes int64
+	Mtime     int64
+	Sha1      string
+	Sha256    string
+	Sha512    string
+	Error     string
+}
+
+type fsHashOK struct {
+	OK        bool   `json:"ok"`
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"sizeBytes"`
+	Mtime     int64  `json:"mtime"`
+	Sha1      string `json:"sha1,omitempty"`
+	Sha256    string `json:"sha256,omitempty"`
+	Sha512    string `json:"sha512,omitempty"`
+}
+
+type scanFailure struct {
+	OK    bool   `json:"ok"`
+	Path  string `json:"path"`
+	Error string `json:"error"`
+}
+
+// MarshalJSON emits exactly the fields of the ok / error variant.
+func (e FsHashEntry) MarshalJSON() ([]byte, error) {
+	if !e.OK {
+		return Marshal(scanFailure{Path: e.Path, Error: e.Error})
+	}
+	return Marshal(fsHashOK{OK: true, Path: e.Path, SizeBytes: e.SizeBytes, Mtime: e.Mtime, Sha1: e.Sha1, Sha256: e.Sha256, Sha512: e.Sha512})
+}
+
+// UnmarshalJSON decodes either variant.
+func (e *FsHashEntry) UnmarshalJSON(b []byte) error {
+	var v struct {
+		fsHashOK
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*e = FsHashEntry{OK: v.OK, Path: v.Path, SizeBytes: v.SizeBytes, Mtime: v.Mtime, Sha1: v.Sha1, Sha256: v.Sha256, Sha512: v.Sha512, Error: v.Error}
+	return nil
+}
+
+// FsHashResult is the result of fs.hash.
+type FsHashResult struct {
+	Files []FsHashEntry `json:"files"`
+}
+
+// JarReadEntriesPayload is the payload of jar.readEntries.
+type JarReadEntriesPayload struct {
+	WorkloadID string `json:"workloadId"`
+	// Denylist is the template fileDenylist the agent enforces.
+	Denylist      []string `json:"denylist,omitempty"`
+	Paths         []string `json:"paths"`
+	Entries       []string `json:"entries"`
+	MaxEntryBytes int64    `json:"maxEntryBytes"`
+	MaxJarBytes   int64    `json:"maxJarBytes"`
+	MaxTotalBytes int64    `json:"maxTotalBytes"`
+	Hash          []string `json:"hash"`
+}
+
+// JarEntryContent is one entry read by jar.readEntries.
+type JarEntryContent struct {
+	Name      string `json:"name"`
+	Content   string `json:"content"`
+	Size      int64  `json:"size"`
+	Truncated bool   `json:"truncated"`
+}
+
+// JarReadResult is the per-jar outcome of jar.readEntries (commands.ts JarReadResult, discriminated by ok).
+type JarReadResult struct {
+	OK        bool
+	Path      string
+	SizeBytes int64
+	Mtime     int64
+	Sha1      string
+	Sha512    string
+	Entries   []JarEntryContent
+	Missing   []string
+	Error     string
+}
+
+type jarReadOK struct {
+	OK        bool              `json:"ok"`
+	Path      string            `json:"path"`
+	SizeBytes int64             `json:"sizeBytes"`
+	Mtime     int64             `json:"mtime"`
+	Sha1      string            `json:"sha1,omitempty"`
+	Sha512    string            `json:"sha512,omitempty"`
+	Entries   []JarEntryContent `json:"entries"`
+	Missing   []string          `json:"missing"`
+}
+
+// MarshalJSON emits exactly the fields of the ok / error variant (entries/missing always arrays).
+func (j JarReadResult) MarshalJSON() ([]byte, error) {
+	if !j.OK {
+		return Marshal(scanFailure{Path: j.Path, Error: j.Error})
+	}
+	v := jarReadOK{OK: true, Path: j.Path, SizeBytes: j.SizeBytes, Mtime: j.Mtime, Sha1: j.Sha1, Sha512: j.Sha512, Entries: j.Entries, Missing: j.Missing}
+	if v.Entries == nil {
+		v.Entries = []JarEntryContent{}
+	}
+	if v.Missing == nil {
+		v.Missing = []string{}
+	}
+	return Marshal(v)
+}
+
+// UnmarshalJSON decodes either variant.
+func (j *JarReadResult) UnmarshalJSON(b []byte) error {
+	var v struct {
+		jarReadOK
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*j = JarReadResult{OK: v.OK, Path: v.Path, SizeBytes: v.SizeBytes, Mtime: v.Mtime, Sha1: v.Sha1, Sha512: v.Sha512,
+		Entries: v.Entries, Missing: v.Missing, Error: v.Error}
+	return nil
+}
+
+// JarReadEntriesResult is the result of jar.readEntries.
+type JarReadEntriesResult struct {
+	Jars []JarReadResult `json:"jars"`
+}
+
 // CredentialsRotateResult is the result of credentials.rotate (§3.1).
 type CredentialsRotateResult struct {
 	PublicKey string `json:"publicKey"`
@@ -392,6 +558,28 @@ var (
 		return ""
 	})
 )
+
+// zipEntryName mirrors ZipEntryName in commands.ts.
+var zipEntryName = Str().Min(1).Max(255).Refine(func(n string) string {
+	for _, r := range n {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) || r == '\\' {
+			return "no control characters or backslashes"
+		}
+	}
+	return ""
+}).Refine(func(n string) string {
+	if strings.HasPrefix(n, "/") {
+		return "must be relative"
+	}
+	return ""
+}).Refine(func(n string) string {
+	for _, seg := range strings.Split(n, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "no empty, '.' or '..' segments"
+		}
+	}
+	return ""
+})
 
 // IsUUID reports whether s matches zod's z.uuid() pattern.
 func IsUUID(s string) bool { return reUUIDCompiled.MatchString(s) }
@@ -631,6 +819,21 @@ var Commands = map[string]CommandDef{
 	CmdBackupDelete: {Schema: workloadRef.Extend(F("backupId", uuidSchema)), New: func() any { return &BackupRefPayload{} }},
 	CmdBackupTransferPush: {Schema: workloadRef.Extend(F("backupId", uuidSchema), F("transferId", uuidSchema)),
 		New: func() any { return &BackupTransferPushPayload{} }},
+	// Extension scans are read-only and take no claim: they run next to a running server.
+	CmdFsHash: {Schema: denyRef.Extend(
+		F("paths", Arr(relativePath, 1, 512)),
+		F("algorithms", Arr(Str().Enum("sha1", "sha256", "sha512"), 1, 3).Unique("duplicate algorithm")),
+		F("maxBytesPerFile", bytesSchema.Min(1).Max(2*gib)),
+		F("maxTotalBytes", Default(bytesSchema.Min(1).Max(64*gib), constAny(int64(16<<30)))),
+	), New: func() any { return &FsHashPayload{} }},
+	CmdJarReadEntries: {Schema: denyRef.Extend(
+		F("paths", Arr(relativePath, 1, 256)),
+		F("entries", Arr(zipEntryName, 1, 32).Unique("duplicate entry name")),
+		F("maxEntryBytes", Int().Min(64).Max(JarMaxEntryBytes)),
+		F("maxJarBytes", bytesSchema.Min(1).Max(2*gib)),
+		F("maxTotalBytes", Default(Int().Min(1).Max(JarMaxTotalBytes), constAny(int64(4<<20)))),
+		F("hash", Default(Arr(Str().Enum("sha1", "sha512"), -1, 2).Unique("duplicate algorithm"), emptyArr)),
+	), New: func() any { return &JarReadEntriesPayload{} }},
 }
 
 // ParsePayload validates a payload for a known command type. ok=false means the type is unknown.
@@ -700,6 +903,10 @@ func WorkloadIDOf(p any) string {
 	case *BackupRefPayload:
 		return v.WorkloadID
 	case *BackupTransferPushPayload:
+		return v.WorkloadID
+	case *FsHashPayload:
+		return v.WorkloadID
+	case *JarReadEntriesPayload:
 		return v.WorkloadID
 	}
 	return ""

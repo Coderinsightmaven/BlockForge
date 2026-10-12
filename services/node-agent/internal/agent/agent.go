@@ -41,7 +41,7 @@ import (
 // Capabilities advertised in hello.
 var Capabilities = []string{"docker", "jvm-probe", "slp", "fs.sandbox", "fs.extract", "fs.transfer",
 	"artifact.fetch", "logs", "console", "restart-policy", "credentials.rotate.staged",
-	"egg-runtime", "workload.install", "artifact-cache", "node.ports", "fs.copy", "fs.compress", "fs.chmod", "fs.find", "sftp", "backup"}
+	"egg-runtime", "workload.install", "artifact-cache", "node.ports", "fs.copy", "fs.compress", "fs.chmod", "fs.find", "sftp", "backup", "fs.hash", "jar.readEntries"}
 
 // Agent is a running node agent.
 type Agent struct {
@@ -434,6 +434,10 @@ func commandTimeout(c *Command) time.Duration {
 		return 2 * time.Hour
 	case protocol.CmdBackupDelete:
 		return time.Minute
+	case protocol.CmdFsHash: // up to 64 GiB of reads (default budget 16 GiB)
+		return time.Hour
+	case protocol.CmdJarReadEntries: // ≤ 256 jars; optional whole-file hashes
+		return 30 * time.Minute
 	}
 	switch c.Type {
 	case protocol.CmdWorkloadEnsure, protocol.CmdFsExtract, protocol.CmdArtifactFetch:

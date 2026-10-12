@@ -79,7 +79,9 @@ func NewExecutor(ctx context.Context, concurrency int) *Executor {
 func (e *Executor) sendResult(id string, data any, perr *protocol.Error, after func()) []byte {
 	rf := protocol.ResultFrame{T: protocol.FrameResult, ID: id, TS: e.Now().UnixMilli()}
 	if perr == nil {
-		b, err := json.Marshal(data)
+		// No HTML escaping (here and for the frame, which would re-escape the raw data): results carry
+		// untrusted text whose JSON-encoded size is budgeted (jar.readEntries).
+		b, err := protocol.Marshal(data)
 		if err != nil {
 			perr = protocol.Errorf(protocol.CodeInternal, "encode result: %v", err)
 		} else if len(b) > protocol.MaxFrameBytes-4096 {
@@ -91,7 +93,7 @@ func (e *Executor) sendResult(id string, data any, perr *protocol.Error, after f
 	if perr != nil {
 		rf.OK, rf.Data, rf.Error = false, nil, perr.ToAgentError()
 	}
-	frame, _ := json.Marshal(rf)
+	frame, _ := protocol.Marshal(rf)
 	e.Send(transport.Item{Class: transport.High, Kind: protocol.FrameResult, Data: frame, After: after})
 	return frame
 }

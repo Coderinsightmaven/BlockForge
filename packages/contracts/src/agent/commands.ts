@@ -85,7 +85,8 @@ export type FsHashEntry = z.infer<typeof FsHashEntry>;
  * One entry read by `jar.readEntries`. `content` is untrusted text: the first decompressed bytes decoded
  * as UTF-8, with invalid sequences and control characters other than TAB/LF/CR replaced by U+FFFD, cut at a
  * code point boundary so that its JSON-encoded length stays ≤ `maxEntryBytes` (`truncated` when anything
- * was cut). `size` is the uncompressed size declared by the central directory (untrusted, informational).
+ * was cut). "JSON-encoded length" = UTF-8 bytes of the JSON string literal as sent, quotes included, encoded
+ * without HTML escaping (a superset of a `JSON.stringify(content).length` check). `size` is the uncompressed size declared by the central directory (untrusted, informational).
  */
 export const JarEntryContent = z.object({
   name: z.string().max(255),
@@ -382,15 +383,15 @@ export const AGENT_COMMANDS = {
    * `maxEntryBytes` (zip bombs cost at most that much per entry). Jars are processed in request order; the
    * running total of JSON-encoded `content` lengths must stay ≤ `maxTotalBytes`: the first jar whose entries
    * would cross it — and every jar after it — is answered with `BUDGET_EXCEEDED` (the first jar of a command
-   * is always returned, so a retry always makes progress; with ≤ 32 × 256 KiB of content the frame stays far
-   * below 16 MiB). Optional `hash` digests the whole file in the same command. Symlinks are not followed.
+   * is always returned, so a retry always makes progress). Paths and entry names count towards the frame too:
+   * the agent also answers `BUDGET_EXCEEDED` once the encoded result would pass 16 MiB − 64 KiB. Optional `hash` digests the whole file in the same command. Symlinks are not followed.
    * Not mutating, not sensitive (paths and entry names only; results contain file text and are not persisted).
    */
   "jar.readEntries": {
     payload: DenyRef.extend({
       paths: z.array(RelativePath).min(1).max(256),
       entries: z.array(ZipEntryName).min(1).max(32).refine(isUniqueArray, "duplicate entry name"),
-      maxEntryBytes: z.number().int().min(1).max(JAR_READ_LIMITS.maxEntryBytes),
+      maxEntryBytes: z.number().int().min(64).max(JAR_READ_LIMITS.maxEntryBytes),
       maxJarBytes: Bytes.min(1).max(2 * 1024 ** 3),
       maxTotalBytes: z
         .number()

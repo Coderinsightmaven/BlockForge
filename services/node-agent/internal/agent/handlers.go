@@ -99,6 +99,15 @@ func (a *Agent) handlers() map[string]Handler {
 			p := c.Payload.(*protocol.FsChmodPayload)
 			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return empty{}, r.Chmod(p.Path, p.Mode) })
 		},
+		// Extension scans: read-only, no claim (they run next to a running server).
+		protocol.CmdFsHash: func(ctx context.Context, c *Command) (any, error) {
+			p := c.Payload.(*protocol.FsHashPayload)
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return r.Hash(ctx, p) })
+		},
+		protocol.CmdJarReadEntries: func(ctx context.Context, c *Command) (any, error) {
+			p := c.Payload.(*protocol.JarReadEntriesPayload)
+			return a.withRootDeny(p.WorkloadID, p.Denylist, func(r *fsops.Root) (any, error) { return r.ReadJarEntries(ctx, p) })
+		},
 		protocol.CmdFsFind: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsFindPayload)
 			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) { return r.Find(p.Path, p.Query, p.MaxResults) })

@@ -328,10 +328,16 @@ func (boolSchema) check(v any, p string, is *issues) any {
 type ArraySchema struct {
 	item     Schema
 	min, max int
+	// unique is the message of a `.refine(isUniqueArray, msg)` (empty = no uniqueness check).
+	unique string
 }
 
 // Arr builds an array schema; min/max of -1 means unbounded.
-func Arr(item Schema, min, max int) *ArraySchema { return &ArraySchema{item, min, max} }
+func Arr(item Schema, min, max int) *ArraySchema { return &ArraySchema{item: item, min: min, max: max} }
+
+// Unique mirrors `.refine(isUniqueArray, msg)` in common.ts (strict equality of scalar items; runs
+// only when the elements themselves are valid, like a zod refinement).
+func (a *ArraySchema) Unique(msg string) *ArraySchema { c := *a; c.unique = msg; return &c }
 
 func (a *ArraySchema) check(v any, p string, is *issues) any {
 	arr, ok := v.([]any)
@@ -339,6 +345,7 @@ func (a *ArraySchema) check(v any, p string, is *issues) any {
 		is.add(p, "expected array")
 		return nil
 	}
+	before := len(is.list)
 	if a.min >= 0 && len(arr) < a.min {
 		is.add(p, "must contain at least %d element(s)", a.min)
 	}
@@ -348,6 +355,21 @@ func (a *ArraySchema) check(v any, p string, is *issues) any {
 	out := make([]any, len(arr))
 	for i, el := range arr {
 		out[i] = a.item.check(el, fmt.Sprintf("%s[%d]", p, i), is)
+	}
+	if a.unique != "" && len(is.list) == before {
+		seen := make(map[any]struct{}, len(out))
+		for _, el := range out {
+			switch el.(type) {
+			case string, int64, float64, bool, nil:
+			default:
+				continue // objects/arrays are never equal under ===
+			}
+			if _, dup := seen[el]; dup {
+				is.add(p, "%s", a.unique)
+				break
+			}
+			seen[el] = struct{}{}
+		}
 	}
 	return out
 }
