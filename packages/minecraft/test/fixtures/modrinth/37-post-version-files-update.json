@@ -1,0 +1,54 @@
+{
+ "a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f": {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2",
+   "26.3"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "J1eeOh6C",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.6 Beta 2 (Bukkit for 1.21.4-26.3)",
+  "version_number": "7.4.6-beta-02",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.6 Beta 2:\n- Work around a Minecraft DFU b",
+  "changelog_url": null,
+  "date_published": "2026-09-24T10:26:36.893577Z",
+  "downloads": 65135,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "DN1l7z2w",
+    "hashes": {
+     "sha1": "05474d9ef7fcae884513a97287df56672d460d48",
+     "sha512": "138ea8f412bf4a17104d2e090a9171e1b263c6b28a060dacda5bc78c4629e9bac1c3834cccaaa50ac87bf148a269cf9dfd46967dddedd64dc512fdf7a5db17f9"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/J1eeOh6C/worldedit-bukkit-7.4.6-beta-02.jar",
+    "filename": "worldedit-bukkit-7.4.6-beta-02.jar",
+    "primary": true,
+    "size": 7872751,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ }
+}

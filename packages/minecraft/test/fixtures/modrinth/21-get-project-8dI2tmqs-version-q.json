@@ -1,0 +1,158 @@
+[
+ {
+  "game_versions": [
+   "1.21",
+   "1.21.1",
+   "1.21.2",
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "dedicated_server_only",
+  "id": "KqB3UA0q",
+  "project_id": "8dI2tmqs",
+  "author_id": "pgvOOeJQ",
+  "featured": false,
+  "name": "2.10.1",
+  "version_number": "v2.10.1",
+  "changelog": "* Fix config init",
+  "changelog_url": null,
+  "date_published": "2025-09-12T17:23:46.512985Z",
+  "downloads": 26719,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "9hiMrNoQ",
+    "hashes": {
+     "sha512": "9c0c1d44ba27ed3483bb607f95441bea9fb1c65be26aa5dc0af743167fb7933623ba6129344738b084056aef7cb5a7db0db477348d07672d5c67a2e1204e9c94",
+     "sha1": "22d2df1447e28a5ac23f3805836c640cdeef7c22"
+    },
+    "url": "https://cdn.modrinth.com/data/8dI2tmqs/versions/KqB3UA0q/FabricProxy-Lite-2.10.1.jar",
+    "filename": "FabricProxy-Lite-2.10.1.jar",
+    "primary": true,
+    "size": 74135,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "required"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.21",
+   "1.21.1",
+   "1.21.2",
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "dedicated_server_only",
+  "id": "7Juknjr6",
+  "project_id": "8dI2tmqs",
+  "author_id": "c6Kzouz5",
+  "featured": false,
+  "name": "2.10.0",
+  "version_number": "v2.10.0",
+  "changelog": "## What's Changed\n* Config Refactor, support secret file and read-only config by @Tert0 in [#115](https://github.com/OKTW-Network/FabricProxy-Lite/pull/115)\n  * For config details, checkout [readme](h",
+  "changelog_url": null,
+  "date_published": "2025-08-27T10:23:37.612674Z",
+  "downloads": 1353,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "gpJn7zhJ",
+    "hashes": {
+     "sha1": "709e75175b665a4d0a19884b565ff3c518c7617f",
+     "sha512": "17a46cf558a6df63ab795a45041d04de40a2cbba74e90fec8f5c827cbf3299e5e3232778a9a8478c8ed67783a6d033fae08a63b60318da2871edabcc063d9d5b"
+    },
+    "url": "https://cdn.modrinth.com/data/8dI2tmqs/versions/7Juknjr6/FabricProxy-Lite-2.10.0.jar",
+    "filename": "FabricProxy-Lite-2.10.0.jar",
+    "primary": true,
+    "size": 74130,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "required"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.21",
+   "1.21.1",
+   "1.21.2",
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "dedicated_server_only",
+  "id": "AQhF7kvw",
+  "project_id": "8dI2tmqs",
+  "author_id": "pgvOOeJQ",
+  "featured": false,
+  "name": "2.9.0",
+  "version_number": "v2.9.0",
+  "changelog": "# Note\nFor Minecraft 1.21.1+, you need to install the corresponding version of Fabric-API.\n\n# Change\n* update 1.21 by @lightumcc in [#89](https://github.com/OKTW-Network/FabricProxy-Lite/pull/89)",
+  "changelog_url": null,
+  "date_published": "2024-06-14T07:24:16.406509Z",
+  "downloads": 28989,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "HM3k971W",
+    "hashes": {
+     "sha512": "3044f36df7e83021210a7c318def18a95b5dbf5e3230bb72a3ddb42ebdda33f248c6d12efcee1240ff0c54600d68d147afa105d04ee37a90acb9409619c89848",
+     "sha1": "08542e32123a23f017aaf8ea718de5520e9914f9"
+    },
+    "url": "https://cdn.modrinth.com/data/8dI2tmqs/versions/AQhF7kvw/FabricProxy-Lite-2.9.0.jar",
+    "filename": "FabricProxy-Lite-2.9.0.jar",
+    "primary": true,
+    "size": 269774,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": "HXzEJYgV",
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ }
+]

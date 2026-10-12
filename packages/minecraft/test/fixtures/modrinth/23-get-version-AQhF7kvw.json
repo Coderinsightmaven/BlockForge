@@ -1,0 +1,52 @@
+{
+ "game_versions": [
+  "1.21",
+  "1.21.1",
+  "1.21.2",
+  "1.21.3",
+  "1.21.4",
+  "1.21.5",
+  "1.21.6",
+  "1.21.7",
+  "1.21.8"
+ ],
+ "loaders": [
+  "fabric"
+ ],
+ "environment": "dedicated_server_only",
+ "id": "AQhF7kvw",
+ "project_id": "8dI2tmqs",
+ "author_id": "pgvOOeJQ",
+ "featured": false,
+ "name": "2.9.0",
+ "version_number": "v2.9.0",
+ "changelog": "# Note\nFor Minecraft 1.21.1+, you need to install the corresponding version of Fabric-API.\n\n# Change\n* update 1.21 by @lightumcc in [#89](https://github.com/OKTW-Network/FabricProxy-Lite/pull/89)",
+ "changelog_url": null,
+ "date_published": "2024-06-14T07:24:16.406509Z",
+ "downloads": 28989,
+ "version_type": "release",
+ "status": "listed",
+ "requested_status": null,
+ "files": [
+  {
+   "id": "HM3k971W",
+   "hashes": {
+    "sha512": "3044f36df7e83021210a7c318def18a95b5dbf5e3230bb72a3ddb42ebdda33f248c6d12efcee1240ff0c54600d68d147afa105d04ee37a90acb9409619c89848",
+    "sha1": "08542e32123a23f017aaf8ea718de5520e9914f9"
+   },
+   "url": "https://cdn.modrinth.com/data/8dI2tmqs/versions/AQhF7kvw/FabricProxy-Lite-2.9.0.jar",
+   "filename": "FabricProxy-Lite-2.9.0.jar",
+   "primary": true,
+   "size": 269774,
+   "file_type": null
+  }
+ ],
+ "dependencies": [
+  {
+   "version_id": "HXzEJYgV",
+   "project_id": "P7dR8mSH",
+   "file_name": null,
+   "dependency_type": "embedded"
+  }
+ ]
+}

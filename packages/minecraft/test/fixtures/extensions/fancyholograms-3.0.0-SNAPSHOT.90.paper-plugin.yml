@@ -1,0 +1,35 @@
+api-version: "1.19"
+name: FancyHolograms
+version: 3.0.0-SNAPSHOT.90
+main: com.fancyinnovations.fancyholograms.main.FancyHologramsPlugin
+bootstrapper: com.fancyinnovations.fancyholograms.main.FancyHologramsBootstrapper
+loader: com.fancyinnovations.fancyholograms.main.FancyHologramsLoader
+description: "Simple, lightweight and fast hologram plugin using display entities"
+load: POSTWORLD
+folia-supported: true
+dependencies:
+  server:
+    FancyNpcs:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    Geyser-Spigot:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    MiniPlaceholders:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    PlaceholderAPI:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    ViaVersion:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    floodgate:
+      load: BEFORE
+      required: false
+      join-classpath: true

@@ -1,0 +1,18 @@
+[
+  {
+    "uuid": "fc55e503-efd6-3331-a6df-f7f5e1ebbd4b",
+    "name": "Griefer",
+    "created": "2026-10-12 19:30:00 +0000",
+    "source": "Server",
+    "expires": "forever",
+    "reason": "Don\u0027t grief \u003cspawn\u003e \u0026 \"town\" \u003d bad"
+  },
+  {
+    "uuid": "853c80ef-3c37-49fd-aa49-938b674adae6",
+    "name": "jeb_",
+    "created": "2026-10-12 21:30:00 +0200",
+    "source": "BlockForge (alice)",
+    "expires": "2026-10-19 19:30:00 +0000",
+    "reason": "Spam ☃ line\u2028sep \\ back"
+  }
+]

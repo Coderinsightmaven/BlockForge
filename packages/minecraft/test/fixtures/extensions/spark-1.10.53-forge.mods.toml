@@ -1,0 +1,17 @@
+modLoader="javafml"
+loaderVersion="[34,)"
+authors="Luck"
+license="GPLv3"
+
+[[mods]]
+modId="spark"
+displayName="spark"
+version="1.10.53"
+description="spark is a performance profiling plugin/mod for Minecraft clients, servers and proxies."
+
+[[dependencies.spark]]
+    modId="forge"
+    mandatory=true
+    versionRange="[34,)"
+    ordering="NONE"
+    side="BOTH"

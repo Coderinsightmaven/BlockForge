@@ -1,0 +1,26 @@
+api-version: "1.19"
+name: FancyNpcs
+version: 2.12.1+379
+main: de.oliver.fancynpcs.FancyNpcs
+bootstrapper: de.oliver.fancynpcs.loaders.FancyNpcsBootstrapper
+loader: de.oliver.fancynpcs.loaders.FancyNpcsLoader
+description: "Simple, lightweight and fast NPC plugin using packets"
+folia-supported: true
+dependencies:
+  server:
+    Citizens:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    MiniPlaceholders:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    PlaceholderAPI:
+      load: BEFORE
+      required: false
+      join-classpath: true
+    PlotSquared:
+      load: BEFORE
+      required: false
+      join-classpath: true

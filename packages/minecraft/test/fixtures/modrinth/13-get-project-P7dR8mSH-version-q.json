@@ -1,0 +1,1334 @@
+[
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "Mys3P7lK",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.17+1.21.1",
+  "version_number": "0.116.17+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Revert \"[1.21.1] Hud Render Events Backport (#5541)\" (#5563) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2026-09-01T16:40:04.373428Z",
+  "downloads": 2253433,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "WuOG3t7I",
+    "hashes": {
+     "sha512": "98c478217da19181f0e4df3ea6c2da6bdbda271c7544a4aea048513a49b444f1ff5b71dc0df6303017c48e8ff69b7bb6af6179bdf0d0e09ab3c1ee08411857a8",
+     "sha1": "810b2b0195371a012906241d8b85a32a1d6de53c"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/Mys3P7lK/fabric-api-0.116.17%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.17+1.21.1.jar",
+    "primary": true,
+    "size": 2452735,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "fpB2VatZ",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.16+1.21.1",
+  "version_number": "0.116.16+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] Hud Render Events Backport (#5541) (shadowhunter22)\n",
+  "changelog_url": null,
+  "date_published": "2026-09-01T10:29:57.072338Z",
+  "downloads": 23963,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "DlvCfrJp",
+    "hashes": {
+     "sha512": "1ee763b538619b917b3bf02568dd2fb6c4ca3dc98e5554dc944e4524c316437946b00b6c1c4597ca86871f820b894c4b7b2b5701f7479e2dd057b0ea947886df",
+     "sha1": "07fcbd957f45592ac3ac63161b0bf4f0b724c665"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/fpB2VatZ/fabric-api-0.116.16%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.16+1.21.1.jar",
+    "primary": true,
+    "size": 2467467,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "Nlt8gI9z",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.15+1.21.1",
+  "version_number": "0.116.15+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Extend `TooltipFlag` to allow for `shouldDisplayAllInformation` (#5483) (#5520) (Cassian Godsted)\n",
+  "changelog_url": null,
+  "date_published": "2026-07-28T08:41:22.864336Z",
+  "downloads": 1752323,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "iLYEhm1K",
+    "hashes": {
+     "sha1": "d25c793833a90cc028c9a61bc4546cd578a70ce1",
+     "sha512": "d5dcf28a05676b1436f7ccce76e2f36495ab058f7c3b6f87a5b5cf5abaaf943ef7f37cd4ce72ff1080965a3d11899cd0bf11121e49c4a651daca20f6338043f7"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/Nlt8gI9z/fabric-api-0.116.15%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.15+1.21.1.jar",
+    "primary": true,
+    "size": 2452718,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "aUrTRV7H",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.14+1.21.1",
+  "version_number": "0.116.14+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] Tag entry removal backport (#5467) (pnku, Chrys Chrysanthemum, Juuz, cputnam-a11y, ThePotatoArchivist)\n",
+  "changelog_url": null,
+  "date_published": "2026-07-16T10:23:29.937096Z",
+  "downloads": 1816587,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "6sIPatv6",
+    "hashes": {
+     "sha512": "50664e5f7c9e08475c5902a6b3bbf71950acb03de998271ae9e488527a2cda3c2b170d2093a40f4927412a0a132a1241b17021469ca3c1c63cd5cad676b6b2ff",
+     "sha1": "1bc9caf399a9eadddaec3215e31594ca40fc9485"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/aUrTRV7H/fabric-api-0.116.14%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.14+1.21.1.jar",
+    "primary": true,
+    "size": 2451978,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "FHknjVVa",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.13+1.21.1",
+  "version_number": "0.116.13+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] Backport fix for `ButtonList` `IndexOutOfBoundsException` for screens with renderable only widgets (#5448) (Fuzss)\n",
+  "changelog_url": null,
+  "date_published": "2026-07-01T12:16:45.241134Z",
+  "downloads": 914667,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ZnM84LBk",
+    "hashes": {
+     "sha1": "a8107fd8fd3e805d9ca87453e36b4556d92b55da",
+     "sha512": "87a8e136c43f03d09af96d6b2b35d27b58679d61a158585477fbcc9250ecaf8a5896a18a9b132bdd6b8bcd1ba291acd71f961d58987e770b9a73b653ac237c2f"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/FHknjVVa/fabric-api-0.116.13%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.13+1.21.1.jar",
+    "primary": true,
+    "size": 2427135,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "Lwt6YYHL",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.12+1.21.1",
+  "version_number": "0.116.12+1.21.1",
+  "changelog": "- Limit initial capacity of collections/maps when decoding packets (modmuss50)\n",
+  "changelog_url": null,
+  "date_published": "2026-05-11T12:22:21.766778Z",
+  "downloads": 2194259,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "7VOFAF0f",
+    "hashes": {
+     "sha512": "e2da98d9885b2d1c2d15b77bfdafa5df6c294cc96844ded739c8fd61a358fc69c4c391e3296534ea67806cb8ec8d250c0343c0b237c567d9740c586e6d67333a",
+     "sha1": "90cd4212da24365fae24c0090234b053094b218b"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/Lwt6YYHL/fabric-api-0.116.12%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.12+1.21.1.jar",
+    "primary": true,
+    "size": 2427037,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "IpaMcBLh",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.11+1.21.1",
+  "version_number": "0.116.11+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] Add RecipeOutputMixin to support FabricRecipeExporter (#5008) (#5315) (modmuss, Liam Broome)\n",
+  "changelog_url": null,
+  "date_published": "2026-04-15T10:06:23.716321Z",
+  "downloads": 974731,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "uAVrVVdC",
+    "hashes": {
+     "sha1": "65f4e8b9dcbad6697b2fb32fa0bb937ec5efcd84",
+     "sha512": "756b8c086f4c911d012f2eb70ca792aef0439503b31bc52026b82830870a94d472de30d61a6a0a9988c02b8462d9c47aa6baa6cd84da1eaf00edb77249b3c413"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/IpaMcBLh/fabric-api-0.116.11%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.11+1.21.1.jar",
+    "primary": true,
+    "size": 2426356,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "ID8pq1x1",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.10+1.21.1",
+  "version_number": "0.116.10+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Backport vanilla tag as `c:loom_patterns` (#5290) (TelepathicGrunt)\n",
+  "changelog_url": null,
+  "date_published": "2026-04-02T18:34:12.222121Z",
+  "downloads": 1348206,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "w9PQcZxB",
+    "hashes": {
+     "sha512": "cc8f207ca861e91c0d42f7d57b4448c2b265bbfb20f38182fad2dd14d3f4fbbbfa5c85b562ddaad33797f67fce8080b2283cdd6fa194f4ace18969d670643454",
+     "sha1": "22b506a0770f148f46737329e8cae68aaefe3165"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/ID8pq1x1/fabric-api-0.116.10%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.10+1.21.1.jar",
+    "primary": true,
+    "size": 2425988,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "yGAe1owa",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.9+1.21.1",
+  "version_number": "0.116.9+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Respect item MAX_STACK_SIZE in Storage.insert (#5220) (Eric Coleman)\n",
+  "changelog_url": null,
+  "date_published": "2026-02-26T09:05:26.816701Z",
+  "downloads": 1717417,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "WI07WJ5w",
+    "hashes": {
+     "sha512": "e643876079b950aef9aad3eee8d27046305895e8d0f595f7f95010839adeaa25c55a6dc8624ccfba1201194d6598fcbc11f23a7a553ccefbb8c0ceacf388bb79",
+     "sha1": "e41cb63b923a6064021c5a30afa4e844b82ca6e9"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/yGAe1owa/fabric-api-0.116.9%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.9+1.21.1.jar",
+    "primary": true,
+    "size": 2425600,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "3wZtvzew",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.8+1.21.1",
+  "version_number": "0.116.8+1.21.1",
+  "changelog": "- Fix release workflow (modmuss50)\n- Bump version (modmuss50)\n- Fix NPE if player.connection is when attemping to sync attachments (modmuss50)\n- No longer disconnect on unknown targets. (#5156) (modmu",
+  "changelog_url": null,
+  "date_published": "2026-01-23T22:48:30.983805Z",
+  "downloads": 4079835,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "RSAFydO9",
+    "hashes": {
+     "sha1": "7bb69655470af3afa456bb2b6e984c87fdfacf47",
+     "sha512": "5a4b29861e9526ce1ccb3a856acf0053397d43fd0756786f3188147f0892c216370bc85b692a8293a9e129538293a087ec9eff4fdbe8b6e43608a7e56b226364"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/3wZtvzew/fabric-api-0.116.8%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.8+1.21.1.jar",
+    "primary": true,
+    "size": 2425441,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "m6zu1K31",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.7+1.21.1",
+  "version_number": "0.116.7+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix custom ingredients breaking shapeless crafting recipes (#4914) (PepperCode1)\n",
+  "changelog_url": null,
+  "date_published": "2025-10-08T08:08:32.073948Z",
+  "downloads": 7840452,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ftQ0ZjNh",
+    "hashes": {
+     "sha1": "79e9f3e82499fbae5bd667b96a79927ae68f90eb",
+     "sha512": "0d7bf97e516cfdb742d7e37a456ed51f96c46eac060c0f2b80338089670b38aba2f7a9837e5e07a6bdcbf732e902014fb1202f6e18e00d6d2b560a84ddf9c024"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/m6zu1K31/fabric-api-0.116.7%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.7+1.21.1.jar",
+    "primary": true,
+    "size": 2424884,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "9xIK4e8l",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.6+1.21.1",
+  "version_number": "0.116.6+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix possible crash when upgrading worlds. (#4837) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2025-08-29T17:07:36.585061Z",
+  "downloads": 1496722,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "eDCWkOTj",
+    "hashes": {
+     "sha1": "10d5c7cf5fb309513b4f68b85b1e0d9dccbec9ac",
+     "sha512": "f0ecb1e1c8f1471437c83f4f58e549efecc0ed3f275baa2a64bbb9a26fd8c14365431bf92cf68d8f8055f6ef103fcc863cd75adbbe8be80f7b752fe1c0c3a305"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/9xIK4e8l/fabric-api-0.116.6%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.6+1.21.1.jar",
+    "primary": true,
+    "size": 2424827,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "gymiiTwJ",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.5+1.21.1",
+  "version_number": "0.116.5+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Add super constructor for ForwardingBakedModel (#4800) (AlphaMode)\n- Add FabricItem#getCreatorNamespace (#4746) (#4793) (Cassian Godsted, Shnupbups)\n- Improve model data g",
+  "changelog_url": null,
+  "date_published": "2025-08-08T13:04:23.691986Z",
+  "downloads": 566718,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "v1uxnH81",
+    "hashes": {
+     "sha1": "75f198a62690829b4bf38fc5cab80e04001a26f6",
+     "sha512": "de38aca8c7b7c2a28a39a847a3d92b5c00e162734f29df38600bd4aeaa4b41f4de610b56b157caf0cbaf833ac7f0bf007496e6248fddf61b9ff7835ee1c8dbc0"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/gymiiTwJ/fabric-api-0.116.5%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.5+1.21.1.jar",
+    "primary": true,
+    "size": 2424801,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "19viawBV",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.4+1.21.1",
+  "version_number": "0.116.4+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] ArmorRenderer: Add option to disable default head item rendering (#4726) (Juuz)\n- [1.21.1] Fix FabricRecipeProvider.getRecipeIdentifier not applying to recipe adv",
+  "changelog_url": null,
+  "date_published": "2025-06-27T12:09:19.269119Z",
+  "downloads": 1105149,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "5SHu2fLw",
+    "hashes": {
+     "sha512": "95060def77b54ba6c6eb5af45b478ec6926f33f145d8f3933cd90cb2b6ab6913459d3d0afa3afcb01fca07d714628414a41ee8b6845261e88d92b83bfc668ad8",
+     "sha1": "39d1a6b6213d012649821ecc516ed5b5142478ef"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/19viawBV/fabric-api-0.116.4%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.4+1.21.1.jar",
+    "primary": true,
+    "size": 2423497,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "jCGlnFJS",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.3+1.21.1",
+  "version_number": "0.116.3+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Handle alias registry key being null (#4711) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2025-06-18T19:35:36.519020Z",
+  "downloads": 472925,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "V9FodDEl",
+    "hashes": {
+     "sha512": "afb2e2eab6e590ad83a6e501e778be537d75a2e87033d3c05b00dc0342d6a7ce2d5132c01c787b879df37f94e9e69433aff15762ee3040425886e8130c82d7af",
+     "sha1": "ed1fb2a7d9955e05d61e6a3357e38f74f9b7e500"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/jCGlnFJS/fabric-api-0.116.3%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.3+1.21.1.jar",
+    "primary": true,
+    "size": 2417666,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "VP2WqQA9",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.2+1.21.1",
+  "version_number": "0.116.2+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] Registry aliasing backport (#4698) (Cassian Godsted, Syst3ms, modmuss50)\n",
+  "changelog_url": null,
+  "date_published": "2025-06-15T13:12:20.891782Z",
+  "downloads": 112612,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "lno7dCzy",
+    "hashes": {
+     "sha512": "c91938ca4b25a122b1706c854094107b3cd16cb8b9f921cc8ec0f437f65c4dfa2a74356ab2cdb29f4c974303f42c325894608212b3a580f000606c78ac1dc01d",
+     "sha1": "deaa83622e9c506c5e2365036f3b2865ec6c1a30"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/VP2WqQA9/fabric-api-0.116.2%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.2+1.21.1.jar",
+    "primary": true,
+    "size": 2417627,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "vtBTVr1F",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.1+1.21.1",
+  "version_number": "0.116.1+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Backporting #4642 to 1.21.1 (#4659) (YajatKaul)\n- Bump version (modmuss50)\n- Call all remaining listeners when ALLOW_CHAT event is cancled (#4657) (MisterCheezeCake)\n- Cal",
+  "changelog_url": null,
+  "date_published": "2025-05-31T13:49:56.300734Z",
+  "downloads": 1642395,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "togId7YM",
+    "hashes": {
+     "sha1": "bd8e174dcf695c94a7d8dfc8f86b2e557bad0faa",
+     "sha512": "e325882ff357fe12a00255cb6f4823c2eada5cd5e9a9a06b07bae3294214388f1579020e0cdb5895e3bb27193ec8dd778c977447df7786edfb801f24040b93e8"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/vtBTVr1F/fabric-api-0.116.1%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.1+1.21.1.jar",
+    "primary": true,
+    "size": 2415045,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "73Q31My7",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.116.0+1.21.1",
+  "version_number": "0.116.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Add ServerChunkEvents.CHUNK_LEVEL_TYPE_CHANGE (#4541) (#4610) (DennisOchulor)\n",
+  "changelog_url": null,
+  "date_published": "2025-05-06T09:43:16.579687Z",
+  "downloads": 1133076,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "XCDfiMX8",
+    "hashes": {
+     "sha1": "1e2d0ab58ff89b6730d7c251a7e1f1d952e18743",
+     "sha512": "4023117916ba06e1f81f6321f8bb21d34f14b3001da5a9785496ff1544b1f5bc04d59d93cb4f88a0015286e6e8cb382875a9b208d46222718c107599bf4b4bdc"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/73Q31My7/fabric-api-0.116.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.116.0+1.21.1.jar",
+    "primary": true,
+    "size": 2410624,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "4AkOEqGy",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.6+1.21.1",
+  "version_number": "0.115.6+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- fix(attsync): use correct event for transferring attachments during respawn (#4483) (Octol1ttle)\n",
+  "changelog_url": null,
+  "date_published": "2025-04-22T08:56:57.570332Z",
+  "downloads": 691825,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "l4vjKKja",
+    "hashes": {
+     "sha512": "11771581ceccf16534279b1db1a46c3c1a731fb11f4a52413e7c8b7f2cef181cca2ff5c1131280624fbd733ee37c1741bd7fb641613ffedbc7c5e68dd121a045",
+     "sha1": "1148b398767708be366ddc9988a357831cc456bb"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/4AkOEqGy/fabric-api-0.115.6%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.6+1.21.1.jar",
+    "primary": true,
+    "size": 2406680,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "X9NXysME",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.5+1.21.1",
+  "version_number": "0.115.5+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- AttSync: Disconnect when attachment target is null (#4538) (#4586) (Octol1ttle, modmuss50)\n",
+  "changelog_url": null,
+  "date_published": "2025-04-20T11:53:28.195812Z",
+  "downloads": 38824,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "k5Obq89a",
+    "hashes": {
+     "sha512": "5f45105fb3e2674395230acd21852267010f25153d197c7698bed887e515b7257fbcd9b22c6c710bd65d05c00f9ea95b2ed3071c2813fdebc2d8a160f7a64ba5",
+     "sha1": "c035648492c1cf838cd13a60c29227b2a8d07254"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/X9NXysME/fabric-api-0.115.5%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.5+1.21.1.jar",
+    "primary": true,
+    "size": 2406672,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "TMgpR77k",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.4+1.21.1",
+  "version_number": "0.115.4+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1] Add Pumpkin Block and Item Tags (#4526) (modmuss, Joseph T. McQuigg)\n- [1.21.1] Backport Convention Drink Tags (#4537) (TheDeathlyCow)\n",
+  "changelog_url": null,
+  "date_published": "2025-03-28T18:57:37.541080Z",
+  "downloads": 564565,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "jx6UqG9E",
+    "hashes": {
+     "sha512": "15457923c076aabb32b52ddc0bd9fdd4bd88cd80cc34c76b5ac0263ba576dc51d788ac6e69303aa451a3d544755f84676f5814308f180a57b3d61ebaa8bd7410",
+     "sha1": "8212a511d62643c244af53ac863e4545836bab51"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/TMgpR77k/fabric-api-0.115.4%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.4+1.21.1.jar",
+    "primary": true,
+    "size": 2403084,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "hZxPzoO7",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.3+1.21.1",
+  "version_number": "0.115.3+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix BlockView API v2 not applying WorldViewMixin (#4500) (#4511) (modmuss, PepperCode1)\n",
+  "changelog_url": null,
+  "date_published": "2025-03-19T10:10:36.485273Z",
+  "downloads": 218076,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "VMMvqg8U",
+    "hashes": {
+     "sha1": "2d183fa5f3af2078c31dc651d3ea5d560a58f2c0",
+     "sha512": "6c30c7c9b70cbb1275e7a63bf2921678ad5664056bd62539dbb6a811dddef3fa831f55e44e94c062198a6a78edfebcb6b818acb9365a4369b5a0ed0722cfff20"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/hZxPzoO7/fabric-api-0.115.3%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.3+1.21.1.jar",
+    "primary": true,
+    "size": 2400059,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "yygmVw1U",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.2+1.21.1",
+  "version_number": "0.115.2+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Change Creative Buttons Texture (#4221) (#4497) (Cassian Godsted, Matthew Periut)\n",
+  "changelog_url": null,
+  "date_published": "2025-03-16T13:47:05.192653Z",
+  "downloads": 249534,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "zc1CusgB",
+    "hashes": {
+     "sha1": "7141d70bff539dc873376d09371972714995d046",
+     "sha512": "475fb700bba6ce4b2ae098ea1a5c6eb6e1a5942fc766382f6fd66aea6d867cb9c537110d6840777dfddcef3ce0cd3f5d2e7e35c37825c9ada32d807caf404fd3"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/yygmVw1U/fabric-api-0.115.2%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.2+1.21.1.jar",
+    "primary": true,
+    "size": 2400050,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "aHOmYIWr",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.1+1.21.1",
+  "version_number": "0.115.1+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Sync remaining `c` tags with NeoForge (#4161) (TelepathicGrunt)\n",
+  "changelog_url": null,
+  "date_published": "2025-02-20T18:07:54.459981Z",
+  "downloads": 728209,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "RF75lBDf",
+    "hashes": {
+     "sha512": "54e039c309e3001089cd97b382cd0193c4fa5eaa92eeb351409588d8a203cdd81e7133d0479bd66331d487a69259e4b7b2db138afec99707f4d43dafc11aa13b",
+     "sha1": "551227e92766a97a76c949cbcd616ece7d603ec7"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/aHOmYIWr/fabric-api-0.115.1%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.1+1.21.1.jar",
+    "primary": true,
+    "size": 2401630,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "9YVrKY0Z",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.115.0+1.21.1",
+  "version_number": "0.115.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix syncing block entity attachments on load. (#4390) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2025-01-21T19:19:04.578931Z",
+  "downloads": 1678172,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "fXVrTb2y",
+    "hashes": {
+     "sha512": "e5f3c3431b96b281300dd118ee523379ff6a774c0e864eab8d159af32e5425c915f8664b1cd576f20275e8baf995e016c5971fea7478c8cb0433a83663f2aea8",
+     "sha1": "41594bd81f1e60e364f76b2e2bfca10cfdcf91bd"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/9YVrKY0Z/fabric-api-0.115.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.115.0+1.21.1.jar",
+    "primary": true,
+    "size": 2385171,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "biIRIp2X",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.114.0+1.21.1",
+  "version_number": "0.114.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- [1.21.1-1.21.4] Custom Ingredients sync fix (#4322) (Salandora)\n- Check to make sure Feature isn't present before adding it (#4323) (Joseph T. McQuigg)\n- Fix NPE in WaterP",
+  "changelog_url": null,
+  "date_published": "2024-12-30T14:06:29.967944Z",
+  "downloads": 373213,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "awzRfvHd",
+    "hashes": {
+     "sha1": "545047b690a33a593aa999c1fe5e2216e0493d36",
+     "sha512": "714ce2e8ad3d4ca70049ae771f71794c50138af7800fdc14d2bac6b2ef632ac7ba3b09efc78e3ac425ed20ea217ed4982420792d8fe737cb3f49d0353af8af05"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/biIRIp2X/fabric-api-0.114.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.114.0+1.21.1.jar",
+    "primary": true,
+    "size": 2385062,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "Zp9iAZdZ",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.110.0+1.21.1",
+  "version_number": "0.110.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Add transitive access wideners for tracked data related creator entity methods (#4229) (Daniel Orr)\n- Add RegistryEntryAddedCallback.allEntries (#4235) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2024-11-25T18:55:20.216871Z",
+  "downloads": 795950,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "gBHfLjud",
+    "hashes": {
+     "sha512": "db43c35873b0a0b073cf8c19d825a1db27d5c579c885091ddc462de783582c5c162d556b831915d1df46fbec781f0a9fe6c60a20ffa050915d80c5d99b9cb211",
+     "sha1": "2b7f7f96571285868e962e269762987e817094ff"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/Zp9iAZdZ/fabric-api-0.110.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.110.0+1.21.1.jar",
+    "primary": true,
+    "size": 2384492,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "aHuj8q0Q",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.109.0+1.21.1",
+  "version_number": "0.109.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Provide a RegistryByteBuf for attachment syncing (#4223) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2024-11-18T18:52:38.651620Z",
+  "downloads": 203964,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "RYfARnzx",
+    "hashes": {
+     "sha512": "69d7ea16484ca88038117efe657679ad762be3608dc82b14d9ceab0582d69d3437f710b216bd3236994509f980a242218aeec295f2b3f95f8f5981dc39d8da2d",
+     "sha1": "35d3110bf44dc88f148d5feb13bfdae50268ba00"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/aHuj8q0Q/fabric-api-0.109.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.109.0+1.21.1.jar",
+    "primary": true,
+    "size": 2383475,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "GcoFPm9u",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.108.0+1.21.1",
+  "version_number": "0.108.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Translation updates (#4194) (Fabric Bot)\n- Add AFTER_CLIENT_WORLD_CHANGE (#4173) (fishshi)\n- Data Attachment Sync API (#4049) (Syst3ms)\n",
+  "changelog_url": null,
+  "date_published": "2024-11-12T19:03:44.034132Z",
+  "downloads": 655050,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "yJWpLXpR",
+    "hashes": {
+     "sha1": "79b23a653619972e7e58a910defdbc4d348a5ba0",
+     "sha512": "e5161a2793d4f3e46476a700bb2e5bff6db5b9d05dbb52bb6daa9e3fd8e9fb6e63bafa09be236f07e9b7c96665593388da1f8163b61ac85f269a76e9916dcc4a"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/GcoFPm9u/fabric-api-0.108.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.108.0+1.21.1.jar",
+    "primary": true,
+    "size": 2382673,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "thGkUOxt",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.107.0+1.21.1",
+  "version_number": "0.107.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix overriding vanilla translations (#4187) (apple502j)\n- Add ServerChunkEvents.Generate (#4183) (Jason Penilla)\n- Remove LevelProperties check (#4171) (SemmieDev)\n- New C",
+  "changelog_url": null,
+  "date_published": "2024-10-26T16:25:57.975421Z",
+  "downloads": 432674,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ZJIptIoo",
+    "hashes": {
+     "sha1": "ba0f27b37fe600d3e69953750d1909da88929a9d",
+     "sha512": "04cf3f205c83882c7c741da392d10cbf9ab471fb44836d753f9673b7b37ddb9b2842cc8e72d6d7f36c48d121715f9f9dae8d20e597f2c0de3bb8abd37037baaa"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/thGkUOxt/fabric-api-0.107.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.107.0+1.21.1.jar",
+    "primary": true,
+    "size": 2340631,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "iFnYBUfS",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.106.0+1.21.1",
+  "version_number": "0.106.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix tests (modmuss50)\n- Fix build after bad merge (modmuss50)\n- Add support for Item-containing Items (#4083) (BasiqueEvangelist)\n- Add Stripped Logs and Stripped Woods Ta",
+  "changelog_url": null,
+  "date_published": "2024-10-15T14:38:49.860452Z",
+  "downloads": 518224,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "A2D60XAN",
+    "hashes": {
+     "sha512": "7ae490cf09c4a3158247ae53764972f656f054c885fb46c02b38063fdaad79532d25b8a6db8b6907e3ca13856d29facedccb8a6b1d7b4f0a5afd0f1bdf3784b5",
+     "sha1": "208b7e1a7c436a28e26207e98bacd62b787c3f92"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/iFnYBUfS/fabric-api-0.106.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.106.0+1.21.1.jar",
+    "primary": true,
+    "size": 2338306,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "WTaAx4ah",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.105.0+1.21.1",
+  "version_number": "0.105.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Fix cherry pick issues (modmuss50)\n- Add ItemVariant#withComponentChanges and FluidVariant#withComponentChanges (#4082) (BasiqueEvangelist)\n- Add access to ClientConfigura",
+  "changelog_url": null,
+  "date_published": "2024-09-23T18:43:17.263380Z",
+  "downloads": 1473029,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "Cy5IwDk9",
+    "hashes": {
+     "sha1": "09b6399db5f09a79b0ac5b7ecbbba2e3189b190a",
+     "sha512": "6e1ffcf7f5af9589c16ccec1f9bb5ef8dede5ebe52ae09d94affa8050603f6ecd71d130a793c2bdb4bd42b2a70905425e55141d39369dfa9840569eef4dace16"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/WTaAx4ah/fabric-api-0.105.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.105.0+1.21.1.jar",
+    "primary": true,
+    "size": 2324549,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "qKPgBeHl",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.104.0+1.21.1",
+  "version_number": "0.104.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Use unix line endings on all files (#4079) (modmuss)\n- Add TransferVariant.getComponentMap() (#4074) (modmuss)\n- Add missing `minecraft:enchantable/vanishing` to `c:enchan",
+  "changelog_url": null,
+  "date_published": "2024-09-10T13:10:25.523898Z",
+  "downloads": 531159,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "9RS3b6BM",
+    "hashes": {
+     "sha512": "0773f45d364b506b4e5b024aa8f1d498900fcf0a020d2025154e163e50a0eeee1b8296bf29c21df5ced42126ed46635e5ed094df25796ec552eb76399438e7e7",
+     "sha1": "013ddb81215c59899df00a7a98872c3aea53aca7"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/qKPgBeHl/fabric-api-0.104.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.104.0+1.21.1.jar",
+    "primary": true,
+    "size": 2311459,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "gQS3JbZO",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.103.0+1.21.1",
+  "version_number": "0.103.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- After Damage Event (#4051) (TheDeathlyCow)\n- Dont invoke ItemGroupEvents.MODIFY_ENTRIES_ALL for the OP tab, when the OP tab is disabled (#4045) (AshyBoxy)\n- Translation up",
+  "changelog_url": null,
+  "date_published": "2024-08-26T11:31:36.439144Z",
+  "downloads": 443330,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "rjyi2ulq",
+    "hashes": {
+     "sha1": "a7cce732abba7fafbec33f9dc6c99d3dda6fff9a",
+     "sha512": "085e985d3000afb0d0d799fdf83f7f084dd240e9852ccb4d94ad13fc3d3fad90b00b02dcc493e3c38a66ae4757389582eccf89238569bacae638b9ffd9885ebc"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/gQS3JbZO/fabric-api-0.103.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.103.0+1.21.1.jar",
+    "primary": true,
+    "size": 2295530,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "bK6OgzFj",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.102.1+1.21.1",
+  "version_number": "0.102.1+1.21.1",
+  "changelog": "- Install git in build workflow (#4025) (modmuss)\n- Bump versions (modmuss50)\n- New Crowdin updates (#4003) (Fabric Bot)\n- Add crop and nugget tags (#4008) (Juuz)\n- Fix handled screen not calling supe",
+  "changelog_url": null,
+  "date_published": "2024-08-11T14:28:29.900324Z",
+  "downloads": 853721,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "Qupv4zzo",
+    "hashes": {
+     "sha1": "c7d381d76c22ada6679ef9683da9384751db3874",
+     "sha512": "ff058bdb4d30866a34a74ae457da7e981affd130c23887c0c8194c6ecb5023cca353dd7b831326ab33df5c6d3bbfb1d07aa71bbd79dbb30cca5534fd74c5f551"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/bK6OgzFj/fabric-api-0.102.1%2B1.21.1.jar",
+    "filename": "fabric-api-0.102.1+1.21.1.jar",
+    "primary": true,
+    "size": 2291961,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "VAjB0MYF",
+  "project_id": "P7dR8mSH",
+  "author_id": "JZA4dW8o",
+  "featured": false,
+  "name": "[1.21.1] Fabric API 0.102.0+1.21.1",
+  "version_number": "0.102.0+1.21.1",
+  "changelog": "- Bump version (modmuss50)\n- Add an API to add additional supported blocks to block entity types. (#4009) (modmuss)\n",
+  "changelog_url": null,
+  "date_published": "2024-08-07T18:22:52.622035Z",
+  "downloads": 162230,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "e4IABI6D",
+    "hashes": {
+     "sha512": "b4087165474f77f80414fd1f61c9c9ed921e39c1eb8fb4a6027ae3c01955bb7d4c028c7ca55cb9ed112bdbdaa4796141d55f082c91a33622a5acf68fd28c8e4c",
+     "sha1": "669a75bcbba10bc3fa15f31733587cefb8779064"
+    },
+    "url": "https://cdn.modrinth.com/data/P7dR8mSH/versions/VAjB0MYF/fabric-api-0.102.0%2B1.21.1.jar",
+    "filename": "fabric-api-0.102.0+1.21.1.jar",
+    "primary": true,
+    "size": 2286038,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ }
+]

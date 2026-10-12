@@ -1,0 +1,777 @@
+[
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "s8dfz9Xa",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.7.0 and QSL 6.3.0",
+  "version_number": "7.7.0+0.92.2-1.20.1",
+  "changelog": "Provides Fabric API 0.92.2\n- Merge pull request #175 from QuiltMC/bump-qsl-version-1.20.1 (Eli Orona)\n- Bump version (Eli Orona)\n",
+  "changelog_url": null,
+  "date_published": "2024-12-02T04:00:32.214009Z",
+  "downloads": 291463,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "FJYXPFXE",
+    "hashes": {
+     "sha512": "d7bb384b961088ae6fe1e0baef9895cd495a515d8337664bb534c36ae17e48188fc1c50cd9a06e3e53898870ada73e737f63853adf43e744fee11a64bad1059a",
+     "sha1": "fa2868388b175e32e4d3310a5bf065593837bc5c"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/s8dfz9Xa/qfapi-7.7.0_qsl-6.3.0_fapi-0.92.2_mc-1.20.1.jar",
+    "filename": "qfapi-7.7.0_qsl-6.3.0_fapi-0.92.2_mc-1.20.1.jar",
+    "primary": true,
+    "size": 2755789,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "zEhzQDsY",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.6.0 and QSL 6.2.0",
+  "version_number": "7.6.0+0.92.2-1.20.1",
+  "changelog": "Provides Fabric API 0.92.2\n- Merge pull request #166 from EnnuiL/1.20.1 (ix0rai)\n- Delete unused mixin (Ennui Langeweile)\n- Try --warning-mode=fail Everything should work now (Ennui Langeweile)\n- Back",
+  "changelog_url": null,
+  "date_published": "2024-07-10T03:30:50.044736Z",
+  "downloads": 50395,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "27GbFtAI",
+    "hashes": {
+     "sha1": "7cf55b386c622364e348518d345d014ec51ccad5",
+     "sha512": "9cb907b94648efb566a96486244d41b58073a2cdba9e74bba44cf1341cc8c6bc0c448f998acc3f981403abfd2eb082b95596471a91b1933d55a4f98fc72d47ba"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/zEhzQDsY/qfapi-7.6.0_qsl-6.2.0_fapi-0.92.2_mc-1.20.1.jar",
+    "filename": "qfapi-7.6.0_qsl-6.2.0_fapi-0.92.2_mc-1.20.1.jar",
+    "primary": true,
+    "size": 2754598,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "Gydw2vxY",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.5.0 and QSL 6.1.2",
+  "version_number": "7.5.0+0.92.2-1.20.1",
+  "changelog": "Provides Fabric API 0.92.2\n- Merge pull request #164 from EnnuiL/1.20.1 (Eli Orona)\n- Update to Quilt Loader 0.26.0 (Ennui Langeweile)\n- Fix QFAPI 1.20.1 releases (Ennui Langeweile)\n- Update release.y",
+  "changelog_url": null,
+  "date_published": "2024-06-12T11:23:02.990956Z",
+  "downloads": 15215,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "idn1KLbY",
+    "hashes": {
+     "sha512": "ddb15d26be609b210f695bc76afd6454aa75728bc515512385abb623e0fa9e745e0f2693337700cfce36d1c7bc1fdb209fee60e766dd94632973172bcec6cf0a",
+     "sha1": "24b33e47b5980eefc63b0aff350347144cf9bfa4"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/Gydw2vxY/qfapi-7.5.0_qsl-6.1.2_fapi-0.92.2_mc-1.20.1.jar",
+    "filename": "qfapi-7.5.0_qsl-6.1.2_fapi-0.92.2_mc-1.20.1.jar",
+    "primary": true,
+    "size": 2750102,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "qAYOU2Af",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.5.0 and QSL 6.1.2",
+  "version_number": "7.5.0+0.91.0-1.20.1",
+  "changelog": "Provides Fabric API 0.91.0\n- Merge pull request #140 from Kneelawk/update/fapi-0.91.0+1.20.1 (Eli Orona)\n- Update gradle.properties (Eli Orona)\n- Update upstream_version (Kneelawk)\n- Fix editor botche",
+  "changelog_url": null,
+  "date_published": "2024-02-01T19:45:13.353744Z",
+  "downloads": 258772,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "RYfNJYbR",
+    "hashes": {
+     "sha512": "be27b623b7e556403bd6356994fd17548e4f367749c9061d1c93dac29aa19e4372ca96e823b4629c1b7451954bbce7ed12c4cf7bfb4d27ce84643fc6bf28173d",
+     "sha1": "23296bd979dd1fbc6ccf84103f9bcc713029ef85"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/qAYOU2Af/qfapi-7.5.0_qsl-6.1.2_fapi-0.91.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.5.0_qsl-6.1.2_fapi-0.91.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1903768,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "GjvWb8WQ",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.4.0 and QSL 6.1.2",
+  "version_number": "7.4.0+0.90.0-1.20.1",
+  "changelog": "Provides Fabric API 0.90.0\n- Sync with Fabric API v0.90.0 (glitch)\n- Bump version (modmuss50)\n- Fix inconsistency of placed feature locations (#3369) (apple502j, modmuss50)\n- Add LootTableEvents.LOADE",
+  "changelog_url": null,
+  "date_published": "2023-10-08T16:17:54.050934Z",
+  "downloads": 149895,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "CqIUP68w",
+    "hashes": {
+     "sha1": "d52456c799cc2534331f9cc71532e43c5f886554",
+     "sha512": "1943390d2785502b2c2f6907c1c27604fdeb2f1dfcba1292ef2c254f484a3ff73ef3faf66ad6d6ad075df276baffbf26569d60416ef6c0e829d5d582074c9f78"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/GjvWb8WQ/qfapi-7.4.0_qsl-6.1.2_fapi-0.90.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.4.0_qsl-6.1.2_fapi-0.90.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1901246,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "ftu8PpDD",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.3.1 and QSL 6.1.2",
+  "version_number": "7.3.1+0.89.3-1.20.1",
+  "changelog": "Provides Fabric API 0.89.3\n- Merge pull request #134 from TheGlitch76/1.20.1 (glitch)\n- Sync with Fabric API v0.89.3 (glitch)\n- Bump version (modmuss50)\n- Fix bad interaction between `FabricDynamicReg",
+  "changelog_url": null,
+  "date_published": "2023-10-01T16:27:53.725951Z",
+  "downloads": 7185,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "XMk94PH2",
+    "hashes": {
+     "sha1": "8f799d752482777ec37409df362e3191f9b3834a",
+     "sha512": "bdf630e6170b8c69aecada89d0c16b8d86d66196f7c147b4384382ee79064111b6a56ed8b62afdd089ebba085f306b9ee9bb7041574a92b00361c15349d73a0b"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/ftu8PpDD/qfapi-7.3.1_qsl-6.1.2_fapi-0.89.3_mc-1.20.1.jar",
+    "filename": "qfapi-7.3.1_qsl-6.1.2_fapi-0.89.3_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1900953,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "Ycmh3qg8",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.3.0 and QSL 6.1.2",
+  "version_number": "7.3.0+0.89.0-1.20.1",
+  "changelog": "Provides Fabric API 0.89.0\n- Bump version (Ennui Langeweile)\n- Do not distribute Fabric GameTest API (Ennui Langeweile)\n- Merge pull request #124 from xtexChooser/xtex/merge-upstream-1.20.1 (ix0rai)\n-",
+  "changelog_url": null,
+  "date_published": "2023-09-25T01:14:50.500883Z",
+  "downloads": 17596,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "u8jBLDNf",
+    "hashes": {
+     "sha1": "4f358bb878925d944ce11efe0c764f9251acb999",
+     "sha512": "b16377cb1dbe508e9d4803965296d48ca81e92dc5a0b32b0c535ace82fb200658a657d0ea9f5d3813d352459fe650a02e98a90071b72c216794814c343ef56c0"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/Ycmh3qg8/qfapi-7.3.0_qsl-6.1.2_fapi-0.89.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.3.0_qsl-6.1.2_fapi-0.89.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1898788,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "vTQynnGn",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.2.2 and QSL 6.1.2",
+  "version_number": "7.2.2+0.88.1-1.20.1",
+  "changelog": "Provides Fabric API 0.88.1\n- Update QSL (glitch)\n- [0.88.1] Merge branch '1.20.1' of github.com:fabricmc/fabric into 1.20.1 (glitch)\n- Improve action times (#119) (glitch)\n- Fix broken version conflic",
+  "changelog_url": null,
+  "date_published": "2023-09-11T23:34:50.642326Z",
+  "downloads": 27365,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "nSgsBOYC",
+    "hashes": {
+     "sha512": "c54dab3893bb645bb908410a8aebd8c11abbc492112e802d68511626bca3b84cc2fc572c1f0a8f3a4753f70f7bdec79626881502e9381724b283877b3d866673",
+     "sha1": "47cefbfac7c25e706345a076b2ae48a2bccabe04"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/vTQynnGn/qfapi-7.2.2_qsl-6.1.2_fapi-0.88.1_mc-1.20.1.jar",
+    "filename": "qfapi-7.2.2_qsl-6.1.2_fapi-0.88.1_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1901365,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "DzBePwtf",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.2.1 and QSL 6.1.1",
+  "version_number": "7.2.1+0.88.0-1.20.1",
+  "changelog": "Provides Fabric API 0.88.0\n- Bump version (Ennui Langeweile)\n- Fix QMJ dependencies (Ennui Langeweile)\n- Update to Quilt Loader 0.20.2 (Ennui Langeweile)\n",
+  "changelog_url": null,
+  "date_published": "2023-09-04T02:17:25.649979Z",
+  "downloads": 4951,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "fM49YACf",
+    "hashes": {
+     "sha512": "b08c596df54aee14e11da4c3853fbf0022e519012bf7864f924bb2d570e2c77a466b320fe1c81171bf0a65d608d21e23831800fbbcf96e5f00df44a17c9fa9f7",
+     "sha1": "8a4a334f0c1900991dae3684c1dc132c748f901a"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/DzBePwtf/qfapi-7.2.1_qsl-6.1.1_fapi-0.88.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.2.1_qsl-6.1.1_fapi-0.88.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1899735,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "PmZhDLt6",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.2.0 and QSL 6.1.1",
+  "version_number": "7.2.0+0.88.0-1.20.1",
+  "changelog": "Provides Fabric API 0.88.0\n- Fix module marker (Ennui Langeweile)\n- Bump version (Ennui Langeweile)\n- Sync with Fabric API v0.88.0 (Ennui Langeweile)\n- Update to Gradle 8.3 (Ennui Langeweile)\n- Bump v",
+  "changelog_url": null,
+  "date_published": "2023-09-03T17:36:56.123486Z",
+  "downloads": 761,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "h1PQb2If",
+    "hashes": {
+     "sha1": "244e31c8378a145c4b48e695bde5b8edace4c903",
+     "sha512": "dc978edff1f5bc2f6bca690df7fe8b94894c48f5e1fd8f49d1787042a2d793a03fc3229ec7a152e2cd8f0c30fde7071e35a0c4304561a970c2312650a8a20bce"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/PmZhDLt6/qfapi-7.2.0_qsl-6.1.1_fapi-0.88.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.2.0_qsl-6.1.1_fapi-0.88.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1899644,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "aWl2Qw6u",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.1.2 and QSL 6.1.1",
+  "version_number": "7.1.2+0.87.0-1.20.1",
+  "changelog": "Provides Fabric API 0.87.0\n- Bump version (Ennui Langeweile)\n- Update to Gradle 8.3-rc-4 (Ennui Langeweile)\n- Sync with Fabric API v0.87.0 (Ennui Langeweile)\n- Bump version (modmuss50)\n- Improve Indig",
+  "changelog_url": null,
+  "date_published": "2023-08-16T01:42:46.829584Z",
+  "downloads": 14818,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "3tjC5SGB",
+    "hashes": {
+     "sha512": "f36527202e1990311a24164586f935057317267aee2b1961575dbf620b868983dee3d98e843df404e9363f59d1de5b25db1261909e5de3bee6bf57e68b9d4f68",
+     "sha1": "4bb2a214dfc06429bc1a6a41cb2837cbab3d7221"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/aWl2Qw6u/qfapi-7.1.2_qsl-6.1.1_fapi-0.87.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.1.2_qsl-6.1.1_fapi-0.87.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1890136,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "ugK6veHN",
+  "project_id": "qvIfYCYJ",
+  "author_id": "rRnTb0fG",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.1.1 and QSL 6.1.1",
+  "version_number": "7.1.1+0.86.1-1.20.1",
+  "changelog": "Provides Fabric API 0.86.1\n\n- Updated to QSL v6.1.1\n\nQSL changes:\n\n- Added prevention against custom dynamic registries from using \"minecraft\" as a namespace.\n- Added missing QuiltBlockSettings#create",
+  "changelog_url": null,
+  "date_published": "2023-08-08T22:40:16.503087Z",
+  "downloads": 22678,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "JdfZsRDi",
+    "hashes": {
+     "sha1": "6c8117b9f5e502e9dbb2facda1ef4dfcc79f559a",
+     "sha512": "320939b7c05efa299224c3a03906be636f3a842fcbf0c187c2646d7396dafc4d2ab9e5cfef21b00ebb4675c0aac45fe8148c4b581d9d668d816c2df97f00311e"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/ugK6veHN/qfapi-7.1.1_qsl-6.1.1_fapi-0.86.1_mc-1.20.1.jar",
+    "filename": "qfapi-7.1.1_qsl-6.1.1_fapi-0.86.1_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1886177,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "fFx48erS",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.1.0 and QSL 6.1.0",
+  "version_number": "7.1.0+0.86.1-1.20.1",
+  "changelog": "Provides Fabric API 0.86.1\n- Prepare for release (Ennui Langeweile)\n- Merge remote-tracking branch 'fabric/1.20.1' into 1.20.1 (Ennui Langeweile)\n- FAPI 0.86.1 sync (#111) (Cocona, Technici4n, embedde",
+  "changelog_url": null,
+  "date_published": "2023-08-01T04:04:47.358465Z",
+  "downloads": 55599,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "6aiBNh7Q",
+    "hashes": {
+     "sha512": "deb87a98de199d923490584fc4d7bf7d77cee6661dbb6e26928a4bfc37fe3b16f52f498b9c990a884cab765c66697d8ccaa478d7a447fb5370a84f398fd16371",
+     "sha1": "e43acd927fbda4631516ac5bf6028f1481b25fc7"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/fFx48erS/qfapi-7.1.0_qsl-6.1.0_fapi-0.86.1_mc-1.20.1.jar",
+    "filename": "qfapi-7.1.0_qsl-6.1.0_fapi-0.86.1_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1878056,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "4JBkYQUF",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.0.6 and QSL 6.0.4",
+  "version_number": "7.0.6+0.85.0-1.20.1",
+  "changelog": "Provides Fabric API 0.85.0\n- Bump version (Ennui Langeweile)\n- Sync with Fabric API v0.85.0 (Ennui Langeweile)\n- Fix missing AW declaration on Lifecycle Events (Ennui Langeweile)\n- Bump version (modmu",
+  "changelog_url": null,
+  "date_published": "2023-07-09T15:49:36.743450Z",
+  "downloads": 22235,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "g4jgKC0b",
+    "hashes": {
+     "sha512": "f3aececfbf0316e7b66d718f45daa492cd9a663300c3b9bab184e7f8b3d782dc59dc3de162736cdd3bd0793fd32811abdbe61ae299a86d0568d76f22d028b4a8",
+     "sha1": "96f0d25eceddfbbc65be529c59d3211b47664b32"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/4JBkYQUF/qfapi-7.0.6_qsl-6.0.4_fapi-0.85.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.0.6_qsl-6.0.4_fapi-0.85.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1843099,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "BAwbsZ2r",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.0.5 and QSL 6.0.4",
+  "version_number": "7.0.5+0.84.0-1.20.1",
+  "changelog": "Provides Fabric API 0.84.0\n- Update to QSL 6.0.4 and QLoader 0.19.2 (Ennui Langeweile)\n- Merge remote-tracking branch 'fabric/1.20.1' into 1.20.1 (Ennui Langeweile)\n- Fix typos (#3127) (Frederik van d",
+  "changelog_url": null,
+  "date_published": "2023-07-02T21:03:34.858395Z",
+  "downloads": 8522,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "mcKMqbMJ",
+    "hashes": {
+     "sha512": "e425f26a61b710109afba462b8fb026c15489f359540cc3c0cce09b400db1e70ced189e7e5812f4433e9bd20ed7db2e8bfc4a0b639a9c8d653a731ddcaca427f",
+     "sha1": "645408579262cc48eaaab44a6c917666cb5c8fd1"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/BAwbsZ2r/qfapi-7.0.5_qsl-6.0.4_fapi-0.84.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.0.5_qsl-6.0.4_fapi-0.84.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1843629,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "cFCbC3OH",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.0.4 and QSL 6.0.3",
+  "version_number": "7.0.4+0.84.0-1.20.1",
+  "changelog": "Provides Fabric API 0.84.0\n- Bump version (Ennui Langeweile)\n- Update licenses to fit non-profit standards (Ennui Langeweile)\n- Update to Fabric API v0.84.0 (Ennui Langeweile)\n- Bump version (modmuss5",
+  "changelog_url": null,
+  "date_published": "2023-06-23T21:52:19.191931Z",
+  "downloads": 25209,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "F2KYXUpk",
+    "hashes": {
+     "sha1": "ab33dd20e43d695075e7df6bc1b7cbcf2850f83a",
+     "sha512": "1e824c209247b6eff63a70b946fd48c91676efc8f97dbf23fc4e5fa8119effd4908f56789eec982359ff3e155080a0ac3a5d998db511a60badf56b032121824b"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/cFCbC3OH/qfapi-7.0.4_qsl-6.0.3_fapi-0.84.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.0.4_qsl-6.0.3_fapi-0.84.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1840111,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "di82eiyL",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.0.3 and QSL 6.0.3",
+  "version_number": "7.0.3+0.83.1-1.20.1",
+  "changelog": "Provides Fabric API 0.83.1\n- Fix license (Ennui Langeweile)\n- Bump version (Ennui Langeweile)\n- Sync with Fabric API v0.83.1 (Ennui Langeweile)\n- Bump version (modmuss50)\n- Fix resource conditions for",
+  "changelog_url": null,
+  "date_published": "2023-06-16T02:59:18.385907Z",
+  "downloads": 10956,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "sDd2z4Sx",
+    "hashes": {
+     "sha512": "0141f29e25b0eb822b2263a5cc999aeb35da70f0db9a09e3eab9b27ab759d848dee8ebca26319ac5fe4b1fdca75594bcd49d6e2d5ddfc4164816babd93d9bf06",
+     "sha1": "19748082370b7c6f8bc4b5f9f324e1ee670f642b"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/di82eiyL/qfapi-7.0.3_qsl-6.0.3_fapi-0.83.1_mc-1.20.1.jar",
+    "filename": "qfapi-7.0.3_qsl-6.0.3_fapi-0.83.1_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1837351,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.20",
+   "1.20.1"
+  ],
+  "loaders": [
+   "quilt"
+  ],
+  "environment": "client_or_server_prefers_both",
+  "id": "uw5SkGdQ",
+  "project_id": "qvIfYCYJ",
+  "author_id": "kLoubsXo",
+  "featured": false,
+  "name": "[1.20.1] QFAPI 7.0.2 and QSL 6.0.3",
+  "version_number": "7.0.2+0.83.0-1.20.1",
+  "changelog": "Provides Fabric API 0.83.0\nInitial release",
+  "changelog_url": null,
+  "date_published": "2023-06-12T21:22:49.825706Z",
+  "downloads": 5449,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "gHqsrvjz",
+    "hashes": {
+     "sha1": "4d9de51f9b9746fe2d173cbfd7df34cb41ce6de6",
+     "sha512": "2b6e666f7c350b5fd172ed88664a32911e91ed4c5e0bcb537b79a1ea1e30647fe9af18e4bca922bb9b243cde85c00fd716d6030f717a737f379ce984f726a888"
+    },
+    "url": "https://cdn.modrinth.com/data/qvIfYCYJ/versions/uw5SkGdQ/qfapi-7.0.2_qsl-6.0.3_fapi-0.83.0_mc-1.20.1.jar",
+    "filename": "qfapi-7.0.2_qsl-6.0.3_fapi-0.83.0_mc-1.20.1.jar",
+    "primary": true,
+    "size": 1844379,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "embedded"
+   }
+  ]
+ }
+]

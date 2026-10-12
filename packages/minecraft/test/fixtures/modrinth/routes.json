@@ -1,0 +1,495 @@
+[
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/search?query=luckperms&facets=%5B%5B%22project_type%3Aplugin%22%5D%2C%5B%22categories%3Apaper%22%2C%22categories%3Aspigot%22%2C%22categories%3Abukkit%22%5D%2C%5B%22versions%3A1.21.11%22%5D%2C%5B%22server_side%21%3Dunsupported%22%5D%5D&index=relevance&offset=0&limit=5",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "300",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "01-get-search-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/search?facets=%5B%5B%22project_type%3Amod%22%5D%2C%5B%22categories%3Afabric%22%2C%22categories%3Aquilt%22%5D%2C%5B%22versions%3A1.21.1%22%5D%2C%5B%22server_side%21%3Dunsupported%22%5D%5D&index=downloads&offset=0&limit=5",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "299",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "02-get-search-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/search?facets=%5B%5B%22project_type%3Aplugin%22%5D%2C%5B%22categories%3Avelocity%22%5D%2C%5B%22server_side%21%3Dunsupported%22%5D%5D&index=downloads&offset=0&limit=5",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "298",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "03-get-search-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/search?facets=%5B%5B%22project_type%3Aplugin%22%5D%2C%5B%22categories%3Afolia%22%5D%2C%5B%22versions%3A1.21.11%22%5D%2C%5B%22server_side%21%3Dunsupported%22%5D%5D&index=downloads&offset=0&limit=5",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "297",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "04-get-search-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/luckperms",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "300",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "05-get-project-luckperms.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/luckperms/version?loaders=%5B%22paper%22%2C%22spigot%22%2C%22bukkit%22%5D&game_versions=%5B%221.21.11%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "291",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "06-get-project-luckperms-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/worldguard",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "298",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "07-get-project-worldguard.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/DKY9btbd/version?loaders=%5B%22paper%22%2C%22spigot%22%2C%22bukkit%22%5D&game_versions=%5B%221.21.11%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "298",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "08-get-project-DKY9btbd-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/1u6JkXh5/version?loaders=%5B%22paper%22%2C%22spigot%22%2C%22bukkit%22%5D&game_versions=%5B%221.21.11%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "298",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "09-get-project-1u6JkXh5-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/projects?ids=%5B%221u6JkXh5%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "298",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "10-get-projects-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/ledger",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "298",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "11-get-project-ledger.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/LVN9ygNV/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.21.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "297",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "12-get-project-LVN9ygNV-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/P7dR8mSH/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.21.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "297",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "13-get-project-P7dR8mSH-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/Ha28R6CL/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.21.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "297",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "14-get-project-Ha28R6CL-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/projects?ids=%5B%22Ha28R6CL%22%2C%22MLYQ9VGP%22%2C%22P7dR8mSH%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "296",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "15-get-projects-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/iris",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "300",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "16-get-project-iris.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/YL57xq9U/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.21.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "296",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "17-get-project-YL57xq9U-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/AANobbMI/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.21.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "296",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "18-get-project-AANobbMI-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/projects?ids=%5B%22AANobbMI%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "300",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "19-get-projects-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/fabricproxy-lite",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "296",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "20-get-project-fabricproxy-lite.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/8dI2tmqs/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.21.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "296",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "21-get-project-8dI2tmqs-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/projects?ids=%5B%22P7dR8mSH%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "299",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "22-get-projects-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/version/AQhF7kvw",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "295",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "23-get-version-AQhF7kvw.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/qsl",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "295",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "24-get-project-qsl.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/qvIfYCYJ/version?loaders=%5B%22fabric%22%2C%22quilt%22%5D&game_versions=%5B%221.20.1%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "295",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "25-get-project-qvIfYCYJ-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/Vebnzrzj/version?loaders=%5B%22velocity%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "295",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "26-get-project-Vebnzrzj-version-q.json"
+ },
+ {
+  "method": "POST",
+  "url": "https://api.modrinth.com/v2/version_files",
+  "body": "{\"hashes\":[\"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\",\"a0e087adfc1c7b9fab8fdb5a430a3331a2ca30bfc72818bb7e65ce9baff051a1490834be8cbb9cbeda292f2e92c44cf03fb829ebeb233ade9d666ed908e49ad5\"],\"algorithm\":\"sha512\"}",
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "295",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "27-post-version-files.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/projects?ids=%5B%22Vebnzrzj%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "294",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "28-get-projects-q.json"
+ },
+ {
+  "method": "POST",
+  "url": "https://api.modrinth.com/v2/version_files/update",
+  "body": "{\"hashes\":[\"a0e087adfc1c7b9fab8fdb5a430a3331a2ca30bfc72818bb7e65ce9baff051a1490834be8cbb9cbeda292f2e92c44cf03fb829ebeb233ade9d666ed908e49ad5\"],\"algorithm\":\"sha512\",\"loaders\":[\"paper\",\"spigot\",\"bukkit\"],\"game_versions\":[\"1.21.11\"],\"version_types\":[\"release\"]}",
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "293",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "29-post-version-files-update.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/version_file/00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000?algorithm=sha512",
+  "body": null,
+  "status": 404,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "292",
+   "x-ratelimit-reset": "1"
+  },
+  "file": null
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/version_file/dad091fbabe7cbb1db3dc1478eb1fe413520a014?algorithm=sha1",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "292",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "30-get-version-file-dad091fbabe7cbb1db3dc1478eb1fe413520a014-q.json"
+ },
+ {
+  "method": "POST",
+  "url": "https://api.modrinth.com/v2/version_file/dad091fbabe7cbb1db3dc1478eb1fe413520a014/update?algorithm=sha1",
+  "body": "{\"loaders\":[\"paper\",\"spigot\",\"bukkit\"],\"game_versions\":[\"1.21.11\"]}",
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "291",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "31-post-version-file-dad091fbabe7cbb1db3dc1478eb1fe413520a014-update.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/Vebnzrzj/version?loaders=%5B%22paper%22%2C%22spigot%22%2C%22bukkit%22%5D&game_versions=%5B%221.21.11%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "291",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "32-get-project-Vebnzrzj-version-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/versions?ids=%5B%22MBSY8toc%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "291",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "33-get-versions-q.json"
+ },
+ {
+  "method": "GET",
+  "url": "https://api.modrinth.com/v2/project/worldedit/version?loaders=%5B%22paper%22%2C%22spigot%22%2C%22bukkit%22%5D&game_versions=%5B%221.21.11%22%5D",
+  "body": null,
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "297",
+   "x-ratelimit-reset": "0",
+   "content-type": "application/json"
+  },
+  "file": "34-get-project-worldedit-version-q.json"
+ },
+ {
+  "method": "POST",
+  "url": "https://api.modrinth.com/v2/version_files",
+  "body": "{\"hashes\":[\"a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f\"],\"algorithm\":\"sha512\"}",
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "292",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "35-post-version-files.json"
+ },
+ {
+  "method": "POST",
+  "url": "https://api.modrinth.com/v2/version_files/update",
+  "body": "{\"hashes\":[\"a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f\"],\"algorithm\":\"sha512\",\"loaders\":[\"paper\",\"spigot\",\"bukkit\"],\"game_versions\":[\"1.21.11\"],\"version_types\":[\"release\"]}",
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "291",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "36-post-version-files-update.json"
+ },
+ {
+  "method": "POST",
+  "url": "https://api.modrinth.com/v2/version_files/update",
+  "body": "{\"hashes\":[\"a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f\"],\"algorithm\":\"sha512\",\"loaders\":[\"paper\",\"spigot\",\"bukkit\"],\"game_versions\":[\"1.21.11\"]}",
+  "status": 200,
+  "headers": {
+   "x-ratelimit-limit": "300",
+   "x-ratelimit-remaining": "290",
+   "x-ratelimit-reset": "1",
+   "content-type": "application/json"
+  },
+  "file": "37-post-version-files-update.json"
+ }
+]

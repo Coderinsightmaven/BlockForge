@@ -1,0 +1,10 @@
+api-version: 1.21.11
+name: squaremap
+version: 1.3.12
+main: xyz.jpenilla.squaremap.paper.SquaremapPaperBootstrap
+description: Minimalistic and lightweight world map viewer for Minecraft servers
+load: STARTUP
+authors:
+- jmp
+website: https://github.com/jpenilla/squaremap/
+folia-supported: true

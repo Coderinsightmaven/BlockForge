@@ -1,0 +1,1 @@
+{"id":"luckperms","name":"LuckPerms","version":"5.5.71","description":"A permissions plugin","url":"https://luckperms.net","authors":["Luck"],"dependencies":[],"main":"me.lucko.luckperms.velocity.LPVelocityBootstrap"}

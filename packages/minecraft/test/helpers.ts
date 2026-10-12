@@ -41,3 +41,35 @@ export function mojangRoutes(): Record<string, string> {
   for (const v of manifest.versions) routes[v.url] = fixture(`mojang/versions/${v.id}.json`);
   return routes;
 }
+
+interface RecordedRoute {
+  method: string;
+  url: string;
+  body: string | null;
+  status: number;
+  headers: Record<string, string>;
+  file: string | null;
+}
+
+/**
+ * Fetch mock replaying the recorded Modrinth exchanges (`fixtures/modrinth/routes.json`, matched on
+ * method + URL + request body). Unknown requests answer 599 and are listed in `misses`.
+ */
+export function modrinthFetch(): { fetch: Fetch; calls: Array<{ method: string; url: string; body: string | null; headers: Headers }>; misses: string[] } {
+  const routes = JSON.parse(fixture("modrinth/routes.json")) as RecordedRoute[];
+  const calls: Array<{ method: string; url: string; body: string | null; headers: Headers }> = [];
+  const misses: string[] = [];
+  const fetch: Fetch = async (input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = init?.method ?? "GET";
+    const body = typeof init?.body === "string" ? init.body : null;
+    calls.push({ method, url, body, headers: new Headers(init?.headers) });
+    const r = routes.find((x) => x.method === method && x.url === url && x.body === body);
+    if (!r) {
+      misses.push(`${method} ${url} ${body ?? ""}`);
+      return new Response("unexpected request", { status: 599 });
+    }
+    return new Response(r.file ? fixture(`modrinth/${r.file}`) : null, { status: r.status, headers: r.headers });
+  };
+  return { fetch, calls, misses };
+}

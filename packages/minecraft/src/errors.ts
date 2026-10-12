@@ -10,18 +10,23 @@ export type CatalogErrorCode =
   /** The software cannot be provisioned automatically (e.g. Spigot: no redistributable binary). */
   | "UNSUPPORTED"
   /** Caller supplied an invalid argument (version string, build id, URL). */
-  | "INVALID_ARGUMENT";
+  | "INVALID_ARGUMENT"
+  /** Upstream rate limit hit (HTTP 429); `retryAfterMs` says when to retry. */
+  | "RATE_LIMITED";
 
 export class CatalogError extends Error {
   readonly code: CatalogErrorCode;
   readonly status: number | undefined;
   readonly url: string | undefined;
+  /** Back-off hint for `RATE_LIMITED` (milliseconds), otherwise undefined. */
+  readonly retryAfterMs: number | undefined;
 
-  constructor(code: CatalogErrorCode, message: string, opts: { status?: number; url?: string; cause?: unknown } = {}) {
+  constructor(code: CatalogErrorCode, message: string, opts: { status?: number; url?: string; cause?: unknown; retryAfterMs?: number } = {}) {
     super(message, opts.cause === undefined ? undefined : { cause: opts.cause });
     this.name = "CatalogError";
     this.code = code;
     this.status = opts.status;
     this.url = opts.url;
+    this.retryAfterMs = opts.retryAfterMs;
   }
 }

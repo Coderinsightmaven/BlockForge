@@ -1,0 +1,215 @@
+[
+ {
+  "game_versions": [
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "pI4UHLJL",
+  "project_id": "DKY9btbd",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldGuard 7.0.17 (MC 1.21.11-26.2)",
+  "version_number": "7.0.17",
+  "changelog": "## 7.0.17\n\n* Fix cocoa not being treated as a crop in relevant flags\n* Fix overlapping game mode flags sometimes not storing the expected previous game mode\n* Replace PaperLib functionality that doesn",
+  "changelog_url": null,
+  "date_published": "2026-05-30T03:15:30.010759Z",
+  "downloads": 184072,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "u4uX0dP1",
+    "hashes": {
+     "sha1": "73ea8824209672a0b3a20964dabde3eb245ae10b",
+     "sha512": "5da539cf8618079f9e7f5a0ab578c62d31ebd88e35b39ca047a2f9115e397e0d4dd781a94ca373e93333fce3371f7eaf503cd0b6abb6363085e3f4968ea51e4b"
+    },
+    "url": "https://cdn.modrinth.com/data/DKY9btbd/versions/pI4UHLJL/worldguard-bukkit-7.0.17.jar",
+    "filename": "worldguard-bukkit-7.0.17.jar",
+    "primary": true,
+    "size": 1177934,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "1u6JkXh5",
+    "file_name": null,
+    "dependency_type": "required"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "EZl3moba",
+  "project_id": "DKY9btbd",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldGuard 7.0.16 (MC 1.21.11-26.1.2)",
+  "version_number": "7.0.16",
+  "changelog": "## 7.0.16\n\n* Update to 1.21.11.\n* Added experimental Folia support.\n* Workaround an issue where some item/block names aren't adequately translated by the client.\n* Workaround a duplication bug in Pape",
+  "changelog_url": null,
+  "date_published": "2026-03-24T09:04:34.181505Z",
+  "downloads": 96937,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ZZXbV0rN",
+    "hashes": {
+     "sha1": "a6f04d4b16f5d880f8465fc8188f2731b2e6aeae",
+     "sha512": "70ed07f145a1b686e270bad3ba235a3a5e70005d8357c13e3130bf032b048add1aa1dd000f5521f77409c53a141111da2f6bf3eb610654c05f47666769d11d4c"
+    },
+    "url": "https://cdn.modrinth.com/data/DKY9btbd/versions/EZl3moba/worldguard-bukkit-7.0.16.jar",
+    "filename": "worldguard-bukkit-7.0.16.jar",
+    "primary": true,
+    "size": 1172160,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "oyjmf4DD",
+  "project_id": "DKY9btbd",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldGuard 7.0.16 Beta 1 (MC 1.21.11)",
+  "version_number": "7.0.16-beta-01",
+  "changelog": "## 7.0.16 Beta 1\n\n* Update to 1.21.11\n",
+  "changelog_url": null,
+  "date_published": "2026-01-06T05:50:04.825597Z",
+  "downloads": 45353,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ERbj5YUL",
+    "hashes": {
+     "sha1": "2df7c92bca5b1c85bb58c880dc9cdaee9f6e4774",
+     "sha512": "723c5d789cdfa1e959301472e6440d75d923f2ad2b2925f0366aa0e16d25047e143e17a020e1fe19bcbf435a80dbe54830be5d51111fbf20a0d6d44d069dc8d7"
+    },
+    "url": "https://cdn.modrinth.com/data/DKY9btbd/versions/oyjmf4DD/worldguard-bukkit-7.0.16-beta-01.jar",
+    "filename": "worldguard-bukkit-7.0.16-beta-01.jar",
+    "primary": true,
+    "size": 1167093,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "WaElxvDz",
+  "project_id": "DKY9btbd",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldGuard 7.0.15 (MC 1.21.10-1.21.11)",
+  "version_number": "7.0.15",
+  "changelog": "## 7.0.15\n\n* Update a few missed material definitions from the beta\n\n## 7.0.15 Beta 1\n\n* Update to 1.21.10\n* Improve region file loading compatibility with NIO Java APIs\n",
+  "changelog_url": null,
+  "date_published": "2026-01-06T05:45:13.593665Z",
+  "downloads": 56891,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "wydTQElN",
+    "hashes": {
+     "sha1": "07075d7dc0882e24e5a2d7357dd8a8beda3323de",
+     "sha512": "bb62ff5cac7e0ec7e261cb1f17d8b53779e614f528893de03e75a88b61425481ef584fe69ba885a94d28d5e69705aee750ab443363d4cd0e4fd6035db8473ed7"
+    },
+    "url": "https://cdn.modrinth.com/data/DKY9btbd/versions/WaElxvDz/worldguard-bukkit-7.0.15.jar",
+    "filename": "worldguard-bukkit-7.0.15.jar",
+    "primary": true,
+    "size": 1166792,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "Cm1YG6Lt",
+  "project_id": "DKY9btbd",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldGuard 7.0.15 Beta 1 (MC 1.21.10-1.21.11)",
+  "version_number": "7.0.15-beta-01",
+  "changelog": "## 7.0.15 Beta 1\n\n* Update to 1.21.10\n* Improve region file loading compatibility with NIO Java APIs\n",
+  "changelog_url": null,
+  "date_published": "2025-11-01T09:19:12.867966Z",
+  "downloads": 43786,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ZOn29fnJ",
+    "hashes": {
+     "sha512": "d800967c693f66b0e710812d9f66f1ce6ccd34646126d3501414c5195938cbc57d4d6d239910730d0696b0434fdf6a9771492b08571c4471b7c1cb92d9eea2da",
+     "sha1": "85be1ffd9eced894b5b6d9c6e6ac0cb2bdaec573"
+    },
+    "url": "https://cdn.modrinth.com/data/DKY9btbd/versions/Cm1YG6Lt/worldguard-bukkit-7.0.15-beta-01.jar",
+    "filename": "worldguard-bukkit-7.0.15-beta-01.jar",
+    "primary": true,
+    "size": 1166568,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ }
+]

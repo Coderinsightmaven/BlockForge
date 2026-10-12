@@ -1,0 +1,166 @@
+[
+ {
+  "game_versions": [
+   "1.21",
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric",
+   "quilt"
+  ],
+  "environment": "dedicated_server_only",
+  "id": "t1AtqfxZ",
+  "project_id": "LVN9ygNV",
+  "author_id": "G2a0TqEf",
+  "featured": false,
+  "name": "1.3.5",
+  "version_number": "1.3.5",
+  "changelog": "## What's Changed\n* Enforce specific selectors on rollback / restore by @DrexHD in https://github.com/QuiltServerTools/Ledger/pull/277\n* Improve rollback / restore logic by @DrexHD in https://github.c",
+  "changelog_url": null,
+  "date_published": "2024-11-13T19:45:18.582717Z",
+  "downloads": 36126,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "TfuVKhms",
+    "hashes": {
+     "sha1": "cd9b3722e540df48ba24b169a594132cbf1af1f3",
+     "sha512": "ab2407e568fd94d863ee178c6009e8a2f21887cc8a9b73d042f9bbc65ffd072848f426351c55e36ffa5430122e4487e7e5392b4a189fc530d62efa59a47f1234"
+    },
+    "url": "https://cdn.modrinth.com/data/LVN9ygNV/versions/t1AtqfxZ/ledger-1.3.5.jar",
+    "filename": "ledger-1.3.5.jar",
+    "primary": true,
+    "size": 20475069,
+    "file_type": null
+   },
+   {
+    "id": "u0SW8WlO",
+    "hashes": {
+     "sha1": "6ecc72333419b2de35b8028ef0e9e01bd35af7b8",
+     "sha512": "81ff6254b7e8963850616bcf8db42247fdbf2827e39fca2b3e93d22ba0cdfa488affd760d3f3c56e92bed98db7eb2c871b08a479f43437115cfaf77bbe3f74cf"
+    },
+    "url": "https://cdn.modrinth.com/data/LVN9ygNV/versions/t1AtqfxZ/ledger-1.3.5-dev-all.jar",
+    "filename": "ledger-1.3.5-dev-all.jar",
+    "primary": false,
+    "size": 20196164,
+    "file_type": null
+   },
+   {
+    "id": "oE4LdGiO",
+    "hashes": {
+     "sha512": "82585a309f3105fe63da5be1a5a0c31db612b378d16b0bfa9562064a9f5a8e1244d86dc663f5aff585cc4b861491f19559adf71d2d479343ad25681575ca65dc",
+     "sha1": "2185fb71c928d5391e1da5af788884a2c2ce7796"
+    },
+    "url": "https://cdn.modrinth.com/data/LVN9ygNV/versions/t1AtqfxZ/ledger-1.3.5-sources.jar",
+    "filename": "ledger-1.3.5-sources.jar",
+    "primary": false,
+    "size": 190961,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "required"
+   },
+   {
+    "version_id": null,
+    "project_id": "Ha28R6CL",
+    "file_name": null,
+    "dependency_type": "required"
+   },
+   {
+    "version_id": null,
+    "project_id": "MLYQ9VGP",
+    "file_name": null,
+    "dependency_type": "incompatible"
+   }
+  ]
+ },
+ {
+  "game_versions": [
+   "1.21",
+   "1.21.1"
+  ],
+  "loaders": [
+   "fabric",
+   "quilt"
+  ],
+  "environment": "dedicated_server_only",
+  "id": "mb29Srom",
+  "project_id": "LVN9ygNV",
+  "author_id": "G2a0TqEf",
+  "featured": false,
+  "name": "1.3.4",
+  "version_number": "1.3.4",
+  "changelog": "## What's Changed\n* Update to 1.21\n\n\n**Full Changelog**: https://github.com/QuiltServerTools/Ledger/compare/1.3.3...1.3.4",
+  "changelog_url": null,
+  "date_published": "2024-06-19T21:07:39.438210Z",
+  "downloads": 11282,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ZUDp4oEc",
+    "hashes": {
+     "sha1": "68eb5d3e992b6634efe62a0980295f9ecea210c1",
+     "sha512": "9701759b8507478ec19a8d441d884e2c5c41f7932207805e18ec1f14f17e3ff64394e31ee28d47b776730dde0c3a97ceca5f27af49d8b38d4a1577fb39351b44"
+    },
+    "url": "https://cdn.modrinth.com/data/LVN9ygNV/versions/mb29Srom/ledger-1.3.4.jar",
+    "filename": "ledger-1.3.4.jar",
+    "primary": true,
+    "size": 20454000,
+    "file_type": null
+   },
+   {
+    "id": "Hj9WvRaV",
+    "hashes": {
+     "sha512": "0b06292683af504a4ad54c71bf3fd4e3b0cb4ce1e4fb8af8cf4eb15e0dae24479870f7fa5d0c8ad79a60fe68aeed2d39e6506666fcb2238303d5166736170aab",
+     "sha1": "a65af07ee43ca9f07e32f444e027019671fcb312"
+    },
+    "url": "https://cdn.modrinth.com/data/LVN9ygNV/versions/mb29Srom/ledger-1.3.4-dev-all.jar",
+    "filename": "ledger-1.3.4-dev-all.jar",
+    "primary": false,
+    "size": 20175758,
+    "file_type": null
+   },
+   {
+    "id": "ICaVYyZG",
+    "hashes": {
+     "sha1": "b0f26409f24640065e3f9881ebbac0838e7f0eef",
+     "sha512": "a9c43a81110a1ee27d2c67806cde08ec606faa5ffb3c2f83c1d8357b36de6b0cb3d90fb1d8604bcc69629838a1d16dcc93f188822a826643a5a01b6a962241a4"
+    },
+    "url": "https://cdn.modrinth.com/data/LVN9ygNV/versions/mb29Srom/ledger-1.3.4-sources.jar",
+    "filename": "ledger-1.3.4-sources.jar",
+    "primary": false,
+    "size": 185244,
+    "file_type": null
+   }
+  ],
+  "dependencies": [
+   {
+    "version_id": null,
+    "project_id": "Ha28R6CL",
+    "file_name": null,
+    "dependency_type": "required"
+   },
+   {
+    "version_id": null,
+    "project_id": "MLYQ9VGP",
+    "file_name": null,
+    "dependency_type": "incompatible"
+   },
+   {
+    "version_id": null,
+    "project_id": "P7dR8mSH",
+    "file_name": null,
+    "dependency_type": "required"
+   }
+  ]
+ }
+]

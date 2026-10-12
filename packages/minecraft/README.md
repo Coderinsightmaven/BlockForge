@@ -1,7 +1,8 @@
 # @blockforge/minecraft
 
 Pure TypeScript library for Minecraft server software: catalogue adapters, Java runtime mapping,
-`server.properties` editing/validation, JVM launch argv, log parsing, EULA and world helpers.
+`server.properties` editing/validation, JVM launch argv, log parsing, EULA and world helpers,
+Modrinth plugins/mods, jar metadata parsing and player management.
 No filesystem/process access; network only through an injected `fetch` (the control plane owns
 timeouts, proxying and SSRF policy). Built with `lib: ES2023 + DOM` and no Node typings, so only
 web-standard globals (`fetch`, `TextEncoder`, Web Crypto) are used.
@@ -20,6 +21,9 @@ web-standard globals (`fetch`, `TextEncoder`, Web Crypto) are used.
 | EULA / world | `generateEula`, `isEulaAccepted`, `validateSeed`, `javaStringHashCode`, `validateLevelType`, `validateLevelName`, `WORLD_PRESETS` |
 | Provisioning | `buildMinecraftProvisioning(input)` → `{ downloads (artifact.fetch payloads, cache: true), install (Forge/NeoForge `workload.install` payload) | null, workload: WorkloadSpec, files (server.properties, eula.txt, velocity.toml bind), deferredFiles, gamerules, warnings }`; `setVelocityBind` |
 | Fetch boundary | Every metadata request and redirect hop must be HTTPS on `CATALOG_HOSTS.metadata` (`redirect: "manual"`, max 5 hops); download URLs taken from upstream JSON must be on `CATALOG_HOSTS.artifacts` (`assertAllowedUrl`, `assertArtifactUrl`; override via `CatalogContext.metadataHosts/artifactHosts`). |
+| Modrinth | `ModrinthClient({ fetch, userAgent, cache?, … })` (`modrinthUserAgent(version, contact)` → `BlockForge/<v> (<contact>)`; `rateLimit` = last `X-Ratelimit-*` + `backoffMs`; 429 and an exhausted window → `CatalogError RATE_LIMITED` with `retryAfterMs`); `searchModrinth`, `buildModrinthSearchFacets`, `getModrinthProject`, `listCompatibleVersions`, `pickModrinthVersion`, `planModrinthInstall` → `ModrinthInstallPlan { files: ModrinthPlannedFile[] (dependencies first), alreadyInstalled, optionalDependencies, warnings, installable }`, `modrinthFetchPayload(file, workloadId)` (`artifact.fetch`), `identifyModrinthFiles`, `checkModrinthUpdates`; `MODRINTH_LOADER_PROFILES` / `modrinthLoaderProfile(software)` |
+| Jar metadata | `parseJarMetadata({ entryPath: text })` over `EXTENSION_METADATA_ENTRIES`; `parsePluginYml`, `parsePaperPluginYml`, `parseBungeeYml`, `parseVelocityPluginJson`, `parseFabricModJson`, `parseQuiltModJson`, `parseModsToml(text, { neoforge?, manifest? })`, `parseJarManifest` → `ExtensionMetadata`; `jarCompatibility(extensions, software)` (upload validation); `selectExtensionFiles(dir, fs.list entries)`, `extensionDirFor`, `toggledExtensionPath` (`.jar` ⇄ `.jar.disabled`) |
+| Players | `parsePlayerList(kind, text)` / `serializePlayerList` (Gson-identical) + `addToWhitelist`, `setOperator`, `banPlayer`, `banIp`, `removeFromPlayerList`, `isBanActive`, `formatBanDate`/`parseBanDate`; `offlinePlayerUuid`, `normalizeUuid`, `isValidPlayerName`, `md5`; `lookupMojangProfile(ctx, name)`, `resolvePlayerProfile(ctx, name, { onlineMode })`; `playerCommands.*` (whitelist/op/deop/ban/pardon/ban-ip/pardon-ip/kick/list/glist), `sanitizeReason`, `parsePlayerListOutput`, `parseVelocityGlist`, `parseCommandFeedback` |
 
 ### Install / launch plans
 
@@ -65,6 +69,39 @@ Docker Desktop bind mount and ~2 minutes on a named volume: give installer jobs 
 
 Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option files, boot/class/module path changes, `-m`/`--module`/`--source`, Java 8 `-Djava.ext.dirs`/`-Djava.endorsed.dirs`, `java.library.path`, security/logging config files, CRaC/CDS/AOT/JVMCI files. `-D` properties must be on `SYSTEM_PROPERTY_ALLOWLIST` or start with a software prefix (`paper.`, `Paper.`, `purpur.`, `velocity.`, `fml.`, `forge.`, `neoforge.`, `fabric.log.`); other `-X`/`--` options are allowlisted; `-XX:` tuning is allowed apart from the denylist.
 
+## Modrinth (API v2, verified live 2026-10-12)
+
+* Every request and redirect hop must be HTTPS on `api.modrinth.com` (POSTs never follow redirects);
+  file URLs must be on `cdn.modrinth.com`; responses are zod-validated (`version_files` maps only
+  accept hash keys). Filenames must be a single safe `.jar` path component (no separators,
+  Windows-reserved, control, bidi/format or line-separator characters), ≤ 2 GiB.
+* Search facets: `project_type:plugin|mod` (matches `all_project_types`; hits still say `mod`),
+  loader categories OR-ed, `versions:<mc>` (not for Velocity), `server_side!=unsupported`.
+* Loader mapping: Paper `paper|spigot|bukkit`, Purpur adds `purpur`, Folia only `folia`, Spigot
+  `spigot|bukkit`, Velocity `velocity` (no game-version filter), Fabric `fabric` (+ `quilt` with a
+  `QUILT_ON_FABRIC` warning), Forge `forge`, NeoForge `neoforge`; vanilla (datapacks) is `UNSUPPORTED`.
+* Version choice: listed, loader + game version match, full loader match over Quilt-only, release
+  over beta over alpha, newest. Update checks send `version_types` so a release is never
+  "updated" to a beta (`allowPrerelease` overrides).
+* Dependencies: required ones resolved recursively for the same loader/version (pinned
+  `version_id` honoured when compatible), cycle-safe, bounded by `maxFiles` (32) / `maxDepth` (8);
+  `incompatible` against installed or planned projects (both directions, using installed version
+  ids) → error; `embedded` → info; `optional` → offered (`includeOptional` opts in);
+  `file_name`-only deps → manual install warning. Warning levels: `error` blocks (`installable: false`).
+
+## Players
+
+* `whitelist.json` / `ops.json` / `banned-players.json` / `banned-ips.json`: field names, order,
+  `"forever"`, `"(Unknown)"`, `yyyy-MM-dd HH:mm:ss Z` and the Gson settings were read from the 26.3
+  server classes; serialisation is byte-identical to Gson 2.14.0 with those settings (tested).
+  Edit these files while the server is stopped (a running server overwrites them on its next
+  change); for a running server use the console commands (`whitelist reload` re-reads only the
+  whitelist).
+* Console commands accept only `[A-Za-z0-9_]{1,16}` names and literal IPs; reasons are collapsed to
+  one line (control/format/separator characters → spaces, ≤ 200 characters).
+* Output parsers only read the message part of a console line (chat lines `<name> …` never match);
+  the control plane should still only parse lines that follow the command it sent.
+
 ## Known limitations
 
 * Player join/leave/readiness parsing is tested on lines built from verified format strings, not
@@ -76,6 +113,13 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
   container (Mojang, maven.minecraftforge.net, maven.neoforged.net, maven.fabricmc.net,
   libraries.minecraft.net) — beyond `CATALOG_HOSTS`, which only covers what the agent fetches.
 * `SoftwareVersion.minecraftVersion` carries the Velocity version for the Velocity adapter.
+* Player list files are Gson-generated (not written by a running server: that needs an accepted
+  EULA); `list`/feedback parsing is tested on lines built from the jars' format strings, not on
+  captured console output. Paper is assumed to use the vanilla `list` command.
+* Floodgate/Bedrock player names (prefix `.`) are rejected by the name validation.
+* Identifying installed jars needs agent support (hashes + jar entry reads; see below); uploads
+  that are not on Modrinth are only identified through their metadata files.
+* Mojang bulk name lookup (`api.minecraftservices.com`) is not implemented; cache single lookups.
 
 ## Contract change requests (for `packages/contracts`)
 
@@ -87,3 +131,23 @@ Forbidden (case-insensitive): agents, `-XX:OnError/OnOutOfMemoryError`, option f
    install plan (installer argv + expected files), launch target (`jar` / `argfile` /
    `jar-candidates`), `requiresNetworkAtFirstStart`.
 4. `SoftwareVersion`: a neutral `version` field (proxies are not versioned by Minecraft version).
+5. **Modrinth / extensions DTOs** (library types to lift as-is): `ModrinthSearchQuery`,
+   `ModrinthSearchHit` / `ModrinthSearchResult`, `ModrinthProjectDetails`,
+   `ModrinthVersionSummary`, `ModrinthInstallRequest` (minus `installed`, which the control plane
+   fills), `ModrinthInstallPlan` / `ModrinthPlannedFile` / `PlanWarning` (+ `PlanWarningCode`),
+   `ModrinthUpdateStatus`, `ModrinthFileIdentity` / `IdentifiedFile`, `ExtensionMetadata` /
+   `ExtensionDependency`, `JarCompatibility`, `ExtensionFileCandidate`. `installed_extensions`
+   (data-model.md) stores `sha256`; Modrinth identifies by SHA-1/SHA-512, so the row should also keep
+   `sha512` (and the plan's `versionId`/`projectId`).
+6. **Agent commands** for extension scans: `fs.hash { path, algorithms: ["sha1","sha512"] }` →
+   hex digests, and `jar.readEntries { path, entries: EXTENSION_METADATA_ENTRIES, maxBytesPerEntry:
+   262144 }` → `{ [entry]: text | null }` (read-only, no extraction to disk, zip-bomb limits).
+   Installation uses the existing `artifact.fetch` (`modrinthFetchPayload`); replacement needs
+   `fs.delete` of `ModrinthPlannedFile.replaces` after a successful fetch; enable/disable is
+   `fs.rename` to `toggledExtensionPath`.
+7. **Players DTOs**: `PlayerListKind`, `WhitelistEntry`, `OpEntry`, `PlayerBanEntry`, `IpBanEntry`,
+   `PlayerProfile`, `OnlinePlayer` / `PlayerListOutput` / `VelocityGlistOutput`, `CommandFeedback`;
+   request bodies `{ name }`, `{ name, reason?, expires? }`, `{ ip | name, reason? }`,
+   `{ name, level?, bypassesPlayerLimit? }`.
+8. `CatalogError` gained `RATE_LIMITED` (+ `retryAfterMs`): map it to HTTP 429/503 with
+   `Retry-After` instead of the generic upstream error.

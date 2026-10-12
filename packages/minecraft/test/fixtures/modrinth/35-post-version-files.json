@@ -1,0 +1,53 @@
+{
+ "a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f": {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "F5ea2ov3",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.5 (Bukkit for 1.21.4-26.2)",
+  "version_number": "7.4.5",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.5:\n- [Bukkit] Improve Folia detection for",
+  "changelog_url": null,
+  "date_published": "2026-08-09T07:18:23.599011Z",
+  "downloads": 217250,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "FCSA3zjN",
+    "hashes": {
+     "sha1": "457add12f5c7eb0dfcb9945e6860e1c9dd8d9a48",
+     "sha512": "a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/F5ea2ov3/worldedit-bukkit-7.4.5.jar",
+    "filename": "worldedit-bukkit-7.4.5.jar",
+    "primary": true,
+    "size": 7708742,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ }
+}

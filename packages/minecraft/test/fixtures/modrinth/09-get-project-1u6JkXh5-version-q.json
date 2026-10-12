@@ -1,0 +1,824 @@
+[
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2",
+   "26.3"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "J1eeOh6C",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.6 Beta 2 (Bukkit for 1.21.4-26.3)",
+  "version_number": "7.4.6-beta-02",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.6 Beta 2:\n- Work around a Minecraft DFU b",
+  "changelog_url": null,
+  "date_published": "2026-09-24T10:26:36.893577Z",
+  "downloads": 65135,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "DN1l7z2w",
+    "hashes": {
+     "sha512": "138ea8f412bf4a17104d2e090a9171e1b263c6b28a060dacda5bc78c4629e9bac1c3834cccaaa50ac87bf148a269cf9dfd46967dddedd64dc512fdf7a5db17f9",
+     "sha1": "05474d9ef7fcae884513a97287df56672d460d48"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/J1eeOh6C/worldedit-bukkit-7.4.6-beta-02.jar",
+    "filename": "worldedit-bukkit-7.4.6-beta-02.jar",
+    "primary": true,
+    "size": 7872751,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2",
+   "26.3"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "LuxQFdjH",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.6 Beta 1 (Bukkit for 1.21.4-26.3)",
+  "version_number": "7.4.6-beta-01",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.6 Beta 1:\n- Update to Minecraft 26.3\n- Im",
+  "changelog_url": null,
+  "date_published": "2026-09-21T12:35:26.864614Z",
+  "downloads": 7523,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "3OaQ8OtX",
+    "hashes": {
+     "sha1": "4ffcbd56ffae6842da4695aaad8b67974680ba63",
+     "sha512": "7283ab8fbfb84ac2c3fabdbf1a2a4b441e57fd4c97b9f57e181043f2bb1c17b3f7af7890054456bbe93593550d9b84e35039a061cc6c6b749d194d14c250547a"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/LuxQFdjH/worldedit-bukkit-7.4.6-beta-01.jar",
+    "filename": "worldedit-bukkit-7.4.6-beta-01.jar",
+    "primary": true,
+    "size": 7872083,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "F5ea2ov3",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.5 (Bukkit for 1.21.4-26.2)",
+  "version_number": "7.4.5",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.5:\n- [Bukkit] Improve Folia detection for",
+  "changelog_url": null,
+  "date_published": "2026-08-09T07:18:23.599011Z",
+  "downloads": 217250,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "FCSA3zjN",
+    "hashes": {
+     "sha1": "457add12f5c7eb0dfcb9945e6860e1c9dd8d9a48",
+     "sha512": "a383492fac6bfb4d43a257dfa7b5fc076aae503a71151b463de4fe80e6f3d5fc11209eaf4097baa115f3febf0adc40ca0a1ecda227b8439b429d0a4ba3a63a4f"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/F5ea2ov3/worldedit-bukkit-7.4.5.jar",
+    "filename": "worldedit-bukkit-7.4.5.jar",
+    "primary": true,
+    "size": 7708742,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "qNuPcliz",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.4 (Bukkit for 1.21.4-26.2)",
+  "version_number": "7.4.4",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.4:\n- Updated to 26.2\n- Fixed an error tha",
+  "changelog_url": null,
+  "date_published": "2026-07-04T03:01:16.020469Z",
+  "downloads": 154335,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "LIA8Hz0V",
+    "hashes": {
+     "sha1": "3a2ddaef25338906c286681a71528607bbfee890",
+     "sha512": "86d9b76baf8e25ed32170ff25ed8862c00d5adf9441955dd87af01e648b410d0f2ecd5d9a2a51044f425d30869458004687e9ff2e5522aefec65e1c91630f08d"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/qNuPcliz/worldedit-bukkit-7.4.4.jar",
+    "filename": "worldedit-bukkit-7.4.4.jar",
+    "primary": true,
+    "size": 7707538,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2",
+   "26.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "ESAHQFYo",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.4 Beta 1 (Bukkit for 1.21.4-26.2)",
+  "version_number": "7.4.4-beta-01",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.4 Beta 1:\n- Updated to 26.2",
+  "changelog_url": null,
+  "date_published": "2026-06-18T11:05:21.521701Z",
+  "downloads": 34264,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "45RRnZej",
+    "hashes": {
+     "sha512": "5a3102d0cc69118efcae442e9a128abb76edc8a7c7243510c59ee76288a805010405d8dc40889fd952e7cbce7b2df2986cc5c06f63c8457d06ad058e3ae3360d",
+     "sha1": "d2e6d542f2faec7ca871145acf1d2b9dc4bab6bb"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/ESAHQFYo/worldedit-bukkit-7.4.4-beta-01.jar",
+    "filename": "worldedit-bukkit-7.4.4-beta-01.jar",
+    "primary": true,
+    "size": 7703375,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "yDUBafTJ",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.3 (Bukkit for 1.21.4-26.1.2)",
+  "version_number": "7.4.3",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.3:\n- Updated to 26.1(.1/.2)\n- Added a `wo",
+  "changelog_url": null,
+  "date_published": "2026-05-04T11:32:44.505155Z",
+  "downloads": 183920,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "STHTYQi4",
+    "hashes": {
+     "sha512": "43d2f8865a06d63c71d2b8bc0ded66c2c7f5e413db1a64bc2f665db3bf25ec28ae40789884af4bdaf40740a6632196494d2897fa77675f0babfaf79f18400853",
+     "sha1": "cec544771acacf4d15d6ec618d153dc746ff868e"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/yDUBafTJ/worldedit-bukkit-7.4.3.jar",
+    "filename": "worldedit-bukkit-7.4.3.jar",
+    "primary": true,
+    "size": 7668652,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11",
+   "26.1",
+   "26.1.1",
+   "26.1.2"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "k9KdTr1M",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.3 Beta 1 (Bukkit for 1.21.4-26.1.2)",
+  "version_number": "7.4.3-beta-01",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.3 Beta 1:\n- Updated to 26.1(.1/.2)\n- Adde",
+  "changelog_url": null,
+  "date_published": "2026-04-10T05:16:44.353987Z",
+  "downloads": 41759,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ioRIz8Hi",
+    "hashes": {
+     "sha1": "5c450ee1d2696674452a112b604f011a99cd61dd",
+     "sha512": "cfa8d2e6c273863eef8b7f52b1d4cd7ef09c6ea91ada8870166ed9c9f8d2004d0548801c6c5d82377513ad1f991196bf4493856e5f7b4afae50d9e10bdeb2b51"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/k9KdTr1M/worldedit-bukkit-7.4.3-beta-01.jar",
+    "filename": "worldedit-bukkit-7.4.3-beta-01.jar",
+    "primary": true,
+    "size": 7668615,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "p8T2aZ8U",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.2 (Bukkit for 1.21.4-1.21.11)",
+  "version_number": "7.4.2",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.2:\n- Changed entity and block entity hand",
+  "changelog_url": null,
+  "date_published": "2026-04-01T10:55:26.619093Z",
+  "downloads": 75271,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "iRuM0XCN",
+    "hashes": {
+     "sha512": "31db909249af48881617818d7a8f3386a7453ab7ca842b3a48ba2713d56325ec996f4b5bb5b861d272ab2179d384f6416669c6b7840b1283b3bc9a75d5b18c4a",
+     "sha1": "dff8f26a761c76eb63b5254730767dbdf1306ec5"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/p8T2aZ8U/worldedit-bukkit-7.4.2.jar",
+    "filename": "worldedit-bukkit-7.4.2.jar",
+    "primary": true,
+    "size": 7510632,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "folia",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "JUWRHdru",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.1 (Bukkit for 1.21.4-1.21.11)",
+  "version_number": "7.4.1",
+  "changelog": "**For a more in-depth look at the new features in WorldEdit 7.4.x, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n\n7.4.1:\n- [Bukkit] Added experimental Folia su",
+  "changelog_url": null,
+  "date_published": "2026-03-21T04:00:06.310337Z",
+  "downloads": 39553,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "cTBEC5gR",
+    "hashes": {
+     "sha1": "6eb22dd84c4f9182a087423907e45f8b52c69719",
+     "sha512": "93407bede53159c7eb556547a448c42ed0bd2ab4564b1a4662839c76c359e13f284f6883756785c0a22df1cec526ef837d189a8af9204d2e99db75dc62b3a333"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/JUWRHdru/worldedit-bukkit-7.4.1.jar",
+    "filename": "worldedit-bukkit-7.4.1.jar",
+    "primary": true,
+    "size": 7494610,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "CkT32vix",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.0 (Bukkit for 1.21.4-1.21.11)",
+  "version_number": "7.4.0",
+  "changelog": "**Changes in 7.4.0**\n\n- **For a more in-depth look at the new features, [check out this article](https://madelinemiller.dev/blog/introducing-worldedit-7-4/)**\n- Added a -c option to //regen to output ",
+  "changelog_url": null,
+  "date_published": "2026-01-18T07:02:45.715587Z",
+  "downloads": 161012,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "SIC2u0SG",
+    "hashes": {
+     "sha512": "9731ddc147d5f98587ffd320bd35d1413169dc8a782bf2ceec6e9497409b17865a6ab83d683d521eb8f1b5f89d032fd761a8e8af8a0e449c603fb66c52b3b51b",
+     "sha1": "ee5eab91dff9734e2e4764606a1a81842794ebc7"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/CkT32vix/worldedit-bukkit-7.4.0.jar",
+    "filename": "worldedit-bukkit-7.4.0.jar",
+    "primary": true,
+    "size": 7474862,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "2YDdVDmG",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.3.19 (Bukkit for 1.21.4-1.21.11)",
+  "version_number": "7.3.19",
+  "changelog": "7.3.19\n- General cleanups across codebase\n- Final release of the 7.3.x series in preparation for 7.4 release\n- [Bukkit] Add a separate Gradle configuration for reobfuscation to better prepare for MC 2",
+  "changelog_url": null,
+  "date_published": "2026-01-18T06:16:00.723367Z",
+  "downloads": 6807,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "NG02iq6v",
+    "hashes": {
+     "sha1": "652162e53cfca132dc95c2c538ebcaa5d55a44df",
+     "sha512": "105b1f2c3d1f55ba8db3357421655f0d2597f736b1419336aae5c9210a492c0a8d6c136dfc1143131bfc4186f247393ef0b1eabf497796030317371e5196acde"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/2YDdVDmG/worldedit-bukkit-7.3.19.jar",
+    "filename": "worldedit-bukkit-7.3.19.jar",
+    "primary": true,
+    "size": 7313661,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "1MJ3rIHu",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.0 RC 1 (Bukkit for 1.21.4-1.21.11)",
+  "version_number": "7.4.0-rc-01",
+  "changelog": "**Changes in 7.4.0 RC 1**\n\n- Further tweaked the block property system to improve memory usage and performance on startup\n- Changed the legacy mapping system to not automatically load on startup, and ",
+  "changelog_url": null,
+  "date_published": "2026-01-08T05:28:57.646631Z",
+  "downloads": 17939,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "7ewH8CAR",
+    "hashes": {
+     "sha512": "b612ff28f5a38fad3c6098c64b19791afcabeb41e9eb142dbb115c44278ce283e9d112906e7ef61c294551a8b91c69188461445451988cb458f54279910e4787",
+     "sha1": "ae02d3fc6a91fdfb8b1bedbd1bcf275dd320b89e"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/1MJ3rIHu/worldedit-bukkit-7.4.0-rc-01.jar",
+    "filename": "worldedit-bukkit-7.4.0-rc-01.jar",
+    "primary": true,
+    "size": 7471313,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "7cjC8upt",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.0 Beta 3.1 (Bukkit for 1.21.3-1.21.11)",
+  "version_number": "7.4.0-beta-03.1",
+  "changelog": "**Changes in 7.4.0 Beta 3.1**\n- Fixed an issue that could break WorldGuard when paired with certain third party plugins, or (unconfirmed but likely) specific configurations\n\n**Changes in 7.4.0 Beta 3*",
+  "changelog_url": null,
+  "date_published": "2026-01-04T02:16:28.721728Z",
+  "downloads": 8425,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "wNSf8WEu",
+    "hashes": {
+     "sha512": "5847a3fa041191554b051e40b0ead332d5111852aa18ff918de785605bfde3cd5ff5755542e4bee8c03c561b063c6034ca33ab04c60a299a10579e4803db30a3",
+     "sha1": "963e64ec15e1ca4d811f9a9501cb03d00b9c7f2e"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/7cjC8upt/worldedit-bukkit-7.4.0-beta-3.1.jar",
+    "filename": "worldedit-bukkit-7.4.0-beta-3.1.jar",
+    "primary": true,
+    "size": 6970792,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "K7geSdjb",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.0 Beta 3 (Bukkit for 1.21.3-1.21.11)",
+  "version_number": "7.4.0-beta-03",
+  "changelog": "**Changes in 7.4.0 Beta 3**\n- Added a //replacebiome command to replace biomes in a selection by a given mask\n- Improved reliability of tree generation systems, to attempt to partially mimic old funct",
+  "changelog_url": null,
+  "date_published": "2026-01-03T09:04:30.960149Z",
+  "downloads": 1949,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "ZFVCRef1",
+    "hashes": {
+     "sha1": "35b2a8e5bffc2d5f8aa191a0919fb6699073ef0b",
+     "sha512": "28da18aec30a728fcfc6df5822a25d0570a93260919140ce55cc53c675356c83ee472883fdb030eec0fcb650e412e711e95d229b5cf407d76838b696603cd244"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/K7geSdjb/worldedit-bukkit-7.4.0-beta-03.jar",
+    "filename": "worldedit-bukkit-7.4.0-beta-03.jar",
+    "primary": true,
+    "size": 6970753,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "sO1YYZp4",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.4.0 Beta 2 (Bukkit for 1.21.3-1.21.11)",
+  "version_number": "7.4.0-beta-02",
+  "changelog": "**Changes in 7.4.0 Beta 2**\n- Added support for MC 1.21.11\n- Added a //revolve command to paste a rotated copy of a selection around an axis\n- Fixed a potential API break with API consumers having odd",
+  "changelog_url": null,
+  "date_published": "2025-12-24T04:31:57.865181Z",
+  "downloads": 17529,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "MJsVd4vM",
+    "hashes": {
+     "sha1": "065ecbe90425c69c61ef4270609494b2ce22fdbe",
+     "sha512": "590f86a8eb57c5a8262cabd1d462a0ba3f16ed7466bba4980157716af0ad06defadedcca4ef726ba0d8531fdaee98a563ba681f4b97b6ce068f12e07e37c2f3b"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/sO1YYZp4/worldedit-bukkit-7.4.0-beta-02.jar",
+    "filename": "worldedit-bukkit-7.4.0-beta-02.jar",
+    "primary": true,
+    "size": 6762326,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "bukkit",
+   "paper",
+   "spigot"
+  ],
+  "environment": "unknown",
+  "id": "XlUIRmF8",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.3.18 (Bukkit for 1.21.3-1.21.11)",
+  "version_number": "7.3.18",
+  "changelog": "7.3.18\n- Added support for 1.21.11\n- Improved rotation of special rail blocks (activator, detector, powered, etc)",
+  "changelog_url": null,
+  "date_published": "2025-12-24T04:27:55.967109Z",
+  "downloads": 32847,
+  "version_type": "release",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "QYRqxPWM",
+    "hashes": {
+     "sha512": "12931d4762d1a0e3f5fd2bf60ed7526b97699d52528c57715d4eced30ba151616aaa165515ce3885c0bcba3e5413847d78f94a8d5ff2d58bd03d83b38b19e45f",
+     "sha1": "e1c436cbb0b536ca64f8a0e4c28bf2fe3d96aea7"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/XlUIRmF8/worldedit-bukkit-7.3.18.jar",
+    "filename": "worldedit-bukkit-7.3.18.jar",
+    "primary": true,
+    "size": 6703395,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ },
+ {
+  "game_versions": [
+   "1.21.3",
+   "1.21.4",
+   "1.21.5",
+   "1.21.6",
+   "1.21.7",
+   "1.21.8",
+   "1.21.9",
+   "1.21.10",
+   "1.21.11"
+  ],
+  "loaders": [
+   "paper"
+  ],
+  "environment": "unknown",
+  "id": "qYMNQYjH",
+  "project_id": "1u6JkXh5",
+  "author_id": "WGCkmIeT",
+  "featured": false,
+  "name": "WorldEdit 7.3.18 Beta 1 (Bukkit for 1.21.3-1.21.11)",
+  "version_number": "7.3.18-beta-01",
+  "changelog": "7.3.18 Beta 1\n- Added support for 1.21.11\n- Improved rotation of special rail blocks (activator, detector, powered, etc)\n\n**Note! This beta version is _not_ compatible with Spigot, due to a lack of up",
+  "changelog_url": null,
+  "date_published": "2025-12-14T05:12:43.484300Z",
+  "downloads": 18725,
+  "version_type": "beta",
+  "status": "listed",
+  "requested_status": null,
+  "files": [
+   {
+    "id": "jrAf2vKN",
+    "hashes": {
+     "sha512": "6645a1ab16c93ef27b81aea8c82aabea8de74dab6c47f7776423dd734db8355284f53468c0cecfc9cd7c5c0390a46a01e4ad118474095a4cd15eae51abc6c200",
+     "sha1": "9cf41a276c34fe0dd68027c1b56b7042c5b5d184"
+    },
+    "url": "https://cdn.modrinth.com/data/1u6JkXh5/versions/qYMNQYjH/worldedit-bukkit-7.3.18-beta-01.jar",
+    "filename": "worldedit-bukkit-7.3.18-beta-01.jar",
+    "primary": true,
+    "size": 6704605,
+    "file_type": null
+   }
+  ],
+  "dependencies": []
+ }
+]

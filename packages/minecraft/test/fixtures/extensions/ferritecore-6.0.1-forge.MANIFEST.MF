@@ -1,0 +1,326 @@
+Manifest-Version: 1.0
+Specification-Title: FerriteCore
+Specification-Vendor: malte0811
+Specification-Version: 6.0.1
+Implementation-Title: Forge
+Implementation-Version: 6.0.1
+Implementation-Vendor: malte0811
+Implementation-Timestamp: 2023-10-22T15:27:07+0200
+Timestampe: 1697981227214
+Built-On-Java: 17.0.8.1+1 (Eclipse Adoptium)
+Build-On-Minecraft: 1.20.1
+MixinConfigs: ferritecore.predicates.mixin.json,ferritecore.fastmap.mixi
+ n.json,ferritecore.mrl.mixin.json,ferritecore.dedupmultipart.mixin.json
+ ,ferritecore.blockstatecache.mixin.json,ferritecore.dedupbakedquad.mixi
+ n.json,ferritecore.threaddetec.mixin.json,ferritecore.modelsides.mixin.
+ json
+
+Name: malte0811/ferritecore/mixin/config/FerriteMixinConfig$LithiumSuppo
+ rtState.class
+SHA-256-Digest: Mmah+ezNWIPE7wNCVV5oucF4OIAl2QnnE70XlrZqYgQ=
+
+Name: malte0811/ferritecore/mixin/mrl/Config.class
+SHA-256-Digest: M71Y/DrL29YDHnCa/zj7cJ0HgBxVmuPdqs7AITEU6JI=
+
+Name: malte0811/ferritecore/mixin/predicates/Config.class
+SHA-256-Digest: kuYzB7/thJ1XgFbJOwnb3Qk/mHAHu0aLDbxG2j/Qu8k=
+
+Name: malte0811/ferritecore/mixin/predicates/AndConditionMixin.class
+SHA-256-Digest: qhHDZw8lQBusQss72pPVLuNcoo3rKh0UaVUWrBLsyDw=
+
+Name: googleaccess/com/google/common/collect/FerriteCoreImmutableMapAcce
+ ss.class_manual
+SHA-256-Digest: t70MgtPNgXCq2+I6zXjBb4G5zEXBAo5RiFkiHbvnJvM=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer$1.class
+SHA-256-Digest: uBvc5KCdi3uWgSBG+EtiHddvIexYzwaANClcrmbyTWo=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/SliceShapeAccess.class
+SHA-256-Digest: jYTuOL/0b9MH18Wqjnh69jh9I5yeBzUVV2puLLdXPEs=
+
+Name: malte0811/ferritecore/util/Constants.class
+SHA-256-Digest: sfiJdTkiIi2CMqs504kcmT/P+agY7ZBxFgMg/C7MvI4=
+
+Name: malte0811/ferritecore/util/SmallThreadingDetector$GlobalCrashHandl
+ er.class
+SHA-256-Digest: a0tD7kruCA+lnxYXaScXzn1tizKfymlFblqo9dF9QgY=
+
+Name: malte0811/ferritecore/mixin/config/FerriteConfig.class
+SHA-256-Digest: VW4xpkI2XfvV1XqIo9iknd9u1suZA0WpGxOVNm7b9To=
+
+Name: malte0811/ferritecore/hash/SliceShapeHash.class
+SHA-256-Digest: uMnTG3yCKQNHh0FbpQp7HnmYOxokqsfcNWqSa80d0g8=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/VoxelShapeAccess.class
+SHA-256-Digest: gFqKvo8VTZfHjRd/ohrm/okMN1aiDs9sUWceWEcpz+U=
+
+Name: malte0811/ferritecore/mixin/threaddetec/PalettedContainerMixin.cla
+ ss
+SHA-256-Digest: maeELUA/N98M1RMmL5/rBdl9cO/cYKdnr9gZ6prCQ3M=
+
+Name: malte0811/ferritecore/ducks/FastMapStateHolder.class
+SHA-256-Digest: rqcn6pI+2XnCpxVZKpZ7E9SFIMUCrxTCkD1+bv9Wh5M=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/DiscreteVSAccess.class
+SHA-256-Digest: 2k6FxKoIIFSiGaNRlCzRSM5TRkcT1WH+vHdZAOP0+fo=
+
+Name: malte0811/ferritecore/impl/Deduplicator$1.class
+SHA-256-Digest: jCZqiX80tEpO551vvida/BXYUFCONjXe4RmqnnrkSgA=
+
+Name: malte0811/ferritecore/fastmap/immutable/FastMapValueSet$1.class
+SHA-256-Digest: kDoRXgFxqdzyKZBQl6h/oMSqQc+LfM1lZ5rllnS/yXs=
+
+Name: ferritecore.dedupmultipart.mixin.json
+SHA-256-Digest: GAjYdav9M6h2SeHxLXCgrHVPRcxl37Hk7v+EMX/dxp4=
+
+Name: malte0811/ferritecore/ducks/BlockStateCacheAccess.class
+SHA-256-Digest: RTw8IBYIkaCTpWV60uhrTZrN5t0PH+n9dgvE/P4ZRE4=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer$WeirdVanillaDirectio
+ nIndexer.class
+SHA-256-Digest: SkNq7lcUeG12jDdyNQQyn90307mozXtBwFh3EI1pnOQ=
+
+Name: malte0811/ferritecore/mixin/platform/ConfigFileHandler.class
+SHA-256-Digest: F4nJkSBMH3ng4DsZkN7buGQ64Awu39t4is4KWm5JwQ4=
+
+Name: malte0811/ferritecore/fastmap/BinaryFastMapKey.class
+SHA-256-Digest: OeT/BSx16u0mCxSFf+bC7+ss13ikIpl+TWQ8Hc8ppes=
+
+Name: malte0811/ferritecore/fastmap/table/NeighborTableBase.class
+SHA-256-Digest: sBx+HOJra0vVKr2UL4cu8eEuDntVs6rlGExwCYdEp14=
+
+Name: malte0811/ferritecore/mixin/config/FerriteMixinConfig.class
+SHA-256-Digest: UOoeZGZAQfXoee5Fwf+zNZxwMelG3ue9TjQq1WhfvQw=
+
+Name: malte0811/ferritecore/mixin/dedupbakedquad/BakedQuadAccess.class
+SHA-256-Digest: 9r6VbIt3V3JntOVumBh9rK7wVdLpck4IfnPDaOcyJ7o=
+
+Name: malte0811/ferritecore/mixin/fastmap/FastMapStateHolderMixin.class
+SHA-256-Digest: RY8/7C7VzKabox44Jit+g3gyoB38VOWV2/qkk8KMCtw=
+
+Name: ferritecore.blockstatecache.mixin.json
+SHA-256-Digest: AAG1PJNmRx9y6em1eZh2KtsIOj9NDVfIJSqGW11cXVg=
+
+Name: malte0811/ferritecore/fastmap/CompactFastMapKey.class
+SHA-256-Digest: OvU2SHNO5yLKAG794RuO+3ZzBYmBTqNCokYKP9fMJ5c=
+
+Name: ferritecore.threaddetec.mixin.json
+SHA-256-Digest: H7R6Qm/cNCDWA0ZGK+pLBiMBYFmEVSza8dL72dOm0a4=
+
+Name: malte0811/ferritecore/mixin/dedupmultipart/Config.class
+SHA-256-Digest: 1N5jwKQbuqYiySwXLbi0ebYkv6o5P+MuLzDoMY0xUEI=
+
+Name: malte0811/ferritecore/impl/ModelSidesImpl.class
+SHA-256-Digest: /2Y2HnlYnZG/uSPHVmQ42j8QvuTpQARcZ2KNjpH07H0=
+
+Name: ferritecore.fastmap.mixin.json
+SHA-256-Digest: v/4D8CoHZVx9AzEQc2MsUkMX07AJ64vPgVtlXrrFLFo=
+
+Name: malte0811/ferritecore/util/SmallThreadingDetector.class
+SHA-256-Digest: nESfjVKOZsNo1PhXq8ktUCCB0EKKznBQdSEEOfKKrpI=
+
+Name: ferritecore.refmap.json
+SHA-256-Digest: 5fG52yGcL1gpxKQgU2QfwyxNFv9Iw7vsrwEHwoDT5j4=
+
+Name: googleaccess/com/google/common/collect/FerriteCoreImmutableCollect
+ ionAccess.class_manual
+SHA-256-Digest: Vf/sPDp7psYjbSeeFfm29JYuuggryC+kzNLgkOwXHLg=
+
+Name: malte0811/ferritecore/util/PredicateHelper.class
+SHA-256-Digest: V+vsCIoTJViyKARDl82i5y6OAMVkvWEpcuWVO32du/s=
+
+Name: malte0811/ferritecore/fastmap/immutable/FastMapEntryIterator.class
+SHA-256-Digest: TFbZvUVIB5WSHKBRazO4Ipsi20pO+JgN7pUZH29PZbQ=
+
+Name: malte0811/ferritecore/mixin/dedupbakedquad/SimpleModelBuilderMixin
+ .class
+SHA-256-Digest: rAVKM4/1WL1mzqFc+jX9Eggtb8WiLzlr7cMTlYOrP+g=
+
+Name: ferritecore.modelsides.mixin.json
+SHA-256-Digest: nhAdomk4ispUcDTUJd7YzkIxLvLSpmxWX2HeNMd2Yo0=
+
+Name: googleaccess/com/google/common/collect/FerriteCoreEntrySetAccess.c
+ lass_manual
+SHA-256-Digest: /rxMarHU28nqLNMYixw2DdRY3O/mftv5v4sCEYGQb7I=
+
+Name: malte0811/ferritecore/ModClientForge.class
+SHA-256-Digest: FFQjLvi0waIsRH2XSevfSLegn/aeWOYA5jQBNI3yxO4=
+
+Name: malte0811/ferritecore/mixin/mrl/ResourceLocationAccess.class
+SHA-256-Digest: RM7qtFw7ntTuAxt9/+6eKtqu2+d3rLyLC/BBbYN/xvU=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer$BoolIndexer.class
+SHA-256-Digest: LacLMUESoOEK5JRdNZkFqwI38vzwdIuK/lsrRxFnAf8=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/BlockStateCacheMixin.c
+ lass
+SHA-256-Digest: brfiPfZmXFuI5cZemQrnm/eKzv0O7E2np3xIPIwbmDs=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/BitSetDVSAccess.class
+SHA-256-Digest: SVxkcv9spoP4PaDvKzL5h4NwU3JUtAunmnsEcqxqRtc=
+
+Name: pack.mcmeta
+SHA-256-Digest: kK9pkOJ+w3PTlq9AWSAfVFW5MIwA6hnO5ZYUBOpIDYg=
+
+Name: malte0811/ferritecore/PlatformHooks.class
+SHA-256-Digest: cAUMweGe4zC/CJ3tkL0DkcxBQBa5L7oP2rutDI/YJgM=
+
+Name: malte0811/ferritecore/hash/ArrayVoxelShapeHash.class
+SHA-256-Digest: qAiQ2IGlKrGW35/C+7TiipudlzQRz1wZJQ4x0dCcgRQ=
+
+Name: malte0811/ferritecore/mixin/threaddetec/Config.class
+SHA-256-Digest: fUSkBVI7ykzju94IbcLV+xg2l1+2euKTna/zHMgWZ5g=
+
+Name: malte0811/ferritecore/mixin/modelsides/SimpleBakedModelMixin.class
+SHA-256-Digest: 1loy7c8TF+iZadfUff6lg1wZUrypZjhkOGQCWlsuNYo=
+
+Name: malte0811/ferritecore/hash/DiscreteVSHash.class
+SHA-256-Digest: sKtuyBdQgSOF+DG5zZik5gfe7BTdXQJbrMg1DkxO4ZI=
+
+Name: malte0811/ferritecore/hash/LambdaBasedHash.class
+SHA-256-Digest: nZhbp8+UBSJpYVzu35DXB67X964QNfsSVNGnX3hahs0=
+
+Name: ferritecore.predicates.mixin.json
+SHA-256-Digest: PdmrknCj7l0CddV1RtM7n69ghfPA7f8zU6ky7sCsHTw=
+
+Name: malte0811/ferritecore/mixin/config/FerriteConfig$ConfigBuilder.cla
+ ss
+SHA-256-Digest: 9gMWGS1le3Bdfn1QCHswH1piXrfnfeZmxXeF7Fak0DI=
+
+Name: META-INF/mods.toml
+SHA-256-Digest: vHNa4XgCjunYw87cLp0PAWgkYvCLMLN8mfHHpsK4ZZg=
+
+Name: malte0811/ferritecore/ModMainForge.class
+SHA-256-Digest: 9Zv0zcfKLn/hBFeUmMjfGATw+GwHd8H7Fo1+OXFkyLk=
+
+Name: malte0811/ferritecore/fastmap/immutable/FastMapValueSet.class
+SHA-256-Digest: 4jNJuTzOc+71b4GgiSPcFXDXXmZd+7x9wtLjnqaCoJY=
+
+Name: malte0811/ferritecore/fastmap/immutable/FastMapEntryEntrySet.class
+SHA-256-Digest: lTaMbHM3RQwyZli1isf2UVAomNOoWofRqSklC5VPrJs=
+
+Name: ferritecore.dedupbakedquad.mixin.json
+SHA-256-Digest: ILah5qb3E+IPJ7bR+l4tKhBoTVmzMkE72a1XU5aKIF0=
+
+Name: malte0811/ferritecore/util/SmallThreadingDetector$ThreadRole.class
+SHA-256-Digest: UH3cw1Vbp24pXhRP2SH2dw7thXQIW1XJh87LzIvn5YM=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/Config.class
+SHA-256-Digest: hLb+iCLfM8LjA23bAKbJj49MwH0N4neoeU5vxILf4jU=
+
+Name: malte0811/ferritecore/IPlatformHooks.class
+SHA-256-Digest: aBDEcNJGbvPZQtAeVE7+/wj5J7BNe1C1FydJwzffggM=
+
+Name: malte0811/ferritecore/mixin/config/FerriteMixinConfig$1.class
+SHA-256-Digest: K0LGx+sfAUSWL6OYve7JfqZojjDRGyIfTkoVoD0HQuI=
+
+Name: malte0811/ferritecore/mixin/dedupmultipart/MixinMultipartBuilder.c
+ lass
+SHA-256-Digest: QXlIHIfFbWseNEt3GzodqlufGsgGAigobJjfREWwsto=
+
+Name: malte0811/ferritecore/fastmap/table/FastmapNeighborTable.class
+SHA-256-Digest: Tm0PAWwGW6tPZaR7kOeRZINlSJu3mVwrvH6yEBnPMQw=
+
+Name: malte0811/ferritecore/mixin/fastmap/Config.class
+SHA-256-Digest: gNn+k6/TH5VT2smDc5FOOSG7ZhUR1KfHAXcytAAV9wg=
+
+Name: malte0811/ferritecore/hash/VoxelShapeHash.class
+SHA-256-Digest: 9aobG2DZ2L0He7zintZumh/vrFB3FoOy+TQa7wWhLXM=
+
+Name: malte0811/ferritecore/mixin/predicates/OrConditionMixin.class
+SHA-256-Digest: hJRRWtEynMNpGcpBf43Ejpd+QRL2Me4LKakpzTiUOhA=
+
+Name: logo.png
+SHA-256-Digest: A2wl8V/0e+TNbofFhnSjC0mTNkZcG30SrPLqZ80CYH4=
+
+Name: malte0811/ferritecore/classloading/FastImmutableMapDefiner.class
+SHA-256-Digest: LQyx77Tac/ovFR836EBly18G/RfSMAS7p3rnDiy4e44=
+
+Name: malte0811/ferritecore/impl/BlockStateCacheImpl.class
+SHA-256-Digest: 8XB0BdrfXMwNkRB2Zsxr38t3wPyuwbC6FaCdL730TAE=
+
+Name: ferritecore.mrl.mixin.json
+SHA-256-Digest: wda2ce9+h+Yh3aLugUvdLQkIqyeHpZe5SZU/BeMB0Gs=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer$GenericIndexer.class
+SHA-256-Digest: oGhjjQLotdBN0ewIKJhF4Jc2JdNOVxOwnp/eVcPMfAA=
+
+Name: malte0811/ferritecore/mixin/predicates/KeyValueConditionMixin.clas
+ s
+SHA-256-Digest: NfwwS+VEyEjuDrf2zcuD6DmlrfN71izfBwE6SINO9ns=
+
+Name: malte0811/ferritecore/impl/Deduplicator.class
+SHA-256-Digest: EFh18H8k6gxwHO6aXKQQF+GtZQNNAcM0J+Bl5BC08aE=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer$IntIndexer.class
+SHA-256-Digest: MFV//QbtCgwN8A0ecb6qEind9tkUUBTioukEGOPaStA=
+
+Name: malte0811/ferritecore/mixin/dedupmultipart/MixinMultipartModel.cla
+ ss
+SHA-256-Digest: iKH8a/1CVWDLDaIvKDZ7s21laOsTXLBr2ebrZHjUNvg=
+
+Name: malte0811/ferritecore/fastmap/table/CrashNeighborTable.class
+SHA-256-Digest: UKcKSydBcnZg7bygvAHQOKDFB3dMFb2jW5P50pj7jvo=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer$EnumIndexer.class
+SHA-256-Digest: PKPRpAZgVkRuFubbQqFMi39Jpo9O0RmPetGBUZ49NR0=
+
+Name: malte0811/ferritecore/mixin/config/FerriteConfig$Option.class
+SHA-256-Digest: flzUTwVxfIstUEQPPHa8ebuAuF5/VkNy6rvOabDMaag=
+
+Name: malte0811/ferritecore/fastmap/FastMapKey.class
+SHA-256-Digest: 8hrZ60/uGwmHTd2Vu8w/5S9MK+dexn8IVXcZU5u7ms4=
+
+Name: malte0811/ferritecore/util/SmallThreadingDetector$CrashingState.cl
+ ass
+SHA-256-Digest: 8E+Bqxh9tKGNFjancwjScFuEW6EfJSFGv5hP2pT52BU=
+
+Name: malte0811/ferritecore/fastmap/PropertyIndexer.class
+SHA-256-Digest: jtK7DqZCaDBSO3lHov9D03fV4sF/+So8VXbgwaHnvy0=
+
+Name: malte0811/ferritecore/fastmap/immutable/FastMapEntryEntrySet$1.cla
+ ss
+SHA-256-Digest: dhP4x+DEf3vlTtbgfwXfE0fY0PeSjSpsz8wLIwPjQOM=
+
+Name: malte0811/ferritecore/mixin/modelsides/Config.class
+SHA-256-Digest: X/T/9P2D0crTfNNP5dRwq6kkBej3cCSwV/KmRAEer0c=
+
+Name: malte0811/ferritecore/fastmap/FastMap.class
+SHA-256-Digest: 4K2UJRGhwqSPYuaLf0DDVii2TblkFR/l4XLMYo3HBsE=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/SubShapeAccess.class
+SHA-256-Digest: yEoYU2q4pNyTHSSRvH6WLM3ckndW0AUqi9j2wWzhx0o=
+
+Name: malte0811/ferritecore/fastmap/immutable/FastMapEntryImmutableMap.c
+ lass
+SHA-256-Digest: nSLkLnIVnf1Y91VNFHIQ5ibRWFEEomsiblwuTx+nTxY=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/ArrayVSAccess.class
+SHA-256-Digest: jW8BAEucjShslj8ElpxnPGdyFosA5Wv4qRA8BCNCENk=
+
+Name: roadrunner.overrides.properties
+SHA-256-Digest: hhRWwF7kwSo7jVYG2nDJE1cSNOWPoEBakAanOUiJpMU=
+
+Name: malte0811/ferritecore/classloading/FastImmutableMapDefiner$Definer
+ .class
+SHA-256-Digest: +ppAsUK6kwq9G3WLzM2q+AB2FBIQnOcK/xvl8eSF2wM=
+
+Name: malte0811/ferritecore/mixin/blockstatecache/BlockStateBaseMixin.cl
+ ass
+SHA-256-Digest: ffReZ8q5yuD/jvjSrAnqXQmh9Uw5L50LujnKtuBaAM0=
+
+Name: malte0811/ferritecore/ducks/SmallThreadDetectable.class
+SHA-256-Digest: ZTb+EN2VAVWwBng7uWnxoSbvOKV9qoPNMgNIRbUNmZM=
+
+Name: malte0811/ferritecore/impl/KeyValueConditionImpl.class
+SHA-256-Digest: u3gCnckeslWgJWeVmaxzGBYYrE3B06bRgMiKRyNL7eY=
+
+Name: malte0811/ferritecore/impl/StateHolderImpl.class
+SHA-256-Digest: hZMlzmXHpU8qVgtlO/kxqnyq3CQdIQAH0dXxHOfY1+I=
+
+Name: malte0811/ferritecore/mixin/mrl/ModelResourceLocationMixin.class
+SHA-256-Digest: QdVzgWi3qx1Ox+zUifvnbNjD2RN4pQTO6SEx+SvKA9M=
+
+Name: malte0811/ferritecore/mixin/dedupbakedquad/Config.class
+SHA-256-Digest: yE5LKe8KOrspB5cMKbIc2NCbcEITCyVr+pncFaPVqmo=
+

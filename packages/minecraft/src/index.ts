@@ -61,3 +61,8 @@ export * from "./properties/gameplay.js";
 export * from "./logs/formatting.js";
 export * from "./logs/parse.js";
 export * from "./provision.js";
+
+export * from "./modrinth/index.js";
+export * from "./extensions/metadata.js";
+export * from "./extensions/scan.js";
+export * from "./players/index.js";
