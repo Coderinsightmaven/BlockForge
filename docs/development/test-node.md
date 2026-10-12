@@ -66,3 +66,16 @@ Verified 2026-10-11: tunnel established, remote `127.0.0.1:18080` reached a work
 * **API key** (servers.view + monitoring.view, 127.0.0.1/32, 1 day): `GET /servers` 200; restart → 403 (not granted);
   `/account/api-keys` → 403 (account routes refuse keys); last-used time/IP recorded; after revoke → 401.
 * S3 storage not exercised live (no S3 endpoint for the node yet); covered by MinIO integration tests on the workstation.
+
+### Re-run after the Phase 4a review fixes (2026-10-12, 6dda4da + agent d265046)
+Control plane restarted on the fixed code (migration 0004 applied, agent reconnected).
+* **Backup** of the running Paper 26.3 server: 4.1 s, 151.0 MiB, `save-flush`; console shows the hardened cycle —
+  `Automatic saving is now disabled` (save-off acknowledged) → `Saving the game (this may take a moment!)` →
+  `Saved the game` (accepted only after this save's progress line, `createSaveTracker`) → `Automatic saving is now enabled`.
+* **Restore** while running (marker deleted, junk added): safety backup (locked) → stop → staged truncate restore →
+  start in 32.3 s; marker back, junk gone, server running. Failed backup from the first live attempt kept as `failed`
+  (retention: newest 10 per server, 7 days).
+* **Schedule** (`* * * * *`, two console tasks 5 s apart): cron run succeeded in 5.1 s, both lines in the console.
+* **API key**: `GET /servers` 200, restart 403, `/account/api-keys` 403, last use recorded, revoked → 401.
+* `GET /account/permissions` 200 (52 global permissions for the owner, 2 servers); backups list pagination (`?limit=2`).
+* No error-level lines in the control-plane log during the run.
