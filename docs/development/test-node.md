@@ -29,6 +29,19 @@ Watchtower runs with `--label-enable`, so it only updates containers labelled
 * Ports for BlockForge test servers: **25570–25600** (verified free). Never 25565.
 * Capacity: set node allocatable memory to ≈ 6 GiB — the ATM11 server already uses most of the RAM.
 
+## Deploying a new agent build
+The node has no build tooling for BlockForge; images are built on the workstation and copied over:
+```
+docker compose -f infra/compose/docker-compose.agent.yml build agent          # on the workstation (linux/amd64)
+docker save blockforge/node-agent:dev | gzip | ssh game@10.10.10.240 'gunzip | docker load'
+ssh game@10.10.10.240 'cd ~/blockforge-deploy && docker compose up -d agent'  # recreates blockforge-agent only
+ssh game@10.10.10.240 'docker logs --since 30s blockforge-agent'               # expect "connected to control plane"
+```
+`~/blockforge-deploy` holds the compose file (a copy of `infra/compose/docker-compose.agent.yml`) and `.env`
+(`BF_DATA_ROOT=/home/game/blockforge`, `BF_DOCKER_GID=983`, control-plane URL `http://127.0.0.1:18080`). The agent's
+identity and SFTP host key live in the data root, so re-deploying keeps the enrollment. Workload containers keep running
+across an agent restart. Last deployed: 61669b0 (2026-10-12).
+
 ## Control-plane connectivity (dev)
 The control plane runs on the dev workstation (192.168.10.159). The agent reaches it through an SSH
 reverse tunnel opened from the workstation:
