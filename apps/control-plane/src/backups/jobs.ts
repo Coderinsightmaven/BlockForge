@@ -37,7 +37,10 @@ type Ctx<I> = StepContext<I>;
 export function isSaveConfirmation(line: string): boolean {
   const p = parseLogLine(line);
   if (isChatMessage(p.message)) return false;
-  return /^Saved the (game|world)\b/.test(p.message.trim());
+  // Minecraft 26.x (vanilla and Paper) prefixes console command feedback with "System chat: ".
+  // Player chat starts with "<name>", so a player cannot produce a line with this prefix.
+  const message = p.message.trim().replace(/^System chat: /, "");
+  return /^Saved the (game|world)\b/.test(message);
 }
 
 function wrap(err: unknown, what: string): never {

@@ -15,6 +15,15 @@ describe("Minecraft save confirmation", () => {
     expect(isSaveConfirmation("[12:00:00 INFO]: [Not Secure] <Steve> Saved the game")).toBe(false);
     expect(isSaveConfirmation("Automatic saving is now disabled")).toBe(false);
   });
+
+  it("matches 26.x 'System chat:' feedback captured on the test node (Paper + vanilla), not chat", () => {
+    // Real lines captured 2026-10-12 (packages/minecraft/test/fixtures/console/captured-26.3.json).
+    expect(isSaveConfirmation("[19:33:07 INFO]: System chat: Saved the game")).toBe(true);
+    expect(isSaveConfirmation("[19:35:40] [Server thread/INFO]: System chat: Saved the game")).toBe(true);
+    expect(isSaveConfirmation("[19:35:31 INFO]: System chat: Saving the game (this may take a moment!)")).toBe(false);
+    expect(isSaveConfirmation("[19:35:30 INFO]: System chat: Automatic saving is now disabled")).toBe(false);
+    expect(isSaveConfirmation("[19:35:30 INFO]: <Steve> System chat: Saved the game")).toBe(false);
+  });
 });
 
 describe("S3 multipart plan", () => {
