@@ -200,7 +200,7 @@ export const SftpActivityEvent = z.object({
   actions: z
     .array(
       z.object({
-        action: z.enum(["upload", "write", "delete", "rename", "mkdir", "chmod"]),
+        action: z.enum(["upload", "write", "delete", "rename", "mkdir", "chmod", "utime"]),
         path: z.string().max(1024),
         to: z.string().max(1024).optional(),
         ts: EpochMs,

@@ -100,6 +100,7 @@ export async function buildServerDtos(db: Db, latest: LatestCache, rows: ServerR
       lastStartedAt: r.lastStartedAt?.getTime() ?? null,
       lastCrashAt: r.lastCrashAt?.getTime() ?? null,
       lastExitCode: r.lastExitCode,
+      lastOomKilled: r.lastOomKilled,
       createdAt: r.createdAt.getTime(),
       latest: latest.getWorkload(r.id),
       myPermissions: permissionList(perms),

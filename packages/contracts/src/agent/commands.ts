@@ -20,6 +20,14 @@ const isRootPath = (p: string) => p.split(/[/\\]/).every((seg) => seg === "" || 
 export const MutableRelativePath = RelativePath.refine((p) => !isRootPath(p), "must not target the data root");
 
 const WorkloadRef = z.object({ workloadId: z.uuid() });
+/**
+ * Optional template `fileDenylist` (semantics: `../denylist.ts`). When present the agent refuses
+ * (`PATH_FORBIDDEN`, details `{reason: "denylist"}`) if the requested path OR its symlink-resolved
+ * location inside the sandbox — or, for directories, any entry it would read/copy/archive — is denied.
+ * The control plane sends it for every request made on behalf of non-administrators.
+ */
+const Denylist = z.array(z.string().max(512)).max(256).optional();
+const DenyRef = WorkloadRef.extend({ denylist: Denylist });
 const Empty = z.object({});
 
 export const Checksum = z.object({
@@ -110,7 +118,7 @@ export const AGENT_COMMANDS = {
   },
   "fs.stat": { payload: WorkloadRef.extend({ path: RelativePath }), result: FileEntry },
   "fs.read": {
-    payload: WorkloadRef.extend({ path: RelativePath, maxBytes: z.number().int().min(1).max(5 * 1024 * 1024) }),
+    payload: DenyRef.extend({ path: RelativePath, maxBytes: z.number().int().min(1).max(5 * 1024 * 1024) }),
     result: z.object({
       content: z.string(),
       encoding: z.enum(["utf8", "base64"]),
@@ -120,7 +128,7 @@ export const AGENT_COMMANDS = {
     }),
   },
   "fs.write": {
-    payload: WorkloadRef.extend({
+    payload: DenyRef.extend({
       path: MutableRelativePath,
       content: z.string().max(7 * 1024 * 1024),
       encoding: z.enum(["utf8", "base64"]),
@@ -130,16 +138,16 @@ export const AGENT_COMMANDS = {
     }),
     result: z.object({ sha256: z.string(), size: Bytes }),
   },
-  "fs.mkdir": { payload: WorkloadRef.extend({ path: MutableRelativePath }), result: Empty },
-  "fs.rename": { payload: WorkloadRef.extend({ from: MutableRelativePath, to: MutableRelativePath }), result: Empty },
-  "fs.delete": { payload: WorkloadRef.extend({ path: MutableRelativePath, recursive: z.boolean() }), result: Empty },
+  "fs.mkdir": { payload: DenyRef.extend({ path: MutableRelativePath }), result: Empty },
+  "fs.rename": { payload: DenyRef.extend({ from: MutableRelativePath, to: MutableRelativePath }), result: Empty },
+  "fs.delete": { payload: DenyRef.extend({ path: MutableRelativePath, recursive: z.boolean() }), result: Empty },
   /** Copies a file or directory next to itself ("name copy.ext", "name copy 2.ext", …). */
   "fs.copy": {
-    payload: WorkloadRef.extend({ path: MutableRelativePath }),
+    payload: DenyRef.extend({ path: MutableRelativePath }),
     result: z.object({ path: z.string() }),
   },
   "fs.compress": {
-    payload: WorkloadRef.extend({
+    payload: DenyRef.extend({
       root: RelativePath,
       paths: z.array(MutableRelativePath).min(1).max(1000),
       format: z.enum(["tar.gz", "zip"]),
@@ -151,7 +159,7 @@ export const AGENT_COMMANDS = {
   },
   /** Permission bits only (0–0777); setuid/setgid/sticky are never set. Symlinks are refused. */
   "fs.chmod": {
-    payload: WorkloadRef.extend({ path: MutableRelativePath, mode: z.number().int().min(0).max(0o777) }),
+    payload: DenyRef.extend({ path: MutableRelativePath, mode: z.number().int().min(0).max(0o777) }),
     result: Empty,
   },
   /** Case-insensitive substring match on file/dir names below `path` (no regex), bounded walk. */
@@ -176,7 +184,7 @@ export const AGENT_COMMANDS = {
     }),
   },
   "fs.extract": {
-    payload: WorkloadRef.extend({
+    payload: DenyRef.extend({
       archivePath: MutableRelativePath,
       destPath: RelativePath,
       maxTotalBytes: Bytes.max(64 * 1024 ** 3),
@@ -185,11 +193,11 @@ export const AGENT_COMMANDS = {
     result: z.object({ entries: z.number().int(), bytes: Bytes }),
   },
   "fs.transfer.push": {
-    payload: WorkloadRef.extend({ path: MutableRelativePath, transferId: z.uuid() }),
+    payload: DenyRef.extend({ path: MutableRelativePath, transferId: z.uuid() }),
     result: z.object({ bytes: Bytes, sha256: z.string() }),
   },
   "fs.transfer.pull": {
-    payload: WorkloadRef.extend({ path: MutableRelativePath, transferId: z.uuid(), maxBytes: Bytes }),
+    payload: DenyRef.extend({ path: MutableRelativePath, transferId: z.uuid(), maxBytes: Bytes }),
     result: z.object({ bytes: Bytes, sha256: z.string() }),
   },
   "artifact.fetch": {

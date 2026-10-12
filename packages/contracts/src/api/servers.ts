@@ -76,6 +76,8 @@ export const Server = z.object({
   lastStartedAt: EpochMs.nullable(),
   lastCrashAt: EpochMs.nullable(),
   lastExitCode: z.number().int().nullable(),
+  /** The last exit was an out-of-memory kill of the container. */
+  lastOomKilled: z.boolean(),
   createdAt: EpochMs,
   latest: WorkloadMetricSample.nullable(),
   /** The requesting user's effective permissions on this server (UI gating; the API enforces anyway). */
@@ -313,6 +315,19 @@ export const UpdateServerBuildRequest = z.object({
   restartPolicy: RestartPolicy.optional(),
   startup: z.enum(["manual", "auto"]).optional(),
 });
+
+/**
+ * `Job.error.code` values of server jobs (provision, reinstall, start, restart) besides generic codes:
+ * the control plane classifies a start-up exit from that run's console output.
+ */
+export const SERVER_JOB_ERROR_CODES = {
+  CRASHED: "The server exited during start-up for an unclassified reason",
+  EULA_NOT_ACCEPTED: "The Minecraft EULA has not been accepted (eula.txt)",
+  PORT_BIND_FAILED: "The server could not bind its port (in use or not allowed)",
+  JAVA_VERSION_MISMATCH: "The server needs a newer Java version than the image provides",
+  OOM_KILLED: "The container was killed for exceeding its memory limit",
+  READY_TIMEOUT: "The server did not report ready within the start timeout",
+} as const;
 
 export const ServerActionRequest = z.object({
   action: z.enum(["start", "stop", "restart", "kill"]),
