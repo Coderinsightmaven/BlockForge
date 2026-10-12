@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDown,
   ArrowUp,
@@ -33,7 +33,7 @@ import {
 } from "@/lib/cron";
 import { localTimeZone } from "@/lib/format";
 import { useApiMutation } from "@/lib/mutations";
-import { applyScheduleEvent } from "@/lib/phase4-cache";
+import { applyScheduleEvent, reconcileList, removeScheduleFromCache } from "@/lib/phase4-cache";
 import { qk } from "@/lib/query-keys";
 import { serverActionable, serverCan } from "@/lib/server-permissions";
 import { PatternHelp } from "@/components/common/pattern-help";
@@ -66,10 +66,12 @@ import {
   MAX_TASKS,
   TASK_LABEL,
   draftFromSchedule,
+  firstAllowedTask,
   draftToRequest,
   moveTask,
   newTask,
   reorderTask,
+  scheduleBlockedReason,
   scheduleToRequest,
   taskBlockedReason,
   taskSummary,
@@ -167,20 +169,22 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 function CronPreview({ cron, timezone }: { cron: ScheduleDraft["cron"]; timezone: string }) {
-  const body = useDebounced(
-    useMemo(() => ({ cron, timezone, count: 5 }), [cron, timezone]),
-    400,
-  );
-  const complete = Object.values(body.cron).every((f) => f.trim() !== "") && isValidTimeZone(body.timezone);
+  const current = useMemo(() => ({ cron, timezone, count: 5 }), [cron, timezone]);
+  const body = useDebounced(current, 400);
+  const complete =
+    Object.values(current.cron).every((f) => f.trim() !== "") && isValidTimeZone(current.timezone);
+  // While typing, the debounced request still describes the previous input: never show its runs
+  // (they would be in another zone or for another expression).
+  const settled = JSON.stringify(body) === JSON.stringify(current);
   const q = useQuery({
     queryKey: qk.schedules.preview(body),
     queryFn: ({ signal }) => schedulesApi.preview(body, signal),
-    enabled: complete,
+    enabled: complete && settled,
     staleTime: 30_000,
-    placeholderData: keepPreviousData,
   });
   if (!complete)
     return <p className="text-xs text-muted-foreground">Fill in every field to see the next runs.</p>;
+  if (!settled || q.isPending) return <p className="text-xs text-muted-foreground">Checking…</p>;
   if (q.isError)
     return (
       <p role="alert" className="text-xs text-danger">
@@ -188,7 +192,6 @@ function CronPreview({ cron, timezone }: { cron: ScheduleDraft["cron"]; timezone
       </p>
     );
   const data = q.data;
-  if (!data) return <p className="text-xs text-muted-foreground">Checking…</p>;
   if (!data.valid)
     return (
       <p role="alert" className="text-xs text-danger">
@@ -351,14 +354,17 @@ function ScheduleEditor({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<ScheduleDraft>(() => draftFromSchedule(schedule, server.timezone));
+  const firstAllowed = firstAllowedTask(server);
+  const [draft, setDraft] = useState<ScheduleDraft>(() =>
+    draftFromSchedule(schedule, server.timezone, firstAllowed),
+  );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   useEffect(() => {
     if (!open) return;
-    setDraft(draftFromSchedule(schedule, server.timezone));
+    setDraft(draftFromSchedule(schedule, server.timezone, firstAllowed));
     setErrors({});
-  }, [open, schedule, server.timezone]);
+  }, [open, schedule, server.timezone, firstAllowed]);
   const zones = useMemo(() => timeZones(), []);
   const save = useApiMutation({
     mutationFn: (body: Parameters<typeof schedulesApi.create>[1]) =>
@@ -374,11 +380,11 @@ function ScheduleEditor({
   const set = <K extends keyof ScheduleDraft>(k: K, v: ScheduleDraft[K]) =>
     setDraft((d) => ({ ...d, [k]: v }));
   const setTasks = (tasks: TaskDraft[]) => set("tasks", tasks);
-  const firstAllowed = (["command", "power", "backup"] as const).find(
-    (a) => taskBlockedReason(server, a) === null,
-  );
+  // Saving makes you the schedule's last editor: a task you can't run would fail every time.
+  const blocked = scheduleBlockedReason(server, draft.tasks);
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (blocked) return;
     const { request, errors: next } = draftToRequest(draft);
     setErrors(next);
     if (request) save.mutate(request);
@@ -525,10 +531,19 @@ function ScheduleEditor({
             <Button variant="outline" onClick={onClose} disabled={save.isPending}>
               Cancel
             </Button>
-            <Button type="submit" loading={save.isPending}>
-              {schedule ? "Save schedule" : "Create schedule"}
-            </Button>
+            <Tooltip content={blocked}>
+              <span>
+                <Button type="submit" loading={save.isPending} disabled={blocked !== null}>
+                  {schedule ? "Save schedule" : "Create schedule"}
+                </Button>
+              </span>
+            </Tooltip>
           </DialogFooter>
+          {blocked ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              Saving is disabled: {blocked} Remove or change that task first.
+            </p>
+          ) : null}
         </form>
       </DialogContent>
     </Dialog>
@@ -555,6 +570,8 @@ function RunsDialog({
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,
     enabled: schedule !== null,
+    // Live while a run executes (task statuses change between schedule events).
+    refetchInterval: schedule?.running ? 3_000 : false,
   });
   const runs = q.data?.pages.flatMap((p) => p.items) ?? [];
   const canSeeJobs = serverCan(server, "jobs.view");
@@ -654,7 +671,8 @@ export default function SchedulesTab({ server }: { server: Server }) {
   const [removing, setRemoving] = useState<Schedule | null>(null);
   const q = useQuery({
     queryKey: qk.server(server.id).schedules,
-    queryFn: ({ signal }) => schedulesApi.list(server.id, signal),
+    queryFn: async ({ signal }) =>
+      reconcileList(queryClient, "schedules", server.id, await schedulesApi.list(server.id, signal)),
   });
   const canManage = serverActionable(server, "schedules.manage");
   const toggle = useApiMutation({
@@ -677,9 +695,9 @@ export default function SchedulesTab({ server }: { server: Server }) {
     mutationFn: (s: Schedule) => schedulesApi.remove(server.id, s.id),
     success: "Schedule deleted",
     errorTitle: "Could not delete the schedule",
-    onSuccess: () => {
+    onSuccess: async (_r, s) => {
       setRemoving(null);
-      void queryClient.invalidateQueries({ queryKey: qk.server(server.id).schedules });
+      await removeScheduleFromCache(queryClient, server.id, s.id);
     },
   });
   const schedules = [...(q.data ?? [])].sort((a, b) => a.name.localeCompare(b.name));
@@ -754,13 +772,19 @@ export default function SchedulesTab({ server }: { server: Server }) {
               </dl>
               <div className="flex shrink-0 flex-wrap items-center gap-1">
                 {canManage ? (
-                  <Switch
-                    checked={s.enabled}
-                    aria-label={`${s.enabled ? "Disable" : "Enable"} ${s.name}`}
-                    disabled={toggle.isPending && toggle.variables?.id === s.id}
-                    onCheckedChange={() => toggle.mutate(s)}
-                    className="mr-2"
-                  />
+                  <Tooltip content={scheduleBlockedReason(server, s.tasks)}>
+                    <span className="mr-2 inline-flex">
+                      <Switch
+                        checked={s.enabled}
+                        aria-label={`${s.enabled ? "Disable" : "Enable"} ${s.name}`}
+                        disabled={
+                          (toggle.isPending && toggle.variables?.id === s.id) ||
+                          scheduleBlockedReason(server, s.tasks) !== null
+                        }
+                        onCheckedChange={() => toggle.mutate(s)}
+                      />
+                    </span>
+                  </Tooltip>
                 ) : null}
                 {canManage ? (
                   <Button

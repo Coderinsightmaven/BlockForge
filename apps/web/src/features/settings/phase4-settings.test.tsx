@@ -97,6 +97,23 @@ describe("API keys", () => {
     const calls = routeFetch([
       ["GET", /\/account\/api-keys$/, () => jsonResponse([])],
       [
+        "GET",
+        /\/account\/permissions$/,
+        () =>
+          jsonResponse({
+            global: ["monitoring.view", "settings.manage"],
+            scoped: [],
+            servers: [
+              {
+                serverId: "55555555-5555-4555-8555-555555555555",
+                serverName: "Survival",
+                via: "owner",
+                permissions: ["servers.view", "servers.control"],
+              },
+            ],
+          }),
+      ],
+      [
         "POST",
         /\/account\/api-keys$/,
         () =>
@@ -119,6 +136,8 @@ describe("API keys", () => {
     expect(within(dialog).queryByRole("checkbox", { name: "settings.manage" })).toBeNull();
     await user.click(within(dialog).getByRole("button", { name: "Create key" }));
     expect(within(dialog).getByText(/Choose at least one permission/)).toBeTruthy();
+    // servers.view and servers.control come from owning "Survival".
+    expect(within(dialog).getAllByText("on 1 server")).toHaveLength(2);
     await user.click(within(dialog).getByRole("checkbox", { name: "servers.control" }));
     await user.type(within(dialog).getByLabelText("Allowed IP addresses"), "not-an-ip");
     await user.click(within(dialog).getByRole("button", { name: "Create key" }));
@@ -158,6 +177,21 @@ describe("API keys", () => {
     await waitFor(() => expect(document.body.textContent).not.toContain(SECRET));
   });
 
+  it("offers only role permissions until GET /account/permissions exists (404)", async () => {
+    routeFetch([["GET", /\/account\/api-keys$/, () => jsonResponse([])]]);
+    const user = userEvent.setup();
+    wrap(<ApiKeysCard me={makeMe({ permissions: ["nodes.view", "users.manage"] })} />);
+    await user.click(await screen.findByRole("button", { name: "Create key" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("radio", { name: "Only selected permissions" }));
+    expect(
+      await within(dialog).findByText(/Server permissions from ownership\/subuser grants: coming soon/),
+    ).toBeTruthy();
+    expect(within(dialog).getByRole("checkbox", { name: "nodes.view" })).toBeTruthy();
+    expect(within(dialog).queryByRole("checkbox", { name: "users.manage" })).toBeNull();
+    expect(within(dialog).queryByRole("checkbox", { name: "servers.control" })).toBeNull();
+  });
+
   it("revokes only after confirmation", async () => {
     const calls = routeFetch([
       ["GET", /\/account\/api-keys$/, () => jsonResponse([key()])],
@@ -184,12 +218,22 @@ describe("Backup storage settings", () => {
     accessKeyId: "AKIA123",
   };
   /** `GET/PUT /settings/backups.storage` respond with the generic settings wrapper. */
-  const view = (value: object, secretAccessKeySet: boolean) => ({ key: "backups.storage", value, secretAccessKeySet });
+  const view = (value: object, secretAccessKeySet: boolean) => ({
+    key: "backups.storage",
+    value,
+    secretAccessKeySet,
+  });
 
-  it("keeps the stored secret, tests the saved settings and shows the result as text", async () => {
+  it("keeps a stored secret, tests typed values before saving and forgets a rotated secret", async () => {
+    const ROTATED = "rotated-S3-secret-value";
     const calls = routeFetch([
+      // The real wire shape: secret-free value + flag beside it.
       ["GET", /\/settings\/backups\.storage$/, () => jsonResponse(view(s3, true))],
-      ["PUT", /\/settings\/backups\.storage$/, () => jsonResponse(view({ ...s3, region: "eu-west-1" }, true))],
+      [
+        "PUT",
+        /\/settings\/backups\.storage$/,
+        () => jsonResponse(view({ ...s3, region: "eu-west-1" }, true)),
+      ],
       [
         "POST",
         /\/settings\/backups\.storage\/test$/,
@@ -197,30 +241,73 @@ describe("Backup storage settings", () => {
       ],
     ]);
     const user = userEvent.setup();
-    wrap(<BackupStorageCard />);
+    const qc = wrap(<BackupStorageCard />);
     expect(((await screen.findByLabelText(/^Bucket/)) as HTMLInputElement).value).toBe("bf-backups");
-    const secret = screen.getByLabelText(/^Secret access key/) as HTMLInputElement;
-    expect(secret.value).toBe("");
-    expect(screen.getByText(/Leave blank to keep the stored secret/)).toBeTruthy();
+    const secret = () => screen.getByLabelText(/^Secret access key/) as HTMLInputElement;
+    expect(secret().value).toBe("");
+    expect(screen.getByText(/A secret is stored\. Leave blank to keep it/)).toBeTruthy();
 
+    // Unsaved values are tested as typed; a blank secret means "use the stored one".
+    await user.clear(screen.getByLabelText(/^Region/));
+    await user.type(screen.getByLabelText(/^Region/), "eu-west-1");
     await user.click(screen.getByRole("button", { name: "Test connection" }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("<b>AccessDenied</b>: probe refused");
     expect(alert.querySelector("b")).toBeNull();
+    expect(calls.find((c) => c.url.endsWith("/test"))!.body).toEqual({
+      value: { ...s3, region: "eu-west-1" },
+    });
 
-    await user.clear(screen.getByLabelText(/^Region/));
-    await user.type(screen.getByLabelText(/^Region/), "eu-west-1");
-    expect((screen.getByRole("button", { name: "Test connection" }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    await user.type(secret(), ROTATED);
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    const body = calls.find((c) => c.method === "PUT")!.body as { value: Record<string, unknown> };
-    expect(body).toEqual({ value: { ...s3, region: "eu-west-1" } });
-    expect(body.value).not.toHaveProperty("secretAccessKey");
+    expect(calls.find((c) => c.method === "PUT")!.body).toEqual({
+      value: { ...s3, region: "eu-west-1", secretAccessKey: ROTATED },
+    });
+    // The typed secret is gone from the form, the DOM and every cache once saved.
+    await waitFor(() => expect(secret().value).toBe(""));
+    expect(document.body.innerHTML).not.toContain(ROTATED);
+    await waitFor(() => {
+      const caches = JSON.stringify([
+        qc
+          .getQueryCache()
+          .getAll()
+          .map((q) => q.state.data),
+        qc
+          .getMutationCache()
+          .getAll()
+          .map((m) => [m.state.data, m.state.variables]),
+      ]);
+      expect(caches).not.toContain(ROTATED);
+    });
   });
 
-  it("requires the secret when switching to S3", async () => {
+  it("requires a typed secret when S3 is configured but none is stored", async () => {
+    const calls = routeFetch([
+      ["GET", /\/settings\/backups\.storage$/, () => jsonResponse(view(s3, false))],
+      ["POST", /\/settings\/backups\.storage\/test$/, () => jsonResponse({ ok: true, error: null })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<BackupStorageCard />);
+    await screen.findByLabelText(/^Bucket/);
+    expect(screen.queryByText(/Leave blank/)).toBeNull();
+    const test = screen.getByRole("button", { name: "Test connection" }) as HTMLButtonElement;
+    expect(test.disabled).toBe(true);
+    await user.type(screen.getByLabelText(/^Region/), "x");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.getByText("Enter the secret access key.")).toBeTruthy();
+    expect(calls.some((c) => c.method === "PUT")).toBe(false);
+    await user.type(screen.getByLabelText(/^Secret access key/), "typed");
+    expect(test.disabled).toBe(false);
+    await user.click(test);
+    expect(await screen.findByText("Connection works")).toBeTruthy();
+    expect(
+      (calls.find((c) => c.url.endsWith("/test"))!.body as { value: { secretAccessKey: string } }).value
+        .secretAccessKey,
+    ).toBe("typed");
+  });
+
+  it("requires the secret when switching from local to S3", async () => {
     const calls = routeFetch([
       ["GET", /\/settings\/backups\.storage$/, () => jsonResponse(view({ type: "local" }, false))],
     ]);
@@ -234,7 +321,35 @@ describe("Backup storage settings", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(screen.getByText("Enter the secret access key.")).toBeTruthy();
     expect(calls.some((c) => c.method === "PUT")).toBe(false);
-    expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
+    expect((screen.getByRole("button", { name: "Test connection" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    // Switching back to local discards a typed secret.
+    await user.type(screen.getByLabelText(/^Secret access key/), "abc");
+    await user.click(screen.getByRole("radio", { name: /On the node/ }));
+    await user.click(screen.getByRole("radio", { name: /S3-compatible/ }));
+    expect((screen.getByLabelText(/^Secret access key/) as HTMLInputElement).value).toBe("");
+  });
+
+  it("refuses a response that would carry the secret", async () => {
+    routeFetch([
+      [
+        "GET",
+        /\/settings\/backups\.storage$/,
+        () => jsonResponse(view({ ...s3, secretAccessKey: "LEAKED" }, true)),
+      ],
+    ]);
+    const qc = wrap(<BackupStorageCard />);
+    expect(await screen.findByText("Could not load backup storage")).toBeTruthy();
+    expect(document.body.innerHTML).not.toContain("LEAKED");
+    expect(
+      JSON.stringify(
+        qc
+          .getQueryCache()
+          .getAll()
+          .map((q) => q.state.data),
+      ),
+    ).not.toContain("LEAKED");
   });
 });
 

@@ -14,10 +14,22 @@ import { isApiError } from "./api/errors";
  *    would see one key with two different bodies.
  */
 
-/** True when the request may have been committed even though no success arrived. */
+/** `details.reason` of an idempotency conflict (409): "in_progress" or "key_reused". */
+export function idempotencyConflictReason(err: unknown): string | null {
+  if (!isApiError(err) || err.status !== 409) return null;
+  const d = err.details as { reason?: unknown } | null | undefined;
+  return typeof d?.reason === "string" ? d.reason : null;
+}
+
+/**
+ * True when the request may have been committed even though no success arrived: network errors,
+ * 5xx, and a 409 saying the request with this key is still running ("in_progress" — retrying with
+ * the same key will replay its outcome). "key_reused" (another body under this key) is definitive.
+ */
 export function isUncertainFailure(err: unknown): boolean {
   if (!isApiError(err)) return true;
-  return err.code === "NETWORK_ERROR" || err.status === 0 || err.status >= 500;
+  if (err.code === "NETWORK_ERROR" || err.status === 0 || err.status >= 500) return true;
+  return idempotencyConflictReason(err) === "in_progress";
 }
 
 export type IdempotencyOutcome = { ok: true } | { ok: false; error: unknown };

@@ -122,7 +122,7 @@ describe("useServerRealtime", () => {
 });
 
 describe("useServerRealtime Phase 4 events", () => {
-  it("applies backup/schedule updated and deleted events to the open tabs' lists", () => {
+  it("applies backup/schedule updated and deleted events to the open tabs' lists", async () => {
     const { client, last } = makeClient();
     const qc = new QueryClient();
     qc.setQueryData(qk.servers.detail(SERVER_ID), makeServer());
@@ -151,8 +151,12 @@ describe("useServerRealtime Phase 4 events", () => {
     const updatedSchedule = qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)![0];
     send("schedule.deleted", { serverId: SERVER_ID, scheduleId: makeSchedule().id });
     send("backup.deleted", { serverId: SERVER_ID, backupId: makeBackup().id });
+    // Deletions cancel in-flight list fetches first, so they land a tick later.
+    await vi.waitFor(() => expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)).toEqual([]));
+    await vi.waitFor(() => expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)).toEqual([]));
+    // A late update for a deleted backup does not bring it back.
+    send("backup.updated", makeBackup({ status: "completed" }));
     expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)).toEqual([]);
-    expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)).toEqual([]);
     expect(updatedSchedule).toMatchObject({
       running: true,
       lastRunAt: 5,

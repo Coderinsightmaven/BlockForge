@@ -1,14 +1,20 @@
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
-import { API_KEY_FORBIDDEN_PERMISSIONS, SERVER_OWNER_PERMISSIONS } from "@blockforge/contracts";
+import { describe, expect, it, vi } from "vitest";
+import { API_KEY_FORBIDDEN_PERMISSIONS, BackupStorageSettingsView } from "@blockforge/contracts";
 import type { Backup, Schedule } from "@blockforge/contracts";
 import { SERVER_ID, USER_ID, makeBackup, makeMe, makeSchedule, makeServer } from "@/test/fixtures";
+import { ApiError } from "@/lib/api/errors";
 import { CRON_PRESETS, describeCron, formatInZone, isValidTimeZone, presetFor } from "@/lib/cron";
+import { IdempotencyKeys, idempotencyConflictReason, isUncertainFailure } from "@/lib/idempotency";
 import {
   applyBackupEvent,
   applyScheduleEvent,
+  isTombstoned,
+  markDeleted,
+  reconcileList,
   removeBackupFromCache,
   removeScheduleFromCache,
+  TOMBSTONE_TTL_MS,
 } from "@/lib/phase4-cache";
 import { qk } from "@/lib/query-keys";
 import {
@@ -16,19 +22,28 @@ import {
   canRotate,
   createdByLabel,
   isSafeDownloadUrl,
+  openDownload,
+  restoreAction,
 } from "@/features/servers/tabs/backups-tab";
 import {
   MAX_TASKS,
   draftFromSchedule,
   draftToRequest,
+  firstAllowedTask,
   moveTask,
   newTask,
   reorderTask,
+  scheduleBlockedReason,
   scheduleToRequest,
   taskBlockedReason,
 } from "@/features/servers/tabs/schedule-model";
-import { keyPermissionOptions, parseAllowedIps, usageExample } from "@/features/settings/api-keys";
-import { formFromSettings, storageRequest } from "@/features/settings/backup-storage";
+import {
+  isIpOrCidr,
+  keyPermissionOptions,
+  parseAllowedIps,
+  usageExample,
+} from "@/features/settings/api-keys";
+import { formFromView, storageRequest } from "@/features/settings/backup-storage";
 
 const cron = (minute: string, hour: string, dayOfMonth: string, month: string, dayOfWeek: string) => ({
   minute,
@@ -180,6 +195,36 @@ describe("backups", () => {
     expect(isSafeDownloadUrl("http://bucket.example.com/x", origin)).toBe(false);
     expect(isSafeDownloadUrl("javascript:alert(1)", origin)).toBe(false);
     expect(isSafeDownloadUrl("data:text/html,<b>x</b>", origin)).toBe(false);
+    // Same origin only for transfer tokens; elsewhere only absolute https without credentials.
+    expect(isSafeDownloadUrl("https://panel.example.test/api/v1/transfers/abc", origin)).toBe(true);
+    expect(isSafeDownloadUrl("/settings", origin)).toBe(false);
+    expect(isSafeDownloadUrl("/api/v1/servers", origin)).toBe(false);
+    expect(isSafeDownloadUrl("//evil.example/x", origin)).toBe(false);
+    expect(isSafeDownloadUrl("/\\evil.example/x", origin)).toBe(false);
+    expect(isSafeDownloadUrl("\\\\evil.example/x", origin)).toBe(false);
+    expect(isSafeDownloadUrl("https://user:pass@bucket.example.com/x", origin)).toBe(false);
+    expect(isSafeDownloadUrl("https://user@bucket.example.com/x", origin)).toBe(false);
+    expect(isSafeDownloadUrl("https:bucket.example.com/x", origin)).toBe(false);
+  });
+
+  it("opens downloads in a new context without opener or referrer", () => {
+    let seen: HTMLAnchorElement | null = null;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      seen = this.isConnected ? this : null;
+    });
+    openDownload("https://bucket.example.com/x", "b.tar.gz");
+    click.mockRestore();
+    expect(seen).not.toBeNull();
+    const a = seen! as HTMLAnchorElement;
+    expect([a.target, a.rel, a.referrerPolicy, a.download]).toEqual([
+      "_blank",
+      "noopener noreferrer",
+      "no-referrer",
+      "b.tar.gz",
+    ]);
+    expect(document.querySelector("a[download]")).toBeNull();
   });
 
   it("names who created a backup", () => {
@@ -194,7 +239,7 @@ describe("backups", () => {
     expect(createdByLabel(scheduled, me)).toBe("A schedule");
   });
 
-  it("live events update cached lists only", () => {
+  it("live events update cached lists only", async () => {
     const qc = new QueryClient();
     applyBackupEvent(qc, makeBackup());
     expect(qc.getQueryData(qk.server(SERVER_ID).backups)).toBeUndefined();
@@ -210,8 +255,8 @@ describe("backups", () => {
     qc.setQueryData<Schedule[]>(qk.server(SERVER_ID).schedules, [makeSchedule()]);
     applyScheduleEvent(qc, makeSchedule({ running: true }));
     expect(qc.getQueryData<Schedule[]>(qk.server(SERVER_ID).schedules)![0]!.running).toBe(true);
-    removeBackupFromCache(qc, SERVER_ID, older.id);
-    removeScheduleFromCache(qc, SERVER_ID, makeSchedule().id);
+    await removeBackupFromCache(qc, SERVER_ID, older.id);
+    await removeScheduleFromCache(qc, SERVER_ID, makeSchedule().id);
     expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)!.map((b) => b.id)).toEqual([
       makeBackup().id,
     ]);
@@ -220,21 +265,43 @@ describe("backups", () => {
 });
 
 describe("API keys", () => {
-  it("offers the user's own permissions, never the forbidden ones", () => {
+  it("offers only permissions the user holds, never the forbidden ones", () => {
     const me = makeMe({ permissions: ["settings.manage", "users.manage", "nodes.view", "monitoring.view"] });
-    const opts = keyPermissionOptions({
-      ...me,
-      scopedPermissions: [{ scopeType: "node", scopeId: makeServer().nodeId, permissions: ["nodes.manage"] }],
+    const roleOnly = keyPermissionOptions({
+      global: me.globalPermissions,
+      scoped: [{ scopeType: "node", scopeId: makeServer().nodeId, permissions: ["nodes.manage"] }],
     });
-    const perms = opts.map((o) => o.permission);
+    const perms = roleOnly.map((o) => o.permission);
     for (const f of API_KEY_FORBIDDEN_PERMISSIONS) expect(perms).not.toContain(f);
-    expect(opts.find((o) => o.permission === "nodes.view")?.where).toBe("global");
-    expect(opts.find((o) => o.permission === "nodes.manage")?.where).toBe("scoped");
-    // Owners/server users act through per-server permissions.
-    expect(opts.find((o) => o.permission === "servers.control")?.where).toBe("servers");
-    expect(perms).not.toContain("nodes.enroll");
-    expect(perms).toEqual([...perms].sort());
-    expect(perms.length).toBeGreaterThanOrEqual(SERVER_OWNER_PERMISSIONS.length);
+    expect(perms).toEqual(["monitoring.view", "nodes.manage", "nodes.view"]);
+    expect(roleOnly.find((o) => o.permission === "nodes.manage")?.where).toBe("scoped");
+    // Without GET /account/permissions nothing server-level is invented.
+    expect(perms).not.toContain("servers.control");
+
+    const withServers = keyPermissionOptions({
+      global: ["monitoring.view"],
+      scoped: [],
+      servers: [
+        {
+          serverId: SERVER_ID,
+          serverName: "Survival",
+          via: "owner",
+          permissions: ["servers.control", "servers.view"],
+        },
+        {
+          serverId: "44444444-4444-4444-8444-444444444444",
+          serverName: "Creative",
+          via: "subuser",
+          permissions: ["servers.control"],
+        },
+      ],
+    });
+    expect(withServers.find((o) => o.permission === "servers.control")).toEqual({
+      permission: "servers.control",
+      where: "servers",
+      serverNames: ["Survival", "Creative"],
+    });
+    expect(withServers.find((o) => o.permission === "monitoring.view")?.where).toBe("global");
   });
   it("validates IP and CIDR lines", () => {
     expect(parseAllowedIps("203.0.113.7\n\n10.0.0.0/8\n2001:db8::/32")).toEqual({
@@ -242,6 +309,20 @@ describe("API keys", () => {
       invalid: [],
     });
     expect(parseAllowedIps("example.com\n1.2.3.4/x").invalid).toEqual(["example.com", "1.2.3.4/x"]);
+    // Same rules as the control plane: the address must parse and the prefix fit the family.
+    for (const ok of ["0.0.0.0/0", "10.0.0.0/32", "::/0", "2001:db8::1/128", "::ffff:10.0.0.1/24", "fe80::1"])
+      expect(isIpOrCidr(ok), ok).toBe(true);
+    for (const bad of [
+      "300.1.1.1",
+      "10.0.0.0/33",
+      "2001:db8::/129",
+      "1.2.3",
+      "01.2.3.4",
+      "1:2:3",
+      "::ffff:10.0.0.1/33",
+      "10.0.0.0/8/8",
+    ])
+      expect(isIpOrCidr(bad), bad).toBe(false);
   });
   it("shows a bearer-token usage example", () => {
     expect(usageExample("bfk_x", "https://panel.example.test")).toBe(
@@ -260,26 +341,125 @@ describe("backup storage form", () => {
     forcePathStyle: true,
     accessKeyId: "AKIA123",
   };
-  it("requires the secret only when S3 is new, and never echoes it", () => {
-    const form = formFromSettings(s3);
+  const view = (secretAccessKeySet: boolean, value: typeof s3 | { type: "local" } = s3) => ({
+    key: "backups.storage" as const,
+    value,
+    secretAccessKeySet,
+  });
+  it("requires a typed secret whenever none is stored, and never echoes one", () => {
+    const form = formFromView(view(true));
     expect(form.secretAccessKey).toBe("");
-    expect(storageRequest(form, "s3")).toEqual({ body: s3, errors: {} });
-    expect(storageRequest(form, "local").errors.secretAccessKey).toBeTruthy();
-    expect(storageRequest({ ...form, secretAccessKey: "  s3cr3t " }, "local").body).toEqual({
+    expect(storageRequest(form, true)).toEqual({ body: s3, errors: {} });
+    expect(storageRequest(form, false).errors.secretAccessKey).toBeTruthy();
+    // Switching from local: nothing stored yet.
+    const fromLocal = { ...formFromView(view(false, { type: "local" })), ...s3, secretAccessKey: "" };
+    expect(storageRequest(fromLocal, false).body).toBeNull();
+    expect(storageRequest({ ...fromLocal, secretAccessKey: "  s3cr3t " }, false).body).toEqual({
       ...s3,
       secretAccessKey: "s3cr3t",
     });
   });
   it("rejects plain-HTTP endpoints and short bucket names", () => {
     const { body, errors } = storageRequest(
-      { ...formFromSettings(s3), endpoint: "http://s3.example.test", bucket: "x" },
-      "s3",
+      { ...formFromView(view(true)), endpoint: "http://s3.example.test", bucket: "x" },
+      true,
     );
     expect(body).toBeNull();
     expect(Object.keys(errors).sort()).toEqual(["bucket", "endpoint"]);
-    expect(storageRequest(formFromSettings({ type: "local" }), "s3")).toEqual({
+    expect(storageRequest(formFromView(view(false, { type: "local" })), false)).toEqual({
       body: { type: "local" },
       errors: {},
     });
+  });
+  it("the read schema refuses a response that carries the secret", () => {
+    expect(BackupStorageSettingsView.safeParse(view(true)).success).toBe(true);
+    expect(
+      BackupStorageSettingsView.safeParse({ ...view(true), value: { ...s3, secretAccessKey: "leak" } })
+        .success,
+    ).toBe(false);
+  });
+});
+
+describe("idempotency conflicts", () => {
+  const conflict = (reason: string) =>
+    new ApiError({ code: "CONFLICT", message: "busy", status: 409, details: { reason } });
+  it("keeps the key while the first request is still in progress; key reuse is final", () => {
+    expect(idempotencyConflictReason(conflict("in_progress"))).toBe("in_progress");
+    expect(isUncertainFailure(conflict("in_progress"))).toBe(true);
+    expect(isUncertainFailure(conflict("key_reused"))).toBe(false);
+    expect(isUncertainFailure(new ApiError({ code: "CONFLICT", message: "locked", status: 409 }))).toBe(
+      false,
+    );
+    const keys = new IdempotencyKeys<"restore">(() => "k");
+    keys.sent("restore");
+    keys.settle("restore", { ok: false, error: conflict("in_progress") });
+    expect(keys.isLocked("restore")).toBe(true);
+    keys.settle("restore", { ok: false, error: conflict("key_reused") });
+    expect(keys.isLocked("restore")).toBe(false);
+  });
+  it("restore keys depend on the backup and every option", () => {
+    const o = { truncate: false, safetyBackup: true, startAfter: true };
+    expect(restoreAction("b1", o)).toBe(restoreAction("b1", { ...o }));
+    expect(
+      new Set([
+        restoreAction("b1", o),
+        restoreAction("b2", o),
+        restoreAction("b1", { ...o, truncate: true }),
+        restoreAction("b1", { ...o, safetyBackup: false }),
+        restoreAction("b1", { ...o, startAfter: false }),
+      ]).size,
+    ).toBe(5);
+  });
+});
+
+describe("deleted rows stay deleted", () => {
+  it("tombstones hide rows from in-flight fetches and late updates until a fetch omits them", async () => {
+    const qc = new QueryClient();
+    const a = makeBackup({ id: "a0000000-0000-4000-8000-000000000001" });
+    const b = makeBackup({ id: "a0000000-0000-4000-8000-000000000002", createdAt: 1 });
+    qc.setQueryData<Backup[]>(qk.server(SERVER_ID).backups, [a, b]);
+    await markDeleted(qc, "backups", SERVER_ID, a.id, 1_000);
+    expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)!.map((x) => x.id)).toEqual([b.id]);
+    // A late update for the deleted row is ignored; the counter can't see it.
+    applyBackupEvent(qc, { ...a, status: "completed" });
+    expect(qc.getQueryData<Backup[]>(qk.server(SERVER_ID).backups)!.map((x) => x.id)).toEqual([b.id]);
+    // A fetch that predates the delete still returns it: filtered, tombstone kept.
+    expect(reconcileList(qc, "backups", SERVER_ID, [a, b], 2_000).map((x) => x.id)).toEqual([b.id]);
+    expect(isTombstoned(qc, "backups", SERVER_ID, a.id)).toBe(true);
+    // Once a fetch omits it, the tombstone is gone.
+    expect(reconcileList(qc, "backups", SERVER_ID, [b], 3_000)).toEqual([b]);
+    expect(isTombstoned(qc, "backups", SERVER_ID, a.id)).toBe(false);
+    // Safety valve: a delete that never happened shows the row again after the TTL.
+    await markDeleted(qc, "schedules", SERVER_ID, makeSchedule().id, 0);
+    expect(reconcileList(qc, "schedules", SERVER_ID, [makeSchedule()], 1)).toEqual([]);
+    expect(reconcileList(qc, "schedules", SERVER_ID, [makeSchedule()], TOMBSTONE_TTL_MS + 1)).toHaveLength(1);
+  });
+  it("cancels a list fetch that is in flight when a delete arrives", async () => {
+    const qc = new QueryClient();
+    let resolve: (v: Backup[]) => void = () => {};
+    const fetching = qc.fetchQuery({
+      queryKey: qk.server(SERVER_ID).backups,
+      queryFn: () => new Promise<Backup[]>((r) => (resolve = r)),
+    });
+    await markDeleted(qc, "backups", SERVER_ID, makeBackup().id);
+    resolve([makeBackup()]);
+    await expect(fetching).rejects.toBeTruthy();
+    expect(qc.getQueryData(qk.server(SERVER_ID).backups)).toBeUndefined();
+  });
+});
+
+describe("schedule task permissions", () => {
+  it("picks the first runnable task type and blocks saving schedules with tasks the user can't run", () => {
+    const consoleOnly = makeServer({
+      myPermissions: ["servers.view", "schedules.manage", "servers.console.send"],
+    });
+    const powerOnly = makeServer({ myPermissions: ["servers.view", "schedules.manage", "servers.control"] });
+    expect(firstAllowedTask(consoleOnly)).toBe("command");
+    expect(firstAllowedTask(powerOnly)).toBe("power");
+    expect(firstAllowedTask(makeServer({ myPermissions: ["servers.view", "schedules.manage"] }))).toBeNull();
+    expect(draftFromSchedule(null, "UTC", "power").tasks.map((t) => t.action)).toEqual(["power"]);
+    expect(draftFromSchedule(null, "UTC", null).tasks).toEqual([]);
+    expect(scheduleBlockedReason(consoleOnly, makeSchedule().tasks)).toMatch(/^Task 2: .*servers\.control/);
+    expect(scheduleBlockedReason(makeServer(), makeSchedule().tasks)).toBeNull();
   });
 });

@@ -66,6 +66,7 @@ export const qk = {
   account: {
     sshKeys: ["account", "ssh-keys"] as const,
     apiKeys: ["account", "api-keys"] as const,
+    permissions: ["account", "permissions"] as const,
   },
   settings: {
     backupStorage: ["settings", "backups.storage"] as const,

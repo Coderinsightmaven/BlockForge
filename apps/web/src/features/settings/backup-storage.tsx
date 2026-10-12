@@ -3,6 +3,8 @@ import { CircleCheck, PlugZap } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { BackupStorageSettings } from "@blockforge/contracts";
+import type { BackupStorageSettingsView } from "@blockforge/contracts";
+import type { z } from "zod";
 import { backupStorageApi } from "@/lib/api/phase4-api";
 import type { BackupStorageTestResult } from "@/lib/api/phase4-api";
 import { fieldErrorsFrom } from "@/lib/api/errors";
@@ -30,33 +32,39 @@ export interface StorageForm {
   secretAccessKey: string;
 }
 
-export function formFromSettings(s: BackupStorageSettings | undefined): StorageForm {
-  const empty: StorageForm = {
-    type: "local",
-    endpoint: "",
-    region: "",
-    bucket: "",
-    prefix: "blockforge/",
-    forcePathStyle: false,
-    accessKeyId: "",
-    secretAccessKey: "",
-  };
-  if (!s || s.type === "local") return empty;
-  return { ...empty, ...s, type: "s3", secretAccessKey: "" };
+export type StorageView = z.infer<typeof BackupStorageSettingsView>;
+
+const EMPTY_FORM: StorageForm = {
+  type: "local",
+  endpoint: "",
+  region: "",
+  bucket: "",
+  prefix: "blockforge/",
+  forcePathStyle: false,
+  accessKeyId: "",
+  secretAccessKey: "",
+};
+
+/** Form state from the secret-free read shape; the secret field always starts empty. */
+export function formFromView(view: StorageView | undefined): StorageForm {
+  const v = view?.value;
+  if (!v || v.type === "local") return { ...EMPTY_FORM };
+  return { ...EMPTY_FORM, ...v, type: "s3", secretAccessKey: "" };
 }
 
 /**
- * Build the PUT body. The secret is sent only when typed; it is required when S3 is being set up
- * for the first time (no stored secret to keep).
+ * Validate the form into a `BackupStorageSettings` value. The secret is sent only when typed, and
+ * must be typed whenever S3 is selected but no secret is stored yet (`secretAccessKeySet` false —
+ * also right after switching from local).
  */
 export function storageRequest(
   form: StorageForm,
-  storedType: "local" | "s3" | null,
+  secretAccessKeySet: boolean,
 ): { body: BackupStorageSettings | null; errors: Record<string, string> } {
   if (form.type === "local") return { body: { type: "local" }, errors: {} };
   const errors: Record<string, string> = {};
   const secret = form.secretAccessKey.trim();
-  if (!secret && storedType !== "s3") errors.secretAccessKey = "Enter the secret access key.";
+  if (!secret && !secretAccessKeySet) errors.secretAccessKey = "Enter the secret access key.";
   const parsed = BackupStorageSettings.safeParse({
     type: "s3",
     endpoint: form.endpoint.trim(),
@@ -81,21 +89,26 @@ export function storageRequest(
   return { body: parsed.success && Object.keys(errors).length === 0 ? parsed.data : null, errors };
 }
 
+const withoutSecret = (f: StorageForm) => ({ ...f, secretAccessKey: "" });
+
 export default function BackupStorageCard() {
   const queryClient = useQueryClient();
+  // The view keeps `secretAccessKeySet` next to the secret-free value (strict schema: a response
+  // that carried the secret would be rejected, so it can never land in the cache).
   const q = useQuery({
     queryKey: qk.settings.backupStorage,
-    queryFn: ({ signal }) => backupStorageApi.get(signal),
+    queryFn: ({ signal }) => backupStorageApi.view(signal),
   });
-  const [form, setForm] = useState<StorageForm>(() => formFromSettings(undefined));
+  const [form, setForm] = useState<StorageForm>(() => formFromView(undefined));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [result, setResult] = useState<BackupStorageTestResult | null>(null);
   useEffect(() => {
-    if (q.data) setForm(formFromSettings(q.data));
+    if (q.data) setForm(formFromView(q.data));
   }, [q.data]);
-  const storedType = q.data?.type ?? null;
-  const saved = formFromSettings(q.data);
+  const secretSet = q.data?.secretAccessKeySet ?? false;
+  const saved = formFromView(q.data);
   const dirty = JSON.stringify(form) !== JSON.stringify(saved);
+  const valid = storageRequest(form, secretSet).body !== null;
   const save = useApiMutation({
     mutationFn: (body: BackupStorageSettings) => backupStorageApi.put(body),
     success: "Backup storage saved",
@@ -103,25 +116,38 @@ export default function BackupStorageCard() {
     // The request may carry the S3 secret.
     sensitive: true,
     onError: (err) => setErrors(fieldErrorsFrom(err)),
-    onSuccess: async () => {
+    onSuccess: async (view) => {
+      // Drop the typed secret first; the stored one is only ever reported as a flag.
+      setForm(withoutSecret);
       setResult(null);
+      if (view) queryClient.setQueryData(qk.settings.backupStorage, view);
       await queryClient.invalidateQueries({ queryKey: qk.settings.backupStorage });
     },
   });
   const test = useApiMutation({
-    mutationFn: () => backupStorageApi.test(),
+    // Tests the values as typed (unsaved credentials included); a blank secret uses the stored one.
+    mutationFn: (value: BackupStorageSettings) => backupStorageApi.test(value),
     errorTitle: "Could not run the connection test",
+    sensitive: true,
     onSuccess: (r) => setResult(r),
   });
   const set = <K extends keyof StorageForm>(k: K, v: StorageForm[K]) => {
-    setForm((f) => ({ ...f, [k]: v }));
+    // Switching to local storage discards a typed secret.
+    setForm((f) =>
+      k === "type" && v === "local" ? { ...withoutSecret(f), type: "local" } : { ...f, [k]: v },
+    );
     setResult(null);
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    const { body, errors: next } = storageRequest(form, storedType);
+    const { body, errors: next } = storageRequest(form, secretSet);
     setErrors(next);
     if (body) save.mutate(body);
+  };
+  const runTest = () => {
+    const { body, errors: next } = storageRequest(form, secretSet);
+    setErrors(next);
+    if (body) test.mutate(body);
   };
   if (q.isPending)
     return (
@@ -240,10 +266,10 @@ export default function BackupStorageCard() {
               <Field
                 label="Secret access key"
                 error={errors.secretAccessKey}
-                required={storedType !== "s3"}
+                required={!secretSet}
                 hint={
-                  storedType === "s3"
-                    ? "Leave blank to keep the stored secret. It is never shown again."
+                  secretSet
+                    ? "A secret is stored. Leave blank to keep it; it is never shown again."
                     : "Stored encrypted; never shown again."
                 }
               >
@@ -261,20 +287,20 @@ export default function BackupStorageCard() {
             <Button type="submit" loading={save.isPending} disabled={!dirty}>
               Save
             </Button>
-            {storedType === "s3" ? (
+            {form.type === "s3" ? (
               <Button
                 variant="outline"
                 loading={test.isPending}
-                disabled={dirty}
-                title={dirty ? "Save your changes first — the test uses the saved settings." : undefined}
-                onClick={() => test.mutate()}
+                disabled={!valid}
+                title={valid ? undefined : "Fill in the S3 settings first."}
+                onClick={runTest}
               >
                 <PlugZap aria-hidden />
                 Test connection
               </Button>
             ) : null}
-            {dirty && storedType === "s3" ? (
-              <span className="text-xs text-muted-foreground">The test uses the saved settings.</span>
+            {form.type === "s3" && dirty ? (
+              <span className="text-xs text-muted-foreground">Tests the values above, before saving.</span>
             ) : null}
           </div>
           {result ? (

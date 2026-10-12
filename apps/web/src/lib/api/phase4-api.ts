@@ -1,4 +1,5 @@
 import {
+  AccountPermissions,
   ApiKey,
   Backup,
   BackupStorageSettingsView,
@@ -18,8 +19,8 @@ import type {
   CronPreviewRequest,
   RestoreBackupRequest,
   UpsertScheduleRequest,
-
-  BackupStorageSettings} from "@blockforge/contracts";
+  BackupStorageSettings,
+} from "@blockforge/contracts";
 import { z } from "zod";
 import { apiClient } from "./client";
 
@@ -53,8 +54,18 @@ export const backupsApi = {
     apiClient.get(`/servers/${enc(serverId)}/backups/${enc(backupId)}/download`, {
       schema: TransferUrlResponse,
     }),
-  restore: (serverId: string, backupId: string, body: In<typeof RestoreBackupRequest>) =>
-    apiClient.post(`/servers/${enc(serverId)}/backups/${enc(backupId)}/restore`, { body, schema: JobRef }),
+  /** Idempotent: a retry with the same key replays the first outcome instead of restoring twice. */
+  restore: (
+    serverId: string,
+    backupId: string,
+    body: In<typeof RestoreBackupRequest>,
+    idempotencyKey: string,
+  ) =>
+    apiClient.post(`/servers/${enc(serverId)}/backups/${enc(backupId)}/restore`, {
+      body,
+      schema: JobRef,
+      idempotencyKey,
+    }),
 };
 
 export const schedulesApi = {
@@ -84,6 +95,9 @@ export const schedulesApi = {
 };
 
 export const apiKeysApi = {
+  /** Everything the user holds (roles, ownership, subuser grants) — for the key permission picker. */
+  permissions: (signal?: AbortSignal) =>
+    apiClient.get("/account/permissions", { schema: AccountPermissions, signal }),
   list: (signal?: AbortSignal) => apiClient.get("/account/api-keys", { schema: z.array(ApiKey), signal }),
   /** The response carries the secret once: call through a `sensitive` mutation only. */
   create: (body: In<typeof CreateApiKeyRequest>) =>
@@ -95,9 +109,9 @@ export const backupStorageApi = {
   /** The S3 secret is write-only and never part of this response (only `secretAccessKeySet`). */
   view: (signal?: AbortSignal) =>
     apiClient.get("/settings/backups.storage", { schema: BackupStorageSettingsView, signal }),
-  get: async (signal?: AbortSignal) => (await backupStorageApi.view(signal)).value,
-  put: async (body: In<typeof BackupStorageSettings>) =>
-    (await apiClient.put("/settings/backups.storage", { body: { value: body }, schema: BackupStorageSettingsView })).value,
+  /** Returns the saved view (flag included) so callers never need the secret again. */
+  put: (value: In<typeof BackupStorageSettings>) =>
+    apiClient.put("/settings/backups.storage", { body: { value }, schema: BackupStorageSettingsView }),
   /** Tests the saved configuration, or `value` when given (HEAD bucket + put/delete a probe object). */
   test: (value?: In<typeof BackupStorageSettings>) =>
     apiClient.post("/settings/backups.storage/test", {

@@ -69,12 +69,12 @@ export function useServerRealtime(serverId: string, enabled: boolean): void {
     } else if (event.type === "backup.deleted") {
       const parsed = REALTIME_EVENT_PAYLOADS["backup.deleted"].safeParse(event.data);
       if (parsed.success && parsed.data.serverId === serverId)
-        removeBackupFromCache(queryClient, serverId, parsed.data.backupId);
+        void removeBackupFromCache(queryClient, serverId, parsed.data.backupId);
       else invalidateBackups();
     } else if (event.type === "schedule.deleted") {
       const parsed = REALTIME_EVENT_PAYLOADS["schedule.deleted"].safeParse(event.data);
       if (parsed.success && parsed.data.serverId === serverId)
-        removeScheduleFromCache(queryClient, serverId, parsed.data.scheduleId);
+        void removeScheduleFromCache(queryClient, serverId, parsed.data.scheduleId);
       else invalidateSchedules();
     }
   });

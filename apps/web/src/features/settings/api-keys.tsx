@@ -2,14 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { KeyRound, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
-import {
-  API_KEY_FORBIDDEN_PERMISSIONS,
-  CreateApiKeyRequest,
-  SUBUSER_ASSIGNABLE_PERMISSIONS,
-} from "@blockforge/contracts";
-import type { ApiKey, Me, Permission } from "@blockforge/contracts";
+import { API_KEY_FORBIDDEN_PERMISSIONS, CreateApiKeyRequest } from "@blockforge/contracts";
+import type { AccountPermissions, ApiKey, Me, Permission } from "@blockforge/contracts";
 import { apiKeysApi } from "@/lib/api/phase4-api";
-import { describeError } from "@/lib/api/errors";
+import { describeError, isApiError } from "@/lib/api/errors";
 import { useApiMutation } from "@/lib/mutations";
 import { qk } from "@/lib/query-keys";
 import { linesToList } from "@/components/common/pattern-help";
@@ -40,30 +36,64 @@ import { Textarea } from "@/components/ui/textarea";
 // Pure helpers (tested)
 
 const FORBIDDEN = new Set<string>(API_KEY_FORBIDDEN_PERMISSIONS);
-const IP_OR_CIDR = /^[0-9a-fA-F.:]+(\/\d{1,3})?$/;
 
 export interface KeyPermissionOption {
   permission: Permission;
   /** Where the user holds it: everywhere, on some nodes/networks/servers, or as a server owner/user. */
   where: "global" | "scoped" | "servers";
+  /** For `servers`: the servers that grant it (ownership or subuser grant). */
+  serverNames?: string[];
+}
+
+/** What the picker is built from: `GET /account/permissions`, or Me's role grants as a fallback. */
+export type HeldPermissions = Pick<AccountPermissions, "global" | "scoped"> &
+  Partial<Pick<AccountPermissions, "servers">>;
+
+/**
+ * Permissions a key may be limited to — only what the user actually holds (global and scoped role
+ * grants, plus owner/subuser server permissions when known), never the ones keys can't exercise.
+ * The key's effective rights are re-intersected with the user's permissions on every request.
+ */
+export function keyPermissionOptions(held: HeldPermissions): KeyPermissionOption[] {
+  const out = new Map<Permission, KeyPermissionOption>();
+  for (const srv of held.servers ?? []) {
+    for (const p of srv.permissions) {
+      const o = out.get(p) ?? { permission: p, where: "servers" as const, serverNames: [] };
+      o.serverNames!.push(srv.serverName);
+      out.set(p, o);
+    }
+  }
+  for (const s of held.scoped) for (const p of s.permissions) out.set(p, { permission: p, where: "scoped" });
+  for (const p of held.global) out.set(p, { permission: p, where: "global" });
+  return [...out.values()]
+    .filter((o) => !FORBIDDEN.has(o.permission))
+    .sort((a, b) => a.permission.localeCompare(b.permission));
 }
 
 /**
- * Permissions a key may be limited to: what the user holds (global grants, scoped role grants, and
- * the per-server permissions owners and server users get), never the ones keys can't exercise.
- * The key's effective rights are always re-intersected with the user's current permissions.
+ * IP or CIDR, with the control plane's rules: the address must parse (IPv4 dotted decimal without
+ * leading zeros, or IPv6; `::ffff:a.b.c.d` counts as IPv4), prefix ≤ 32 (IPv4) or ≤ 128 (IPv6).
  */
-export function keyPermissionOptions(
-  me: Pick<Me, "globalPermissions" | "scopedPermissions">,
-): KeyPermissionOption[] {
-  const out = new Map<Permission, KeyPermissionOption["where"]>();
-  for (const p of SUBUSER_ASSIGNABLE_PERMISSIONS) out.set(p, "servers");
-  for (const s of me.scopedPermissions) for (const p of s.permissions) out.set(p, "scoped");
-  for (const p of me.globalPermissions) out.set(p, "global");
-  return [...out]
-    .filter(([p]) => !FORBIDDEN.has(p))
-    .map(([permission, where]) => ({ permission, where }))
-    .sort((a, b) => a.permission.localeCompare(b.permission));
+const IPV4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/;
+
+function isIpv6(addr: string): boolean {
+  if (!addr.includes(":") || !/^[0-9a-fA-F:.]+$/.test(addr)) return false;
+  try {
+    // The WHATWG URL parser implements the full IPv6 grammar (compression, embedded IPv4).
+    return new URL(`http://[${addr}]/`).hostname.length > 2;
+  } catch {
+    return false;
+  }
+}
+
+export function isIpOrCidr(entry: string): boolean {
+  const m = /^([^/]+)(?:\/(\d{1,3}))?$/.exec(entry.trim());
+  if (!m) return false;
+  const addr = m[1]!;
+  const mapped = addr.toLowerCase().startsWith("::ffff:") && IPV4.test(addr.slice(7));
+  const max = IPV4.test(addr) || mapped ? 32 : isIpv6(addr) ? 128 : null;
+  if (max === null) return false;
+  return m[2] === undefined || Number(m[2]) <= max;
 }
 
 /** "servers.files.read" → "servers"; groups the picker. */
@@ -82,7 +112,7 @@ export type ExpiryPreset = (typeof EXPIRY_PRESETS)[number]["value"];
 /** IP/CIDR lines → list, with the lines that are not valid. */
 export function parseAllowedIps(text: string): { ips: string[]; invalid: string[] } {
   const ips = linesToList(text);
-  return { ips, invalid: ips.filter((ip) => !IP_OR_CIDR.test(ip)) };
+  return { ips, invalid: ips.filter((ip) => !isIpOrCidr(ip)) };
 }
 
 export function usageExample(secret: string, origin = window.location.origin): string {
@@ -103,7 +133,20 @@ function CreateKeyDialog({
   onOpenChange: (o: boolean) => void;
   onCreated: (secret: string, key: ApiKey) => void;
 }) {
-  const options = useMemo(() => keyPermissionOptions(me), [me]);
+  // Server permissions from ownership/subuser grants come from GET /account/permissions; until the
+  // control plane serves it (404), only role grants from the session are offered.
+  const held = useQuery({
+    queryKey: qk.account.permissions,
+    queryFn: ({ signal }) => apiKeysApi.permissions(signal),
+    enabled: open,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const fallback = isApiError(held.error) && held.error.status === 404;
+  const options = useMemo(
+    () => keyPermissionOptions(held.data ?? { global: me.globalPermissions, scoped: me.scopedPermissions }),
+    [held.data, me],
+  );
   const areas = useMemo(() => {
     const m = new Map<string, KeyPermissionOption[]>();
     for (const o of options)
@@ -203,7 +246,27 @@ function CreateKeyDialog({
                 {errors.permissions}
               </p>
             ) : null}
-            {!all ? (
+            {!all && fallback ? (
+              <p className="text-xs text-muted-foreground">
+                Server permissions from ownership/subuser grants: coming soon. Until then this list shows the
+                permissions your roles give you; “All my permissions” includes your servers.
+              </p>
+            ) : null}
+            {!all && held.isError && !fallback ? (
+              <p role="alert" className="text-xs text-danger">
+                Could not load your permissions: {describeError(held.error).title}. Showing your role grants
+                only.
+              </p>
+            ) : null}
+            {!all && held.isPending && open ? (
+              <p className="text-xs text-muted-foreground">Loading your permissions…</p>
+            ) : null}
+            {!all && options.length === 0 && !held.isPending ? (
+              <p className="text-xs text-muted-foreground">
+                No permissions to choose from — use “All my permissions”.
+              </p>
+            ) : null}
+            {!all && options.length > 0 ? (
               <div className="grid max-h-72 gap-3 overflow-y-auto rounded-md border p-2.5 sm:grid-cols-2">
                 {areas.map(([area, opts]) => (
                   <fieldset key={area} className="flex flex-col gap-1">
@@ -221,8 +284,13 @@ function CreateKeyDialog({
                             {o.permission}
                           </label>
                           {o.where !== "global" ? (
-                            <span className="text-[10px] text-muted-foreground">
-                              {o.where === "scoped" ? "some scopes" : "your servers"}
+                            <span
+                              className="text-[10px] text-muted-foreground"
+                              title={o.serverNames?.join(", ")}
+                            >
+                              {o.where === "scoped"
+                                ? "some scopes"
+                                : `on ${o.serverNames!.length} server${o.serverNames!.length === 1 ? "" : "s"}`}
                             </span>
                           ) : null}
                         </div>

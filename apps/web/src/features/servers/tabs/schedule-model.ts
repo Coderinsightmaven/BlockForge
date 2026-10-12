@@ -43,6 +43,28 @@ export function taskBlockedReason(
   return null;
 }
 
+const TASK_ACTIONS: readonly TaskAction[] = ["command", "power", "backup"];
+
+/** The first task type this user can actually run here (new schedules/tasks start with it). */
+export function firstAllowedTask(server: Pick<Server, "myPermissions" | "backupLimit">): TaskAction | null {
+  return TASK_ACTIONS.find((a) => taskBlockedReason(server, a) === null) ?? null;
+}
+
+/**
+ * Why saving (or enabling) this schedule is refused for the current user: saving makes them the
+ * last editor, and a task they can't run would fail on every run. Null when every task is fine.
+ */
+export function scheduleBlockedReason(
+  server: Pick<Server, "myPermissions" | "backupLimit">,
+  tasks: ReadonlyArray<{ action: TaskAction }>,
+): string | null {
+  for (const [i, t] of tasks.entries()) {
+    const reason = taskBlockedReason(server, t.action);
+    if (reason) return `Task ${i + 1}: ${reason}`;
+  }
+  return null;
+}
+
 export interface TaskDraft {
   key: string;
   action: TaskAction;
@@ -88,7 +110,11 @@ function taskToDraft(t: ScheduleTask): TaskDraft {
   return { ...base, ...common, ignore: t.ignore.join("\n"), rotate: t.rotate };
 }
 
-export function draftFromSchedule(schedule: Schedule | null, serverTimezone: string): ScheduleDraft {
+export function draftFromSchedule(
+  schedule: Schedule | null,
+  serverTimezone: string,
+  firstTask: TaskAction | null = "command",
+): ScheduleDraft {
   if (!schedule) {
     return {
       name: "",
@@ -96,7 +122,7 @@ export function draftFromSchedule(schedule: Schedule | null, serverTimezone: str
       timezone: serverTimezone,
       enabled: true,
       onlyWhenOnline: false,
-      tasks: [newTask("command")],
+      tasks: firstTask ? [newTask(firstTask)] : [],
     };
   }
   return {

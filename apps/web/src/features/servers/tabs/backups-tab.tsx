@@ -25,9 +25,9 @@ import type { Backup, Me, Schedule, Server } from "@blockforge/contracts";
 import { backupsApi, schedulesApi } from "@/lib/api/phase4-api";
 import { ApiError, describeError } from "@/lib/api/errors";
 import { formatBytes, formatTimestamp } from "@/lib/format";
-import { useIdempotencyKeys } from "@/lib/idempotency";
+import { isUncertainFailure, useIdempotencyKeys } from "@/lib/idempotency";
 import { useApiMutation } from "@/lib/mutations";
-import { applyBackupEvent } from "@/lib/phase4-cache";
+import { applyBackupEvent, reconcileList, removeBackupFromCache } from "@/lib/phase4-cache";
 import { jobQuery } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { useRealtimeTopic } from "@/lib/realtime/provider";
@@ -124,30 +124,47 @@ export function canRotate(backups: readonly Backup[]): boolean {
   return backups.some((b) => b.status === "completed" && !b.locked);
 }
 
+/** Same-origin download URLs are single-use transfer tokens streamed through the agent. */
+export const TRANSFER_PATH_PREFIX = "/api/v1/transfers/";
+
 /**
- * Download URLs are either this origin (streamed through the agent) or a presigned HTTPS S3 URL.
- * Anything else (javascript:, http:, data:) is refused.
+ * Download URL policy: this origin only for `/api/v1/transfers/…`; any other origin only as an
+ * absolute `https:` URL (presigned S3) without credentials. Protocol-relative (`//host/…`),
+ * `javascript:`, `data:`, `http:` and `user:pass@` URLs are refused.
  */
 export function isSafeDownloadUrl(url: string, origin = window.location.origin): boolean {
+  const raw = url.trim();
+  if (raw.startsWith("//") || raw.startsWith("\\\\")) return false;
+  let u: URL;
   try {
-    const u = new URL(url, origin);
-    return u.origin === origin || u.protocol === "https:";
+    u = new URL(raw, origin);
   } catch {
     return false;
   }
+  if (u.username || u.password) return false;
+  if (u.origin === origin) return u.pathname.startsWith(TRANSFER_PATH_PREFIX);
+  return u.protocol === "https:" && /^https:\/\//i.test(raw);
+}
+
+/** Start a download in a new browsing context that gets neither an opener nor a referrer. */
+export function openDownload(url: string, fileName: string): void {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.referrerPolicy = "no-referrer";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 async function downloadBackup(serverId: string, backup: Backup): Promise<void> {
   const { url } = await backupsApi.downloadUrl(serverId, backup.id);
   if (!isSafeDownloadUrl(url))
     throw new ApiError({ code: "INVALID_RESPONSE", message: "Unexpected download URL.", status: 0 });
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${backup.name || backup.id}.tar.gz`;
-  a.rel = "noopener noreferrer";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  openDownload(url, `${backup.name || backup.id}.tar.gz`);
 }
 
 export function createdByLabel(
@@ -409,6 +426,18 @@ function SwitchRow({
 // ---------------------------------------------------------------------------------------------
 // Restore
 
+export interface RestoreOptions {
+  truncate: boolean;
+  safetyBackup: boolean;
+  startAfter: boolean;
+}
+const DEFAULT_RESTORE: RestoreOptions = { truncate: false, safetyBackup: true, startAfter: true };
+
+/** One idempotency key per (backup, options): changing either is a different request. */
+export function restoreAction(backupId: string, o: RestoreOptions): string {
+  return `${backupId}:${o.truncate ? 1 : 0}${o.safetyBackup ? 1 : 0}${o.startAfter ? 1 : 0}`;
+}
+
 function RestoreDialog({
   server,
   backup,
@@ -421,39 +450,53 @@ function RestoreDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [truncate, setTruncate] = useState(false);
-  const [safetyBackup, setSafetyBackup] = useState(true);
-  const [startAfter, setStartAfter] = useState(true);
+  const [opts, setOpts] = useState<RestoreOptions>(DEFAULT_RESTORE);
   const [typed, setTyped] = useState("");
-  const reset = () => {
-    setTruncate(false);
-    setSafetyBackup(true);
-    setStartAfter(true);
+  // A restore whose outcome is unknown (lost response, 5xx, still in progress): its backup and
+  // options are frozen, and confirming again replays it with the same key.
+  const [uncertain, setUncertain] = useState<{ backupId: string; opts: RestoreOptions } | null>(null);
+  const keys = useIdempotencyKeys<string>();
+  const locked = backup !== null && uncertain?.backupId === backup.id;
+  useEffect(() => {
+    if (!backup) return;
+    setOpts(uncertain?.backupId === backup.id ? uncertain.opts : DEFAULT_RESTORE);
     setTyped("");
-  };
+    // Only when another backup is opened; `uncertain` changes are handled by `locked`.
+  }, [backup?.id]);
   const restore = useApiMutation({
-    mutationFn: (b: Backup) => backupsApi.restore(server.id, b.id, { truncate, safetyBackup, startAfter }),
+    mutationFn: ({ backupId, opts: o }: { backupId: string; opts: RestoreOptions }) =>
+      backupsApi.restore(server.id, backupId, o, keys.sent(restoreAction(backupId, o))),
     success: "Restore started",
     errorTitle: "Could not start the restore",
-    onSuccess: async () => {
-      reset();
+    onError: (error, vars) => {
+      keys.settle(restoreAction(vars.backupId, vars.opts), { ok: false, error });
+      setUncertain(isUncertainFailure(error) ? vars : null);
+    },
+    onSuccess: async (_r, vars) => {
+      keys.settle(restoreAction(vars.backupId, vars.opts), { ok: true });
+      setUncertain(null);
+      setOpts(DEFAULT_RESTORE);
+      setTyped("");
       onClose();
       // The restore holds the server's operation lock; the page shows its progress.
       await queryClient.invalidateQueries({ queryKey: qk.servers.detail(server.id) });
     },
   });
+  const set = (k: keyof RestoreOptions) => (v: boolean) => {
+    if (locked) return;
+    setOpts((o) => ({ ...o, [k]: v }));
+    if (k === "truncate") setTyped("");
+  };
+  const close = () => {
+    if (restore.isPending) return;
+    setTyped("");
+    onClose();
+  };
   // Restore may start from running/degraded: the job stops the server first.
   const running = server.state === "running" || server.state === "degraded";
-  const confirmed = !truncate || typed === server.name;
+  const confirmed = !opts.truncate || typed === server.name;
   return (
-    <Dialog
-      open={backup !== null}
-      onOpenChange={(o) => {
-        if (restore.isPending || o) return;
-        reset();
-        onClose();
-      }}
-    >
+    <Dialog open={backup !== null} onOpenChange={(o) => !o && close()}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>Restore “{backup?.name ?? ""}”?</DialogTitle>
@@ -471,17 +514,15 @@ function RestoreDialog({
           id="restore-truncate"
           label="Delete all current files first"
           hint={
-            truncate
+            opts.truncate
               ? "Every file except .blockforge/ is deleted before extracting: the server ends up exactly as in the backup. Files created since the backup are lost."
               : "Off: files in the backup replace their current versions; files that are not in the backup are kept."
           }
-          checked={truncate}
-          onCheckedChange={(v) => {
-            setTruncate(v);
-            setTyped("");
-          }}
+          checked={opts.truncate}
+          onCheckedChange={set("truncate")}
+          disabled={locked}
         />
-        {truncate ? (
+        {opts.truncate ? (
           <Field label={`Type ${server.name} to confirm deleting the current files`}>
             <Input
               value={typed}
@@ -499,32 +540,33 @@ function RestoreDialog({
               ? "The server is at its backup limit, so the safety backup will be skipped — delete a backup first if you want one."
               : "A locked backup of the current files is taken first so the restore can be undone. It counts toward the limit."
           }
-          checked={safetyBackup}
-          onCheckedChange={setSafetyBackup}
+          checked={opts.safetyBackup}
+          onCheckedChange={set("safetyBackup")}
+          disabled={locked}
         />
         <SwitchRow
           id="restore-start"
           label="Start the server afterwards"
           hint="Starts the server once the files are restored."
-          checked={startAfter}
-          onCheckedChange={setStartAfter}
+          checked={opts.startAfter}
+          onCheckedChange={set("startAfter")}
+          disabled={locked}
         />
+        {locked ? (
+          <p role="status" className="text-xs">
+            A restore with these options was already sent and its outcome is unknown; restoring again retries
+            exactly the same request.
+          </p>
+        ) : null}
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => {
-              reset();
-              onClose();
-            }}
-            disabled={restore.isPending}
-          >
+          <Button variant="outline" onClick={close} disabled={restore.isPending}>
             Cancel
           </Button>
           <Button
             variant="destructive"
             loading={restore.isPending}
             disabled={!confirmed}
-            onClick={() => backup && restore.mutate(backup)}
+            onClick={() => backup && restore.mutate({ backupId: backup.id, opts })}
           >
             <ArchiveRestore aria-hidden />
             Restore
@@ -543,17 +585,19 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
   const [creating, setCreating] = useState(false);
   const [restoring, setRestoring] = useState<Backup | null>(null);
   const [removing, setRemoving] = useState<Backup | null>(null);
-  const [deleting, setDeleting] = useState<ReadonlySet<string>>(() => new Set());
   const list = useQuery({
     queryKey: qk.server(server.id).backups,
-    queryFn: ({ signal }) => backupsApi.list(server.id, signal),
-    // Kept live by backup.updated / backup.deleted on server:<id> (no polling).
+    // Kept live by backup.updated / backup.deleted on server:<id> (no polling); deleted rows stay
+    // hidden even if a fetch that predates the delete returns them.
+    queryFn: async ({ signal }) =>
+      reconcileList(queryClient, "backups", server.id, await backupsApi.list(server.id, signal)),
   });
   const backups = list.data ?? [];
   const scheduled = backups.some((b) => b.scheduleId);
   const schedules = useQuery({
     queryKey: qk.server(server.id).schedules,
-    queryFn: ({ signal }) => schedulesApi.list(server.id, signal),
+    queryFn: async ({ signal }) =>
+      reconcileList(queryClient, "schedules", server.id, await schedulesApi.list(server.id, signal)),
     enabled: scheduled && serverCan(server, "schedules.view"),
   });
 
@@ -579,23 +623,13 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
     errorTitle: "Could not delete the backup",
     onSuccess: async (_r, b) => {
       setRemoving(null);
-      setDeleting((s) => new Set(s).add(b.id));
-      await queryClient.invalidateQueries({ queryKey: qk.server(server.id).backups });
+      await removeBackupFromCache(queryClient, server.id, b.id);
     },
   });
   const download = useApiMutation({
     mutationFn: (b: Backup) => downloadBackup(server.id, b),
     errorTitle: "Download failed",
   });
-
-  // Rows whose delete finished are gone from the list; forget them.
-  useEffect(() => {
-    if (!list.data) return;
-    const present = new Set(list.data.map((b) => b.id));
-    setDeleting((s) =>
-      [...s].every((id) => present.has(id)) ? s : new Set([...s].filter((id) => present.has(id))),
-    );
-  }, [list.data]);
 
   const createReason = disabled
     ? "Backups are disabled for this server."
@@ -669,11 +703,10 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
             </TableHeader>
             <TableBody>
               {backups.map((b) => {
-                const isDeleting = deleting.has(b.id);
                 const completed = b.status === "completed";
                 const label = b.name || formatTimestamp(b.createdAt);
                 return (
-                  <TableRow key={b.id} aria-busy={isDeleting || ACTIVE.has(b.status) || undefined}>
+                  <TableRow key={b.id} aria-busy={ACTIVE.has(b.status) || undefined}>
                     <TableCell className="max-w-72">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <span className="truncate font-medium" title={label}>
@@ -693,11 +726,7 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
                       </div>
                     </TableCell>
                     <TableCell>
-                      {isDeleting ? (
-                        <Badge tone="neutral">Deleting…</Badge>
-                      ) : (
-                        <StatusBadge meta={statusMeta(BACKUP_STATUS_META, b.status)} />
-                      )}
+                      <StatusBadge meta={statusMeta(BACKUP_STATUS_META, b.status)} />
                       {ACTIVE.has(b.status) && b.jobId && canViewJobs ? <BackupProgress backup={b} /> : null}
                       {b.status === "failed" && b.error ? (
                         <p className="mt-1 max-w-64 text-xs break-words text-danger">{b.error}</p>
@@ -732,7 +761,7 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
                             variant="ghost"
                             aria-label={`Download ${label}`}
                             title="Download"
-                            disabled={!completed || isDeleting}
+                            disabled={!completed}
                             loading={download.isPending && download.variables?.id === b.id}
                             onClick={() => download.mutate(b)}
                           >
@@ -745,7 +774,7 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
                             variant="ghost"
                             aria-label={`Restore ${label}`}
                             title={restoreAllowed ? "Restore" : "Wait for the current operation to finish"}
-                            disabled={!completed || isDeleting || !restoreAllowed}
+                            disabled={!completed || !restoreAllowed}
                             onClick={() => setRestoring(b)}
                           >
                             <ArchiveRestore aria-hidden />
@@ -758,7 +787,6 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
                               variant="ghost"
                               aria-label={`${b.locked ? "Unlock" : "Lock"} ${label}`}
                               title={b.locked ? "Unlock" : "Lock"}
-                              disabled={isDeleting}
                               loading={lock.isPending && lock.variables?.id === b.id}
                               onClick={() => lock.mutate(b)}
                             >
@@ -769,7 +797,7 @@ export default function BackupsTab({ server, me }: { server: Server; me: Me }) {
                               variant="ghost"
                               aria-label={`Delete ${label}`}
                               title={b.locked ? "Unlock the backup to delete it" : "Delete"}
-                              disabled={b.locked || isDeleting || ACTIVE.has(b.status)}
+                              disabled={b.locked || ACTIVE.has(b.status)}
                               onClick={() => setRemoving(b)}
                             >
                               <Trash2 aria-hidden />

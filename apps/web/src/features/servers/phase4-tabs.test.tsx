@@ -218,6 +218,68 @@ describe("Backups tab", () => {
     });
   });
 
+  it("restore retries replay the same key with frozen options; a rejection lets options change", async () => {
+    const calls = routeFetch([
+      ["GET", /\/backups$/, ok([makeBackup({ id: ID(1) })])],
+      [
+        "POST",
+        /\/restore$/,
+        [
+          offline,
+          () =>
+            jsonResponse(apiErrorBody("CONFLICT", "still running", "req-2", { reason: "in_progress" }), {
+              status: 409,
+            }),
+          () => jsonResponse(apiErrorBody("CONFLICT", "server busy", "req-3"), { status: 409 }),
+          ok({ jobId: JOB_ID }, 202),
+        ],
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<BackupsTab server={makeServer({ state: "stopped" })} me={makeMe()} />);
+    await user.click(await screen.findByRole("button", { name: "Restore Before 1.21 update" }));
+    const dialog = await screen.findByRole("dialog");
+    const restore = within(dialog).getByRole("button", { name: "Restore" });
+    const startAfter = within(dialog).getByRole("switch", {
+      name: "Start the server afterwards",
+    }) as HTMLButtonElement;
+    await user.click(startAfter); // off
+    await user.click(restore); // network failure: outcome unknown
+    expect(await within(dialog).findByText(/outcome is unknown/)).toBeTruthy();
+    expect(startAfter.disabled).toBe(true);
+    await user.click(restore); // 409 in_progress: still unknown, same key
+    await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(2));
+    expect(startAfter.disabled).toBe(true);
+    await user.click(restore); // 409 without reason: definitive rejection
+    await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(3));
+    await waitFor(() => expect(startAfter.disabled).toBe(false));
+    const posts = () => calls.filter((c) => c.method === "POST");
+    expect(posts()[1]!.key).toBe(posts()[0]!.key);
+    expect(posts()[2]!.key).toBe(posts()[0]!.key);
+    expect(posts()[0]!.body).toEqual({ truncate: false, safetyBackup: true, startAfter: false });
+    await user.click(startAfter); // back on: a different request, a new key
+    await user.click(restore);
+    await waitFor(() => expect(posts()).toHaveLength(4));
+    expect(posts()[3]!.key).not.toBe(posts()[0]!.key);
+    expect(posts()[3]!.body).toEqual({ truncate: false, safetyBackup: true, startAfter: true });
+  });
+
+  it("a deleted backup leaves the list at once and the count drops", async () => {
+    const calls = routeFetch([
+      ["GET", /\/backups$/, ok([makeBackup({ id: ID(1) }), makeBackup({ id: ID(2), name: "second" })])],
+      ["DELETE", /\/backups\//, ok({ jobId: JOB_ID }, 202)],
+    ]);
+    const user = userEvent.setup();
+    wrap(<BackupsTab server={makeServer({ backupLimit: 3 })} me={makeMe()} />);
+    await user.click(await screen.findByRole("button", { name: "Delete second" }));
+    await user.click(
+      within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Delete backup" }),
+    );
+    await waitFor(() => expect(screen.queryByText("second")).toBeNull());
+    expect(screen.getByText("1 / 3 used")).toBeTruthy();
+    expect(calls.filter((c) => c.method === "GET" && c.url.endsWith("/backups"))).toHaveLength(1);
+  });
+
   it("locks, and deletes only after confirmation", async () => {
     const calls = routeFetch([
       ["GET", /\/backups$/, ok([makeBackup({ id: ID(1) })])],
@@ -387,7 +449,7 @@ describe("Schedules tab", () => {
     });
   });
 
-  it("warns about tasks the editor cannot run, and validates before saving", async () => {
+  it("blocks saving and enabling a schedule with a task the editor can't run, and validates", async () => {
     const calls = routeFetch([
       ["GET", /\/schedules$/, ok([makeSchedule()])],
       [
@@ -404,15 +466,102 @@ describe("Schedules tab", () => {
         })}
       />,
     );
-    await user.click(await screen.findByRole("button", { name: "Edit Nightly restart" }));
+    // The list's enable switch is disabled too (toggling would make this user the last editor).
+    expect(
+      ((await screen.findByRole("switch", { name: "Disable Nightly restart" })) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Edit Nightly restart" }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(/You don't hold servers\.control/)).toBeTruthy();
+    expect(within(dialog).getAllByText(/You don't hold servers\.control/).length).toBeGreaterThan(0);
+    const save = within(dialog).getByRole("button", { name: "Save schedule" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    expect(within(dialog).getByText(/Saving is disabled: Task 2/)).toBeTruthy();
     expect(await within(dialog).findByText("bad field", {}, { timeout: 3000 })).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "Remove task 2" }));
+    // (The tooltip wrapper goes away with the reason, so query the button again.)
+    const enabled = within(dialog).getByRole("button", { name: "Save schedule" }) as HTMLButtonElement;
+    expect(enabled.disabled).toBe(false);
     await user.clear(within(dialog).getByLabelText(/^Name/));
-    await user.click(within(dialog).getByRole("button", { name: "Save schedule" }));
+    await user.click(enabled);
     expect(within(dialog).getByText(/Give the schedule a name/)).toBeTruthy();
     expect(calls.some((c) => c.method === "PUT")).toBe(false);
   });
+
+  it("starts a new schedule with a task type the user can run", async () => {
+    routeFetch([
+      ["GET", /\/schedules$/, ok([])],
+      ["POST", /\/schedules\/preview$/, ok({ valid: true, error: null, next: [], description: null })],
+    ]);
+    const user = userEvent.setup();
+    wrap(
+      <SchedulesTab
+        server={makeServer({
+          myPermissions: ["servers.view", "schedules.view", "schedules.manage", "servers.control"],
+        })}
+      />,
+    );
+    await user.click(await screen.findByRole("button", { name: "New schedule" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("combobox", { name: "Task 1 type" }).textContent).toContain(
+      "Power action",
+    );
+    expect(within(dialog).queryByText(/You don't hold/)).toBeNull();
+  });
+
+  it("never shows runs computed for a previous zone or expression", async () => {
+    let release: () => void = () => {};
+    routeFetch([
+      ["GET", /\/schedules$/, ok([])],
+      [
+        "POST",
+        /\/schedules\/preview$/,
+        (call) => {
+          const tz = (call.body as { timezone: string }).timezone;
+          const body = {
+            valid: true,
+            error: null,
+            next: [Date.UTC(2026, 9, 13, 4, 0)],
+            description: `in ${tz}`,
+          };
+          if (tz === "UTC") return jsonResponse(body);
+          // The second zone's answer is held back to observe the in-between state.
+          return new Promise<Response>((r) => (release = () => r(jsonResponse(body))));
+        },
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<SchedulesTab server={makeServer({ timezone: "UTC" })} />);
+    await user.click(await screen.findByRole("button", { name: "New schedule" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByText("in UTC", {}, { timeout: 3000 })).toBeTruthy();
+    const zone = within(dialog).getByLabelText(/^Time zone/);
+    await user.clear(zone);
+    await user.type(zone, "Asia/Tokyo");
+    expect(within(dialog).queryByText("in UTC")).toBeNull();
+    expect(within(dialog).getByText("Checking…")).toBeTruthy();
+    // After the debounce the new zone's request is in flight; its answer is the only one shown.
+    await new Promise((r) => setTimeout(r, 450));
+    expect(within(dialog).queryByText("in UTC")).toBeNull();
+    release();
+    expect(await within(dialog).findByText("in Asia/Tokyo", {}, { timeout: 3000 })).toBeTruthy();
+  });
+
+  it("polls the open run history while the schedule is running", async () => {
+    const calls = routeFetch([
+      ["GET", /\/schedules$/, ok([makeSchedule({ running: true, lastRunAt: 1 })])],
+      ["GET", /\/runs/, ok({ items: [run], nextCursor: null })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<SchedulesTab server={makeServer()} />);
+    await user.click(await screen.findByRole("button", { name: "Run history of Nightly restart" }));
+    await waitFor(
+      () => expect(calls.filter((c) => c.url.includes("/runs")).length).toBeGreaterThanOrEqual(2),
+      {
+        timeout: 4500,
+      },
+    );
+  }, 8000);
 
   it("toggles, runs now and shows run history with per-task results", async () => {
     const s = makeSchedule({ lastRunAt: 1_760_000_000_000 });

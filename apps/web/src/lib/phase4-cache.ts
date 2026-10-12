@@ -4,8 +4,62 @@ import { qk } from "./query-keys";
 
 /*
  * Live `backup.updated|deleted` / `schedule.updated|deleted` events (on `server:<id>`) patch the
- * cached lists of the Backups and Schedules tabs. Lists that are not cached are left alone: they load fresh when opened.
+ * cached lists of the Backups and Schedules tabs. Lists that are not cached are left alone: they
+ * load fresh when opened.
+ *
+ * Deletions leave a tombstone so a deleted row cannot come back from a refetch that was already in
+ * flight or from a late `*.updated` event. A tombstone is dropped once a fetch no longer returns the
+ * id — or, as a safety valve for a delete that failed server-side, when a fetch still returns it
+ * after TOMBSTONE_TTL_MS.
  */
+
+export type ListKind = "backups" | "schedules";
+export const TOMBSTONE_TTL_MS = 2 * 60_000;
+
+const tombstones = new WeakMap<QueryClient, Map<string, number>>();
+const tKey = (kind: ListKind, serverId: string, id: string) => `${kind}:${serverId}:${id}`;
+
+function stones(queryClient: QueryClient): Map<string, number> {
+  let m = tombstones.get(queryClient);
+  if (!m) {
+    m = new Map();
+    tombstones.set(queryClient, m);
+  }
+  return m;
+}
+
+export function isTombstoned(
+  queryClient: QueryClient,
+  kind: ListKind,
+  serverId: string,
+  id: string,
+): boolean {
+  return stones(queryClient).has(tKey(kind, serverId, id));
+}
+
+/**
+ * Apply tombstones to a freshly fetched list: drop tombstoned rows, and forget tombstones whose id
+ * the server no longer returns (or that outlived the TTL).
+ */
+export function reconcileList<T extends { id: string }>(
+  queryClient: QueryClient,
+  kind: ListKind,
+  serverId: string,
+  list: readonly T[],
+  now = Date.now(),
+): T[] {
+  const m = stones(queryClient);
+  const prefix = `${kind}:${serverId}:`;
+  const present = new Set(list.map((x) => x.id));
+  const hidden = new Set<string>();
+  for (const [key, since] of m) {
+    if (!key.startsWith(prefix)) continue;
+    const id = key.slice(prefix.length);
+    if (!present.has(id) || now - since > TOMBSTONE_TTL_MS) m.delete(key);
+    else hidden.add(id);
+  }
+  return list.filter((x) => !hidden.has(x.id));
+}
 
 export function upsertById<T extends { id: string }>(list: readonly T[], item: T): T[] {
   const i = list.findIndex((x) => x.id === item.id);
@@ -21,29 +75,52 @@ export function sortBackups(list: readonly Backup[]): Backup[] {
 }
 
 export function applyBackupEvent(queryClient: QueryClient, backup: Backup): void {
+  if (isTombstoned(queryClient, "backups", backup.serverId, backup.id)) return;
   queryClient.setQueryData<Backup[]>(qk.server(backup.serverId).backups, (prev) =>
     prev ? sortBackups(upsertById(prev, backup)) : prev,
   );
 }
 
-export function removeBackupFromCache(queryClient: QueryClient, serverId: string, backupId: string): void {
-  queryClient.setQueryData<Backup[]>(qk.server(serverId).backups, (prev) =>
-    prev ? prev.filter((b) => b.id !== backupId) : prev,
+export function applyScheduleEvent(queryClient: QueryClient, schedule: Schedule): void {
+  if (isTombstoned(queryClient, "schedules", schedule.serverId, schedule.id)) return;
+  queryClient.setQueryData<Schedule[]>(qk.server(schedule.serverId).schedules, (prev) =>
+    prev ? upsertById(prev, schedule) : prev,
   );
+}
+
+const listKey = (kind: ListKind, serverId: string) =>
+  kind === "backups" ? qk.server(serverId).backups : qk.server(serverId).schedules;
+
+/**
+ * A backup/schedule was deleted (event or our own DELETE): tombstone it, cancel any list fetch in
+ * flight (it may predate the delete), then remove the row.
+ */
+export async function markDeleted(
+  queryClient: QueryClient,
+  kind: ListKind,
+  serverId: string,
+  id: string,
+  now = Date.now(),
+): Promise<void> {
+  stones(queryClient).set(tKey(kind, serverId, id), now);
+  await queryClient.cancelQueries({ queryKey: listKey(kind, serverId) });
+  queryClient.setQueryData<Array<{ id: string }>>(listKey(kind, serverId), (prev) =>
+    prev ? prev.filter((x) => x.id !== id) : prev,
+  );
+}
+
+export function removeBackupFromCache(
+  queryClient: QueryClient,
+  serverId: string,
+  backupId: string,
+): Promise<void> {
+  return markDeleted(queryClient, "backups", serverId, backupId);
 }
 
 export function removeScheduleFromCache(
   queryClient: QueryClient,
   serverId: string,
   scheduleId: string,
-): void {
-  queryClient.setQueryData<Schedule[]>(qk.server(serverId).schedules, (prev) =>
-    prev ? prev.filter((s) => s.id !== scheduleId) : prev,
-  );
-}
-
-export function applyScheduleEvent(queryClient: QueryClient, schedule: Schedule): void {
-  queryClient.setQueryData<Schedule[]>(qk.server(schedule.serverId).schedules, (prev) =>
-    prev ? upsertById(prev, schedule) : prev,
-  );
+): Promise<void> {
+  return markDeleted(queryClient, "schedules", serverId, scheduleId);
 }
