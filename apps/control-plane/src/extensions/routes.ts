@@ -8,6 +8,7 @@ import {
   ExtensionUploadRequest,
   ModrinthInstallRequest,
   ModrinthPlanRequest,
+  ModrinthProjectQuery,
   ModrinthProjectRef,
   ModrinthSearchQuery,
   ScanExtensionsRequest,
@@ -25,7 +26,6 @@ const ProjectParams = IdParams.extend({ project: ModrinthProjectRef });
 const UploadParams = IdParams.extend({ uploadId: z.uuid() });
 const EntryParams = IdParams.extend({ entryId: z.uuid() });
 /** Not (yet) in the contract: beta/alpha versions in the project's version list (default false, as for plans/updates). */
-const ProjectQuery = z.object({ allowPrerelease: z.stringbool().default(false) });
 
 /** `/servers/:id/extensions…` (api.md "Plugins & mods (Phase 4b)"). */
 export function registerExtensionRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -49,7 +49,7 @@ export function registerExtensionRoutes(app: FastifyInstance, ctx: AppContext): 
 
   app.get("/servers/:id/extensions/modrinth/projects/:project", async (req) => {
     const p = parse(ProjectParams, req.params, "Path");
-    return x.project(await read(req, p.id), p.project, parse(ProjectQuery, req.query, "Query").allowPrerelease);
+    return x.project(await read(req, p.id), p.project, parse(ModrinthProjectQuery, req.query, "Query").allowPrerelease);
   });
 
   app.post("/servers/:id/extensions/modrinth/plan", async (req) => {

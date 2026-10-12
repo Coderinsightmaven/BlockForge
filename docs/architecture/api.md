@@ -244,7 +244,7 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
 | PATCH | `/servers/:id/extensions/:extensionId` | `UpdateExtensionRequest` `{enabled}` → `UpdateExtensionResponse` (renames `x.jar` ⇄ `x.jar.disabled`) | servers.extensions.manage |
 | DELETE | `/servers/:id/extensions/:extensionId` | → `RemoveExtensionResponse` (synchronous) | servers.extensions.manage |
 | GET | `/servers/:id/extensions/modrinth/search` | `ModrinthSearchQuery` → `ModrinthSearchResult` | read |
-| GET | `/servers/:id/extensions/modrinth/projects/:project` | `:project` = id or slug → `ModrinthProjectResponse` | read |
+| GET | `/servers/:id/extensions/modrinth/projects/:project` | `:project` = id or slug, `?allowPrerelease=` (`ModrinthProjectQuery`, default false: releases only) → `ModrinthProjectResponse` | read |
 | POST | `/servers/:id/extensions/modrinth/plan` | `ModrinthPlanRequest` → `ModrinthInstallPlan` (read-only) | read |
 | POST | `/servers/:id/extensions/modrinth/install` | `ModrinthInstallRequest` → `ExtensionJobResponse` (202, idempotent); plan drift → 409 | servers.extensions.manage |
 | GET | `/servers/:id/extensions/updates` | `ExtensionUpdatesQuery` → `ExtensionUpdatesResponse` | read |

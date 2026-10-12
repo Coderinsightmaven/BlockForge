@@ -607,6 +607,8 @@ export type ExtensionUpdateStatus = z.infer<typeof ExtensionUpdateStatus>;
  * installed one unless `allowPrerelease`.
  */
 export const ExtensionUpdatesQuery = z.object({ allowPrerelease: z.stringbool().default(false) });
+/** `GET …/modrinth/projects/:project` — include beta/alpha versions in `versions` (default: releases only). */
+export const ModrinthProjectQuery = z.object({ allowPrerelease: z.stringbool().default(false) });
 export const ExtensionUpdatesResponse = z.object({
   checkedAt: EpochMs,
   items: z.array(ExtensionUpdateStatus).max(4096),
