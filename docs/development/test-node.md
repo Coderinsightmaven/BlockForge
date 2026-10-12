@@ -79,3 +79,21 @@ Control plane restarted on the fixed code (migration 0004 applied, agent reconne
 * **API key**: `GET /servers` 200, restart 403, `/account/api-keys` 403, last use recorded, revoked → 401.
 * `GET /account/permissions` 200 (52 global permissions for the owner, 2 servers); backups list pagination (`?limit=2`).
 * No error-level lines in the control-plane log during the run.
+
+## Phase 4b end-to-end evidence (2026-10-12, control plane f8d514d, agent still the pre-3125c66 build)
+Control plane restarted with migration 0005 (`servers.extensions.view` in the role check; built-in roles synced).
+* **Players, running Paper 26.3** (`.data/e2e_players.py`): overview from `list uuids` + list files + `server.properties`
+  (0/10 online, online-mode, whitelist on); Mojang lookup `Notch` → `069a79f4-…`; whitelist-add, op, ban (reason),
+  ban-ip, pardon, pardon-ip, deop, whitelist-remove all applied through the console and confirmed by the server's own
+  feedback (`Added Notch to the whitelist`, `Made Notch a server operator`, `Banned Notch: BlockForge e2e`, …); kick of
+  an offline player → `ok: false` "No player was found"; ban with `expiresAt` while running → 409 `requires_stopped`;
+  `op @a` → 400. Lists re-read after each step matched.
+* **Players, stopped Vanilla egg** (`.data/e2e_players_stopped.py`): whitelist-add, op (level 2, bypass), timed ban
+  (expires 2100-01-01), ban-ip applied as file edits (`banned-players.json` written in the server's Gson format,
+  source `BlockForge (owner)`); kick → 409 `not_running`; after start the server loaded every entry (whitelist, op
+  level 2, ban, IP ban); cleanup through the console.
+* **Plugins & mods on an outdated agent**: `GET …/extensions` 200 (scan `never`, upload policy), `POST …/extensions/scan`
+  → 409 `agent_outdated` with `missingCapabilities: ["fs.hash", "jar.readEntries"]` (no timeout).
+* Not yet live: sessions (no Minecraft client available on the LAN test), Modrinth install/update/upload/rollback
+  (needs the 3125c66 agent, deployed after its Codex review).
+* No error-level lines in the control-plane log.
