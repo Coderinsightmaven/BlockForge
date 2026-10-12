@@ -82,7 +82,8 @@ import { registerExtensionRoutes } from "./extensions/routes.js";
 import { extensionJobDefinitions } from "./extensions/jobs.js";
 import { ExtensionsService } from "./extensions/service.js";
 import type { ExtensionDeps } from "./extensions/model.js";
-import { Upstreams } from "./extensions/upstream.js";
+import { userAgentFor, Upstreams } from "./extensions/upstream.js";
+import type { TestTransportOverride } from "./catalog/safe-fetch.js";
 import { registerPlayerRoutes } from "./players/routes.js";
 import { PlayersService } from "./players/service.js";
 import { PlayerSessionTracker } from "./players/sessions.js";
@@ -131,13 +132,19 @@ export interface BuildAppOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   extraJobs?: JobDefinition<any>[];
   /** Test seams for the software catalogue (adapter overrides, transport, DNS). */
-  catalog?: { adapters?: Partial<Catalog>; fetchImpl?: typeof fetch; lookup?: LookupFn; ttlMs?: number };
+  catalog?: { adapters?: Partial<Catalog>; fetchImpl?: typeof fetch; lookup?: LookupFn; ttlMs?: number; testOverride?: TestTransportOverride };
   /** Scheduler test seams (task offsets). */
   scheduler?: { sleep?: (ms: number, signal: AbortSignal) => Promise<void> };
   /** Server job timing (tests shorten the readiness wait). */
   serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number; saveTimeoutMs?: number; saveToggleTimeoutMs?: number };
   /** Modrinth / Mojang test seams (recorded fixtures, rate-limiter clock). */
-  upstream?: { fetchImpl?: typeof fetch; lookup?: LookupFn; limiter?: { now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number } };
+  upstream?: {
+    fetchImpl?: typeof fetch;
+    lookup?: LookupFn;
+    /** The real pinned transport against a local test server (`testTransportOverride`). */
+    testOverride?: TestTransportOverride;
+    limiter?: { now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number };
+  };
   /** Player action timing (tests shorten the feedback wait). */
   players?: { feedbackTimeoutMs?: number };
 }
@@ -287,6 +294,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     ...(opts.catalog?.fetchImpl ? { fetchImpl: opts.catalog.fetchImpl } : {}),
     ...(opts.catalog?.lookup ? { lookup: opts.catalog.lookup } : {}),
     ...(opts.catalog?.ttlMs !== undefined ? { ttlMs: opts.catalog.ttlMs } : {}),
+    ...(opts.catalog?.testOverride ? { testOverride: opts.catalog.testOverride } : {}),
+    userAgent: userAgentFor(APP_VERSION, config.modrinthContact),
   });
   const allocations = new AllocationsService(db, gateway, audit, logger.child({ module: "allocations" }));
   const serverAccess = new ServerAccessService(db, audit);

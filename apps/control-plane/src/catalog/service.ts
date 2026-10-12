@@ -10,7 +10,7 @@ import { CATALOG_HOSTS, CatalogError, createCatalog, TtlCache, type Catalog, typ
 import type { Logger } from "pino";
 import { AppError, badRequest, notFound, upstreamError } from "../lib/errors.js";
 import type { LookupFn } from "../notifications/ssrf.js";
-import { createSafeFetch, SafeFetchError } from "./safe-fetch.js";
+import { createSafeFetch, SafeFetchError, type TestTransportOverride } from "./safe-fetch.js";
 
 export interface CatalogServiceOptions {
   logger: Logger;
@@ -19,6 +19,10 @@ export interface CatalogServiceOptions {
   fetchImpl?: typeof fetch;
   lookup?: LookupFn;
   ttlMs?: number;
+  /** `BlockForge/<version> (<contact>)` sent to every upstream (Fill, Mojang, Fabric, Maven, …). */
+  userAgent?: string;
+  /** Test-only transport override (`testTransportOverride`). */
+  testOverride?: TestTransportOverride;
 }
 
 /** Hosts the catalogue may contact: every metadata/artifact host the adapters (and the URLs inside their JSON) use. */
@@ -39,11 +43,13 @@ export class CatalogService {
         allowedHosts: CATALOG_ALLOWED_HOSTS,
         ...(opts.lookup ? { lookup: opts.lookup } : {}),
         ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+        ...(opts.testOverride ? { testOverride: opts.testOverride } : {}),
         timeoutMs: 15_000,
         maxBytes: 16 * 1024 * 1024,
       }),
       cache: new TtlCache<string, string>({ defaultTtlMs: opts.ttlMs ?? 10 * 60_000, maxEntries: 500 }),
       ttlMs: opts.ttlMs ?? 10 * 60_000,
+      ...(opts.userAgent ? { userAgent: opts.userAgent } : {}),
     };
   }
 

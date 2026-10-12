@@ -20,12 +20,15 @@ import { FakeUpstreams } from "../support/modrinth.js";
 import { catalogOptions, connectSimNode, paperRequest, poll, publicLookup, templateIdByKey, waitJob, type SimNodeHandle } from "../support/panel.js";
 import { UiSocket } from "../support/realtime-client.js";
 import { makeJar, makeZip } from "../support/zip.js";
+import { startHttpsUpstream, type HttpsUpstream } from "../support/https-upstream.js";
 
 let t: TestApp | null = null;
 const agents: FakeAgent[] = [];
 const sockets: UiSocket[] = [];
+const httpsServers: HttpsUpstream[] = [];
 afterEach(async () => {
   for (const s of sockets.splice(0)) s.close();
+  for (const s of httpsServers.splice(0)) await s.close();
   for (const a of agents.splice(0)) await a.close().catch(() => undefined);
   await t?.close();
   t = null;
@@ -36,15 +39,24 @@ const pluginJar = (name: string, version: string, extra = "") => makeJar({ "plug
 const fabricJar = (id: string) => makeJar({ "fabric.mod.json": JSON.stringify({ schemaVersion: 1, id, version: "1.0.0", environment: "*", entrypoints: { main: ["com.example.Main"] } }) });
 const sha512 = (b: Buffer) => createHash("sha512").update(b).digest("hex");
 
-async function boot(opts: { env?: Record<string, string> } = {}) {
+/**
+ * `realTransport`: Modrinth/Mojang go through the production `createSafeFetch` + pinned HTTPS transport
+ * to a local HTTPS server (test certificate, test-only override) that serves the same fake upstreams.
+ */
+async function boot(opts: { env?: Record<string, string>; realTransport?: boolean } = {}) {
   const up = new FakeUpstreams();
   const cat = catalogOptions();
+  let https: HttpsUpstream | null = null;
+  if (opts.realTransport) {
+    https = await startHttpsUpstream((url, init) => up.fetch(url, init));
+    httpsServers.push(https);
+  }
   const r = await startWithOwner({
     background: true,
     catalog: cat.catalog,
     env: { SCHEDULER_INTERVAL_MS: "300000", ...(opts.env ?? {}) },
     serverJobs: { readyTimeoutMs: 10_000, slpWaitMs: 0 },
-    upstream: { fetchImpl: up.fetch, lookup: publicLookup },
+    upstream: https ? { lookup: publicLookup, testOverride: https.override } : { fetchImpl: up.fetch, lookup: publicLookup },
   });
   t = r.t;
   const node = await connectSimNode(r.t, r.owner, { agents });
@@ -60,7 +72,7 @@ async function boot(opts: { env?: Record<string, string> } = {}) {
     jar: pluginJar("BetaPlug", "1.0.0", "depend: [AlphaLib]\n"),
     dependencies: [{ project_id: "AlphaLib", version_id: null, dependency_type: "required" }],
   });
-  return { ...r, node, up };
+  return { ...r, node, up, https };
 }
 
 async function paperServer(owner: ApiClient, over: Record<string, unknown> = {}): Promise<string> {
@@ -232,6 +244,14 @@ describe("Modrinth browsing and install plans", () => {
     expect(ModrinthInstallPlan.parse((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "betaplug" })).json()).root.versionId).toBe("BetaV100");
     expect((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "betaplug", unknown: 1 })).statusCode).toBe(400);
     expect((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "nosuchproject" })).statusCode).toBe(404);
+    // The project's version list follows the installer's rules: prereleases only on request.
+    up.addProject({ id: "PrePlug", slug: "preplug", title: "Pre Plug", type: "plugin", loaders: ["paper"] });
+    up.addVersion("PrePlug", { id: "PreV1000", number: "1.0.0", filename: "Pre-1.0.0.jar", jar: pluginJar("Pre", "1.0.0") });
+    up.addVersion("PrePlug", { id: "PreB2000", number: "2.0.0-beta", type: "beta", filename: "Pre-2.0.0-beta.jar", jar: pluginJar("Pre", "2.0.0-beta") });
+    const rel = ModrinthProjectResponse.parse((await owner.get(`/servers/${id}/extensions/modrinth/projects/preplug`)).json());
+    expect(rel.versions.map((v) => v.versionId)).toEqual(["PreV1000"]);
+    const pre = ModrinthProjectResponse.parse((await owner.get(`/servers/${id}/extensions/modrinth/projects/preplug?allowPrerelease=true`)).json());
+    expect(pre.versions.map((v) => v.versionId).sort()).toEqual(["PreB2000", "PreV1000"]);
 
     // Rate limit: Modrinth says the window is used up for 60 s → the shared limiter refuses (no 2 s+ waits).
     // (Fresh projects: Modrinth responses are cached for 10 minutes.)
@@ -605,5 +625,39 @@ describe("sim agent fs.hash / jar.readEntries (contract shapes, per-file outcome
     await testPool().query("UPDATE extension_history SET at = now() - interval '400 days'");
     await t.tasks.maintenance!.runNow();
     expect((await history(owner, id)).items).toEqual([]);
+  });
+});
+
+describe("Modrinth and Mojang over the real pinned transport", () => {
+  it("identifies jars (POST /version_files), finds updates (POST /version_files/update), plans and looks up players end to end", async () => {
+    const { owner, node, up, https } = await boot({ realTransport: true });
+    const id = await paperServer(owner);
+    const v1 = up.projects.get("AlphaLib")!.versions[0]!;
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", v1.jar);
+    node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
+    const l = await scanned(owner, owner, id);
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", modrinth: { projectId: "AlphaLib", versionId: "AlphaV10", slug: "alphalib", title: "Alpha Lib" } });
+    expect(byName(l, "custom.jar")).toMatchObject({ source: "unknown", modrinth: null });
+    up.addVersion("AlphaLib", { id: "AlphaV20", number: "2.0.0", filename: "AlphaLib-2.0.0.jar", jar: pluginJar("AlphaLib", "2.0.0") });
+    const u = await owner.get(`/servers/${id}/extensions/updates`);
+    expect(u.statusCode, u.body).toBe(200);
+    expect(ExtensionUpdatesResponse.parse(u.json()).items.find((x) => x.path === "plugins/AlphaLib-1.0.0.jar")).toMatchObject({ updateAvailable: true, latest: { versionId: "AlphaV20" } });
+    const plan = await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "betaplug" });
+    expect(plan.statusCode, plan.body).toBe(200);
+    expect(ModrinthInstallPlan.parse(plan.json()).root.versionId).toBe("BetaV100");
+    const lookup = await owner.get(`/servers/${id}/players/lookup?name=Notch`);
+    expect(lookup.statusCode, lookup.body).toBe(200);
+    expect(lookup.json()).toMatchObject({ name: "Notch", source: "mojang" });
+
+    // What went over the wire: real POSTs with JSON bodies, Content-Type and the BlockForge User-Agent.
+    const posts = https!.requests.filter((r) => r.method === "POST");
+    expect(posts.map((r) => new URL(r.url).pathname)).toEqual(expect.arrayContaining(["/v2/version_files", "/v2/version_files/update"]));
+    for (const p of posts) {
+      expect(p.headers["content-type"]).toBe("application/json");
+      expect(JSON.parse(p.body)).toMatchObject({ hashes: expect.any(Array), algorithm: "sha512" });
+    }
+    for (const r of https!.requests) expect(r.headers["user-agent"]).toMatch(/^BlockForge\/\d+\.\d+\.\d+ \(.+\)$/);
+    expect(https!.requests.some((r) => r.url.startsWith("https://api.mojang.com/users/profiles/minecraft/"))).toBe(true);
+    expect(up.misses).toEqual([]);
   });
 });

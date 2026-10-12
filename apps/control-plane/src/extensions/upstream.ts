@@ -1,6 +1,6 @@
 import { CatalogError, ModrinthClient, ModrinthRateLimiter, MODRINTH_HOSTS, MOJANG_PROFILE_HOSTS, modrinthUserAgent, TtlCache, type CatalogContext } from "@blockforge/minecraft";
 import type { Logger } from "pino";
-import { createSafeFetch, SafeFetchError } from "../catalog/safe-fetch.js";
+import { createSafeFetch, SafeFetchError, type TestTransportOverride } from "../catalog/safe-fetch.js";
 import { JobError } from "../jobs/types.js";
 import { AppError, badRequest, notFound, rateLimited, unprocessable, upstreamError } from "../lib/errors.js";
 import type { LookupFn } from "../notifications/ssrf.js";
@@ -12,6 +12,8 @@ export interface UpstreamOptions {
   /** Test seams (recorded fixtures). */
   fetchImpl?: typeof fetch;
   lookup?: LookupFn;
+  /** Test-only transport override (`testTransportOverride`): the real pinned transport against a local server. */
+  testOverride?: TestTransportOverride;
   /** Rate limiter clock / waits (tests). */
   limiter?: { now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number };
 }
@@ -43,6 +45,7 @@ export class Upstreams {
         allowedHosts: hosts,
         ...(opts.lookup ? { lookup: opts.lookup } : {}),
         ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+        ...(opts.testOverride ? { testOverride: opts.testOverride } : {}),
         timeoutMs: 15_000,
         maxBytes: 16 * 1024 * 1024,
       });

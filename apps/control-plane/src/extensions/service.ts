@@ -220,11 +220,12 @@ export class ExtensionsService {
     }
   }
 
-  async project(access: ServerAccess, ref: string): Promise<ModrinthProjectResponse> {
+  /** `allowPrerelease` (default false, like plans and updates): beta/alpha versions are listed only on request. */
+  async project(access: ServerAccess, ref: string, allowPrerelease = false): Promise<ModrinthProjectResponse> {
     const t = requireTarget(access.server);
     try {
       const p = await getModrinthProject(this.d.upstreams.modrinth, ref, t.software);
-      const versions = await listCompatibleVersions(this.d.upstreams.modrinth, p.projectId, t);
+      const versions = await listCompatibleVersions(this.d.upstreams.modrinth, p.projectId, t, { allowPrerelease });
       const rows = await this.rows(access.server.id);
       return {
         project: toContractProjectDetails(p, t.software),

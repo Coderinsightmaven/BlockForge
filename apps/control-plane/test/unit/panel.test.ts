@@ -9,7 +9,7 @@ import type { Grant, Principal } from "../../src/rbac/authorize.js";
 import { effectiveServerPermissions, escalation, mergeSubuserPermissions, permissionList, type ServerResource } from "../../src/servers/permissions.js";
 import { transitionalStateFor } from "../../src/servers/state.js";
 import { maskSecrets } from "../../src/servers/secret-masks.js";
-import type { PinnedGetResult } from "../../src/notifications/http.js";
+import type { PinnedResponse } from "../../src/notifications/http.js";
 import { USERNAME_RE, usernameBase, usernameCandidate } from "../../src/users/username.js";
 import { buildWorkloadSpec, diagnoseStartupExit, eggEulaFile, minecraftGame, slpExpected, type ServerRuntimeContext } from "../../src/servers/runtime.js";
 import { OffsetClock } from "../support/clock.js";
@@ -266,7 +266,7 @@ describe("catalogue fetch pins connections to validated addresses", () => {
         lookups++;
         return [{ address: lookups <= 2 ? answers[host]! : "127.0.0.1", family: 4 }];
       },
-      pinnedGet: async (target): Promise<PinnedGetResult> => {
+      transport: async (target): Promise<PinnedResponse> => {
         seen.push({ host: target.url.hostname, address: target.address });
         if (target.url.hostname === "a.example") return { status: 302, headers: { location: "https://b.example/next" }, body: Buffer.alloc(0) };
         return { status: 200, headers: { "content-type": "application/json" }, body: Buffer.from('{"ok":true}') };

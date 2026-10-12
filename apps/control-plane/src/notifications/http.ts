@@ -56,40 +56,61 @@ export const pinnedHttpsPost: RawPost = (target, body, headers, timeoutMs, maxRe
     req.end(body);
   });
 
-export interface PinnedGetResult {
+export interface PinnedResponse {
   status: number;
   headers: Record<string, string>;
   body: Buffer;
 }
 
+export interface PinnedRequestOptions {
+  method: string;
+  /** Sent as given (lower-case names); `content-length` is set for a body. */
+  headers: Record<string, string>;
+  body?: Buffer;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  signal?: AbortSignal;
+  /**
+   * Test-only (see `testTransportOverride` in catalog/safe-fetch.ts): trust this CA and open the socket
+   * to `connect` instead of the pinned address. TLS is still verified for the URL's hostname.
+   */
+  testOverride?: { ca: string; connect: { address: string; port: number } };
+}
+
+export type PinnedTransport = (target: ValidatedTarget, opts: PinnedRequestOptions) => Promise<PinnedResponse>;
+
 /**
- * GET over HTTPS to an already validated, pinned address (same pinning as {@link pinnedHttpsPost}).
- * Redirects are not followed (the caller re-validates every hop). The body is bounded: exceeding
- * `maxResponseBytes` fails the request instead of truncating it.
+ * An HTTPS request (any method, headers and bounded body) to an already validated, pinned address —
+ * same pinning as {@link pinnedHttpsPost}: the socket connects to `target.address` (no second DNS
+ * lookup → no DNS-rebinding window) while SNI, the Host header and certificate verification use the
+ * original hostname. Redirects are not followed (the caller decides and re-validates every hop). The
+ * response body is bounded: exceeding `maxResponseBytes` fails the request instead of truncating it.
  */
-export function pinnedHttpsGet(
-  target: ValidatedTarget,
-  opts: { headers?: Record<string, string>; timeoutMs: number; maxResponseBytes: number; signal?: AbortSignal },
-): Promise<PinnedGetResult> {
-  return new Promise<PinnedGetResult>((resolve, reject) => {
+export const pinnedHttpsRequest: PinnedTransport = (target, opts) =>
+  new Promise<PinnedResponse>((resolve, reject) => {
+    const address = opts.testOverride?.connect.address ?? target.address;
+    const family = isIP(address) === 6 ? 6 : opts.testOverride ? 4 : target.family;
     const pinnedLookup: LookupFunction = (_host, options, cb) => {
       if (typeof options === "object" && options?.all) {
-        (cb as unknown as (err: null, addrs: { address: string; family: number }[]) => void)(null, [{ address: target.address, family: target.family }]);
+        (cb as unknown as (err: null, addrs: { address: string; family: number }[]) => void)(null, [{ address, family }]);
       } else {
-        cb(null, target.address, target.family);
+        cb(null, address, family);
       }
     };
     const hostname = target.url.hostname.replace(/^\[|\]$/g, "");
+    const headers: Record<string, string> = { ...opts.headers };
+    if (opts.body) headers["content-length"] = String(opts.body.byteLength);
     const req = httpsRequest(
       {
-        method: "GET",
+        method: opts.method,
         host: hostname,
         ...(isIP(hostname) ? {} : { servername: hostname }),
-        port: target.url.port ? Number(target.url.port) : 443,
+        port: opts.testOverride?.connect.port ?? (target.url.port ? Number(target.url.port) : 443),
         path: `${target.url.pathname}${target.url.search}`,
-        headers: { "user-agent": "BlockForge/1", ...(opts.headers ?? {}) },
+        headers,
         lookup: pinnedLookup,
         timeout: opts.timeoutMs,
+        ...(opts.testOverride ? { ca: opts.testOverride.ca } : {}),
         ...(opts.signal ? { signal: opts.signal } : {}),
       },
       (res: IncomingMessage) => {
@@ -111,18 +132,17 @@ export function pinnedHttpsGet(
           chunks.push(c);
         });
         res.on("end", () => {
-          const headers: Record<string, string> = {};
-          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) headers[k] = Array.isArray(v) ? v.join(", ") : v;
-          resolve({ status: res.statusCode ?? 0, headers, body: Buffer.concat(chunks) });
+          const out: Record<string, string> = {};
+          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out[k] = Array.isArray(v) ? v.join(", ") : v;
+          resolve({ status: res.statusCode ?? 0, headers: out, body: Buffer.concat(chunks) });
         });
         res.on("error", reject);
       },
     );
     req.on("timeout", () => req.destroy(new Error(`request timed out after ${opts.timeoutMs} ms`)));
     req.on("error", reject);
-    req.end();
+    req.end(opts.body);
   });
-}
 
 export interface SafePostOptions {
   allowlist?: readonly string[];

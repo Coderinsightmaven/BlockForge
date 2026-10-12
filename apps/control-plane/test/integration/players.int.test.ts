@@ -81,7 +81,8 @@ describe("players overview", () => {
     expect(o.ops.length).toBeGreaterThan(0);
     expect(o.bannedPlayers.length).toBeGreaterThan(0);
     expect(o.bannedIps).toEqual([]);
-    expect(o.listErrors).toEqual([expect.objectContaining({ file: "banned-ips.json" })]);
+    // The unreadable file is reported (invalid entries of other files may be listed too).
+    expect(o.listErrors).toEqual(expect.arrayContaining([expect.objectContaining({ file: "banned-ips.json", message: expect.stringContaining("not valid JSON") })]));
     expect(o.availableActions).toEqual(["kick", "ban", "pardon", "ban-ip", "pardon-ip", "op", "deop", "whitelist-add", "whitelist-remove", "whitelist-set", "whitelist-reload"]);
 
     // No answer to `list`: the latest Server List Ping sample (may be partial).
@@ -97,7 +98,7 @@ describe("players overview", () => {
     expect(s.availableActions).toEqual(["ban", "pardon", "ban-ip", "pardon-ip", "op", "deop", "whitelist-add", "whitelist-remove", "whitelist-set"]);
     // Missing files are empty lists, never errors.
     node.sim.files(id).delete("banned-ips.json");
-    expect((await overview(owner, id)).listErrors).toEqual([]);
+    expect((await overview(owner, id)).listErrors.filter((e) => e.file === "banned-ips.json")).toEqual([]);
   });
 
   it("checks permissions and refuses Velocity actions", async () => {
