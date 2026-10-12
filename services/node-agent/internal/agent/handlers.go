@@ -121,11 +121,11 @@ func (a *Agent) handlers() map[string]Handler {
 		protocol.CmdFsList: func(ctx context.Context, c *Command) (any, error) {
 			p := c.Payload.(*protocol.FsPathPayload)
 			return a.withRoot(p.WorkloadID, func(r *fsops.Root) (any, error) {
-				entries, err := r.List(p.Path)
+				entries, truncated, err := r.List(p.Path)
 				if err != nil {
 					return nil, err
 				}
-				return map[string]any{"entries": entries}, nil
+				return map[string]any{"entries": entries, "truncated": truncated}, nil
 			})
 		},
 		protocol.CmdFsStat: func(ctx context.Context, c *Command) (any, error) {

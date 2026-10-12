@@ -19,11 +19,13 @@ const (
 	TokenClockSkewMs     = 30_000
 	CommandMaxLifetimeMs = 900_000
 	CommandExpiryGraceMs = 30_000
-	ResultCacheMs        = 900_000
-	MaxFrameBytes        = 16 * 1024 * 1024
-	LogLineMaxBytes      = 8192
-	LogLinesPerSecond    = 200
-	LogBurstLines        = 2000
+	// CommandClockSkewMs bounds how far issuedAt may be ahead of the agent clock.
+	CommandClockSkewMs = 30_000
+	ResultCacheMs      = 900_000
+	MaxFrameBytes      = 16 * 1024 * 1024
+	LogLineMaxBytes    = 8192
+	LogLinesPerSecond  = 200
+	LogBurstLines      = 2000
 )
 
 // InsecureHTTPAllowedHosts are the only hosts reachable over plain HTTP with --insecure-allow-http.

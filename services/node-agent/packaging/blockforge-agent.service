@@ -31,8 +31,9 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
-# Data root and config dir are the only writable paths. If the data root lives under /home,
-# set ProtectHome=read-only and add it here instead.
+# Data root and config dir are the only writable paths. ProtectHome=yes hides /home entirely, so a
+# data root below /home needs the drop-in packaging/drop-ins/home-data-root.conf
+# (ProtectHome=read-only + ReadWritePaths=<dataRoot>).
 ReadWritePaths=/var/lib/blockforge /etc/blockforge
 ProtectHome=yes
 PrivateTmp=yes

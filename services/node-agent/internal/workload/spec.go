@@ -26,10 +26,12 @@ import (
 
 // Labels set on every managed container.
 const (
-	LabelManaged    = "io.blockforge.managed"
-	LabelWorkload   = "io.blockforge.workload"
-	LabelSpecHash   = "io.blockforge.spec-hash"
-	LabelKind       = "io.blockforge.kind"
+	LabelManaged  = "io.blockforge.managed"
+	LabelWorkload = "io.blockforge.workload"
+	LabelSpecHash = "io.blockforge.spec-hash"
+	LabelKind     = "io.blockforge.kind"
+	// LabelNode marks bf-* networks with the id of the node agent that created them.
+	LabelNode       = "io.blockforge.node"
 	LabelWatchtower = "com.centurylinklabs.watchtower.enable"
 
 	// ProbeJarContainerPath is where the JVM probe is bind-mounted read-only.

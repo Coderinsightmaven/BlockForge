@@ -31,6 +31,8 @@ import (
 
 // Options configures the driver.
 type Options struct {
+	// NodeID labels the bf-* networks this agent creates (io.blockforge.node) and is required to reuse one.
+	NodeID     string
 	DataRoot   string
 	DockerHost string
 	UID, GID   int
@@ -72,6 +74,9 @@ type wstate struct {
 
 // NewDriver connects to Docker (DOCKER_HOST / config override) with API version negotiation.
 func NewDriver(o Options) (*Driver, error) {
+	if !protocol.IsUUID(o.NodeID) {
+		return nil, errors.New("workload driver: NodeID must be the enrolled node id")
+	}
 	opts := []client.Opt{client.FromEnv, client.WithAPIVersionNegotiation()}
 	if o.DockerHost != "" {
 		opts = append(opts, client.WithHost(o.DockerHost))
@@ -406,7 +411,7 @@ type ProgressFunc func(stage, message string, percent *float64)
 // container with a different spec is left running and reported as changed.
 func (d *Driver) Ensure(ctx context.Context, spec *protocol.WorkloadSpec, progress ProgressFunc) (*EnsureResult, error) {
 	if !d.o.Images.Allowed(spec.Image) {
-		return nil, protocol.Errorf(protocol.CodeValidationFailed, "image %q is not allowed by this agent's image allowlist", spec.Image)
+		return nil, protocol.Errorf(protocol.CodeImageNotAllowed, "image %q is not allowed by this agent's image allowlist", spec.Image)
 	}
 	for _, n := range spec.Networks {
 		if !strings.HasPrefix(n.Name, "bf-") {
@@ -420,6 +425,12 @@ func (d *Driver) Ensure(ctx context.Context, spec *protocol.WorkloadSpec, progre
 	c, err := d.inspectManaged(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	// Refuse foreign bf-* networks before anything is persisted or created.
+	for _, n := range spec.Networks {
+		if _, err := d.checkNetwork(ctx, n.Name); err != nil {
+			return nil, err
+		}
 	}
 	if err := d.o.Sandbox.EnsureDataDir(id); err != nil {
 		return nil, protocol.Errorf(protocol.CodeInternal, "prepare data directory: %v", err)
@@ -538,33 +549,52 @@ func (d *Driver) ensureImage(ctx context.Context, image string, progress Progres
 	return nil
 }
 
-func (d *Driver) ensureNetwork(ctx context.Context, name string) error {
+// checkNetwork validates an existing bf-* network before a workload may join it: it must have been
+// created by this agent (io.blockforge.managed=true and io.blockforge.node=<our node id>) and be a
+// bridge. A missing network is fine (it will be created). Foreign networks are a CONFLICT.
+func (d *Driver) checkNetwork(ctx context.Context, name string) (exists bool, err error) {
 	if !strings.HasPrefix(name, "bf-") {
-		return protocol.Errorf(protocol.CodeValidationFailed, "network %q must start with bf-", name)
+		return false, protocol.Errorf(protocol.CodeValidationFailed, "network %q must start with bf-", name)
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		res, err := d.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
-		if err == nil {
-			if res.Network.Name != name {
-				return protocol.Errorf(protocol.CodeConflict, "network lookup %q resolved to %q", name, res.Network.Name)
-			}
-			if res.Network.Driver != "bridge" {
-				return protocol.Errorf(protocol.CodeConflict, "network %q exists with driver %q (bridge required)", name, res.Network.Driver)
-			}
-			return nil
+	res, err := d.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+	if err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return false, nil
 		}
-		if !cerrdefs.IsNotFound(err) {
-			return runtimeErr("inspect network", err)
+		return false, runtimeErr("inspect network", err)
+	}
+	n := res.Network
+	switch {
+	case n.Name != name:
+		return true, protocol.Errorf(protocol.CodeConflict, "network lookup %q resolved to %q", name, n.Name)
+	case n.Labels[LabelManaged] != "true":
+		return true, protocol.Errorf(protocol.CodeConflict, "network %q exists but was not created by BlockForge; refusing to attach workloads to it", name)
+	case n.Labels[LabelNode] != d.o.NodeID:
+		return true, protocol.Errorf(protocol.CodeConflict, "network %q is owned by another BlockForge node; refusing to attach workloads to it", name)
+	case n.Driver != "bridge":
+		return true, protocol.Errorf(protocol.CodeConflict, "network %q exists with driver %q (bridge required)", name, n.Driver)
+	}
+	return true, nil
+}
+
+func (d *Driver) ensureNetwork(ctx context.Context, name string) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		exists, err := d.checkNetwork(ctx, name)
+		if err != nil || exists {
+			return err
 		}
 		_, err = d.cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{
-			Driver: "bridge", Labels: map[string]string{LabelManaged: "true"},
+			Driver: "bridge", Labels: map[string]string{LabelManaged: "true", LabelNode: d.o.NodeID},
 		})
-		if err == nil || !cerrdefs.IsConflict(err) {
+		if err == nil {
+			return nil
+		}
+		if !cerrdefs.IsConflict(err) {
 			return runtimeErr("create network", err)
 		}
-		// Lost a creation race: inspect again.
+		// Lost a creation race: validate whatever exists now.
 	}
-	return nil
+	return protocol.RetryableErrorf(protocol.CodeConflict, "network %q could not be created", name)
 }
 
 // ---------------------------------------------------------------------------
@@ -584,7 +614,7 @@ func (d *Driver) startLocked(ctx context.Context, id string, manual bool) (proto
 		return protocol.WorkloadStatus{}, protocol.Errorf(protocol.CodeNotFound, "workload %s has no spec on this node (run workload.ensure first)", id)
 	}
 	if !d.o.Images.Allowed(spec.Image) {
-		return protocol.WorkloadStatus{}, protocol.Errorf(protocol.CodeValidationFailed, "image %q is no longer allowed by this agent", spec.Image)
+		return protocol.WorkloadStatus{}, protocol.Errorf(protocol.CodeImageNotAllowed, "image %q is no longer allowed by this agent", spec.Image)
 	}
 	w := d.state(id)
 	if manual {
@@ -1122,15 +1152,16 @@ func (d *Driver) policyRestart(id string) {
 	}
 }
 
-// pruneNetworks removes bf-* networks the agent created (managed label) once no container uses them.
-// Networks without the label (created by someone else) are never removed.
+// pruneNetworks removes bf-* networks this agent created (managed + node labels) once no container
+// uses them. Networks created by anyone else are never removed.
 func (d *Driver) pruneNetworks(ctx context.Context, names []string) {
 	for _, name := range names {
 		if !strings.HasPrefix(name, "bf-") {
 			continue
 		}
 		res, err := d.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
-		if err != nil || res.Network.Name != name || res.Network.Labels[LabelManaged] != "true" || len(res.Network.Containers) > 0 {
+		if err != nil || res.Network.Name != name || res.Network.Labels[LabelManaged] != "true" ||
+			res.Network.Labels[LabelNode] != d.o.NodeID || len(res.Network.Containers) > 0 {
 			continue
 		}
 		if _, err := d.cli.NetworkRemove(ctx, res.Network.ID, client.NetworkRemoveOptions{}); err != nil && !cerrdefs.IsNotFound(err) {

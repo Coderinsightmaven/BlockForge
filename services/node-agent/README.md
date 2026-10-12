@@ -62,6 +62,7 @@ blockforge-agent run [--config-dir /etc/blockforge]
 * `http://` is refused. `--insecure-allow-http` only permits `localhost`, `127.0.0.1`, `::1` and
   `host.docker.internal` (development, SSH tunnels). `--ca-file` pins a private CA.
 * The token can also be passed as `BLOCKFORGE_ENROLL_TOKEN` (keeps it out of the process list).
+* `IMAGE_NOT_ALLOWED` is returned when a spec's image is not on `imageAllowlist`.
 * Workload UID/GID default to `1000:1000` when the agent runs as root, otherwise to the agent's own
   uid/gid (non-root agents cannot chown, so workloads must run as the agent user). Override with
   `--workload-uid/--workload-gid`.
@@ -90,6 +91,19 @@ sudo install -m 0644 packaging/blockforge-agent.service /etc/systemd/system/bloc
 sudo systemctl daemon-reload && sudo systemctl enable --now blockforge-agent
 journalctl -u blockforge-agent -f
 ```
+
+**Data root under `/home`** (e.g. `/home/game/blockforge`): the unit's `ProtectHome=yes` hides `/home`
+completely, so `ReadWritePaths` alone cannot expose a path below it. Install the shipped drop-in after
+editing its path (it switches to `ProtectHome=read-only` and adds the data root to `ReadWritePaths`;
+optionally `User=`/`Group=` of the login user who owns the data root):
+
+```sh
+sudo install -D -m 0644 packaging/drop-ins/home-data-root.conf \
+    /etc/systemd/system/blockforge-agent.service.d/home-data-root.conf
+sudo systemctl daemon-reload && sudo systemctl restart blockforge-agent
+```
+
+Both the plain unit and unit + drop-in pass `systemd-analyze verify` (exposure 1.6 / 1.7).
 
 The unit runs as `blockforge` with `NoNewPrivileges`, an empty capability bounding set,
 `ProtectSystem=strict` (+ `ReadWritePaths=/var/lib/blockforge /etc/blockforge`), `ProtectHome`, private
@@ -143,8 +157,9 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
 ## Security model (summary)
 
 * **Commands**: Ed25519 signature over the exact body with the pinned control-plane key → nodeId →
-  expiry (+30 s) → lifetime ≤ 15 min → seen-set (15-min result cache + fsync'd `commands.journal`
-  that survives restarts) → payload validation equivalent to the zod schemas → handler. Rejected,
+  expiry (+30 s) → `issuedAt <= expiresAt` → `issuedAt <= now + 30 s` → lifetime ≤ 15 min (overflow-safe) → seen-set (15-min result cache + fsync'd `commands.journal`
+  that survives restarts; a failed append is rolled back, and on an unrecoverable write/fsync error the
+  journal fails closed — commands get a retryable `INTERNAL` — until it has been rewritten atomically) → payload validation equivalent to the zod schemas → handler. Rejected,
   unauthenticated ids never enter the seen-set. Pending (unapproved) nodes only run `node.facts`.
 * **Containers**: `bf-<workloadId>`, labels `io.blockforge.managed=true`, `io.blockforge.workload`,
   spec hash, `com.centurylinklabs.watchtower.enable=false`; UID/GID 1000 (configurable), cap-drop ALL,
@@ -152,7 +167,9 @@ always `statfs` it because it is mounted at the same path); mount `/:/host/root:
   never privileged, never host network, never a Docker socket, Docker restart policy off (the agent
   runs its own, which never fires after a deliberate stop/kill). Only containers with the managed
   label and networks named `bf-*` are ever listed, inspected, attached to or modified; a same-named
-  unlabelled container is refused.
+  unlabelled container is refused. An existing `bf-*` network is only joined if it carries
+  `io.blockforge.managed=true` and `io.blockforge.node=<this node id>` (set when the agent creates it);
+  anything else is a `CONFLICT`, checked before any state is persisted, and is never pruned.
 * **Files**: every `fs.*` path is validated (no absolute paths, `..`, NUL, backslashes, drive letters,
   device names, no mutation of the data root itself) and resolved with `os.Root`, so symlinks can never
   leave `<dataRoot>/servers/<id>/data`. FIFOs/devices are refused without blocking. Archives are

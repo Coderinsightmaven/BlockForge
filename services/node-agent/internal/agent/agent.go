@@ -159,6 +159,12 @@ func (a *Agent) onWelcome(w protocol.WelcomeFrame, usingNext bool) {
 		return
 	}
 	a.approved.Store(w.Approved)
+	if skew := time.Now().UnixMilli() - w.ServerTime; w.ServerTime > 0 && (skew > 15_000 || skew < -15_000) {
+		// Commands issued more than 30 s "in the future" are rejected (agent-protocol.md §4).
+		msg := fmt.Sprintf("agent clock differs from the control plane by %d ms; check NTP", skew)
+		a.log.Warn(msg)
+		a.emitEvent(protocol.EventAgentWarning, protocol.AgentWarningEvent{Code: "CLOCK_SKEW", Message: msg})
+	}
 	if w.MetricsIntervalMs > 0 && w.MetricsIntervalMs != a.metricsMs.Load() {
 		a.metricsMs.Store(w.MetricsIntervalMs)
 		select {
@@ -259,7 +265,7 @@ func (a *Agent) Setup(ctx context.Context) error {
 	})
 	a.outbox.OnLogsDropped = a.logs.AddDropped
 	if a.driver, err = workload.NewDriver(workload.Options{
-		DataRoot: a.cfg.DataRoot, DockerHost: a.cfg.DockerHost, UID: a.cfg.WorkloadUID, GID: a.cfg.WorkloadGID,
+		NodeID: a.cfg.NodeID, DataRoot: a.cfg.DataRoot, DockerHost: a.cfg.DockerHost, UID: a.cfg.WorkloadUID, GID: a.cfg.WorkloadGID,
 		Images: images, Sandbox: a.sandbox, Logs: a.logs, Emit: a.emitEvent, Logger: a.log, ProbeJar: jvmprobe.Jar(),
 	}); err != nil {
 		return fmt.Errorf("docker client: %w", err)

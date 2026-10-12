@@ -101,7 +101,7 @@ func TestTraversalAndSymlinkEscape(t *testing.T) {
 		_, err := r.Read(p, 100)
 		expectCode(t, err, protocol.CodePathForbidden)
 	}
-	if _, err := r.List("parentdir"); code(err) != protocol.CodePathForbidden {
+	if _, _, err := r.List("parentdir"); code(err) != protocol.CodePathForbidden {
 		t.Fatalf("list via symlinked parent: %v", err)
 	}
 	_, err := r.Write(protocol.FsWritePayload{Path: "parentdir/planted", Content: "x", Encoding: "utf8"})
@@ -229,8 +229,8 @@ func TestListStatDeleteRenameDu(t *testing.T) {
 	os.WriteFile(filepath.Join(data, "world", "region", "r.0.0.mca"), make([]byte, 5000), 0o644)
 	os.WriteFile(filepath.Join(data, "world", "level.dat"), make([]byte, 100), 0o644)
 	os.WriteFile(filepath.Join(data, "server.jar"), make([]byte, 3000), 0o644)
-	entries, err := r.List("")
-	if err != nil {
+	entries, truncated, err := r.List("")
+	if err != nil || truncated {
 		t.Fatal(err)
 	}
 	names := []string{}
@@ -456,4 +456,24 @@ func TestFIFODoesNotHang(t *testing.T) {
 	}
 	_, err := r.Read("pipe", 10)
 	expectCode(t, err, protocol.CodePathForbidden)
+}
+
+func TestListTruncatedAtCap(t *testing.T) {
+	r, data, _ := newRoot(t)
+	old := MaxListEntries
+	MaxListEntries = 5
+	defer func() { MaxListEntries = old }()
+	for i := 0; i < 5; i++ {
+		os.WriteFile(filepath.Join(data, "f"+string(rune('a'+i))), nil, 0o644)
+	}
+	// .blockforge + 5 files = 6 entries > cap 5
+	entries, truncated, err := r.List("")
+	if err != nil || !truncated || len(entries) != 5 {
+		t.Fatalf("cap: %v truncated=%v n=%d", err, truncated, len(entries))
+	}
+	os.Remove(filepath.Join(data, "fa"))
+	entries, truncated, err = r.List("")
+	if err != nil || truncated || len(entries) != 5 {
+		t.Fatalf("exactly at cap must not be truncated: %v %v %d", err, truncated, len(entries))
+	}
 }

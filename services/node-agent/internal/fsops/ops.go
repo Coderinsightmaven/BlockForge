@@ -17,9 +17,11 @@ import (
 	"github.com/blockforge/node-agent/internal/protocol"
 )
 
-// Limits for directory listings and walks.
+// MaxListEntries caps fs.list results; truncated=true reports the cap (variable for tests).
+var MaxListEntries = 50_000
+
+// Limits for directory walks and writes.
 const (
-	MaxListEntries = 50_000
 	MaxWalkEntries = 2_000_000
 	MaxWriteBytes  = 7 * 1024 * 1024
 )
@@ -47,43 +49,48 @@ func entryFor(name, p string, fi fs.FileInfo) protocol.FileEntry {
 	}
 }
 
-// List implements fs.list.
-func (r *Root) List(p string) ([]protocol.FileEntry, error) {
+// List implements fs.list. truncated reports that the directory has more than MaxListEntries
+// entries; the first MaxListEntries in directory order are returned, sorted by name.
+func (r *Root) List(p string) (entries []protocol.FileEntry, truncated bool, err error) {
 	dir, err := CleanPath(p, false)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	f, err := r.r.Open(dir)
 	if err != nil {
-		return nil, MapError("list", p, err)
+		return nil, false, MapError("list", p, err)
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, MapError("list", p, err)
+		return nil, false, MapError("list", p, err)
 	}
 	if !fi.IsDir() {
-		return nil, protocol.Errorf(protocol.CodeValidationFailed, "%q is not a directory", p)
+		return nil, false, protocol.Errorf(protocol.CodeValidationFailed, "%q is not a directory", p)
 	}
-	entries := []protocol.FileEntry{}
-	for len(entries) < MaxListEntries {
+	entries = []protocol.FileEntry{}
+	for !truncated {
 		batch, err := f.ReadDir(1024)
 		for _, de := range batch {
+			if len(entries) >= MaxListEntries {
+				truncated = true
+				break
+			}
 			info, ierr := de.Info()
 			if ierr != nil {
 				continue // raced with deletion
 			}
 			entries = append(entries, entryFor(de.Name(), path.Join(displayPath(dir), de.Name()), info))
 		}
-		if err == io.EOF || len(batch) == 0 {
+		if truncated || err == io.EOF || len(batch) == 0 {
 			break
 		}
 		if err != nil {
-			return nil, MapError("list", p, err)
+			return nil, false, MapError("list", p, err)
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-	return entries, nil
+	return entries, truncated, nil
 }
 
 // Stat implements fs.stat (does not follow a final symlink).

@@ -15,13 +15,14 @@ const (
 	RejectWrongNode    = "wrong-node"
 	RejectExpired      = "expired"
 	RejectLifetime     = "lifetime"
+	RejectFuture       = "future"
 )
 
 // B64 is base64url without padding (protocol §1).
 var B64 = base64.RawURLEncoding
 
 // VerifyCommand performs the envelope checks in protocol order: signature over the exact body
-// bytes with the pinned control-plane key → body shape → nodeId → expiry (+grace) → lifetime.
+// bytes with the pinned control-plane key → body shape → nodeId → time window (CheckCommandWindow).
 // It returns the parsed body on success, or a rejection reason. Payload validation and the
 // seen-set are the caller's responsibility (they come next in the protocol order).
 func VerifyCommand(frame CommandFrame, cpKey ed25519.PublicKey, nodeID string, now time.Time) (*CommandBody, string) {
@@ -39,14 +40,33 @@ func VerifyCommand(frame CommandFrame, cpKey ed25519.PublicKey, nodeID string, n
 	if body.NodeID != nodeID {
 		return body, RejectWrongNode
 	}
-	nowMs := now.UnixMilli()
-	if nowMs > body.ExpiresAt+CommandExpiryGraceMs {
-		return body, RejectExpired
-	}
-	if body.ExpiresAt-body.IssuedAt > CommandMaxLifetimeMs {
-		return body, RejectLifetime
+	if r := CheckCommandWindow(body.IssuedAt, body.ExpiresAt, now.UnixMilli()); r != "" {
+		return body, r
 	}
 	return body, ""
+}
+
+// CheckCommandWindow applies the time rules in protocol order (agent-protocol.md §4):
+// now <= expiresAt + grace → issuedAt <= expiresAt → issuedAt <= now + skew →
+// expiresAt - issuedAt <= max lifetime. Comparisons are written without additions that could
+// overflow, and values outside [0, 2^53-1] (not representable by the control plane) are rejected.
+func CheckCommandWindow(issuedAt, expiresAt, nowMs int64) string {
+	if issuedAt < 0 || expiresAt < 0 || issuedAt > maxSafeInteger || expiresAt > maxSafeInteger {
+		return RejectMalformed
+	}
+	if nowMs > expiresAt && nowMs-expiresAt > CommandExpiryGraceMs {
+		return RejectExpired
+	}
+	if issuedAt > expiresAt {
+		return RejectLifetime
+	}
+	if issuedAt > nowMs && issuedAt-nowMs > CommandClockSkewMs {
+		return RejectFuture
+	}
+	if expiresAt-issuedAt > CommandMaxLifetimeMs { // both in [0, 2^53), issuedAt <= expiresAt: no overflow
+		return RejectLifetime
+	}
+	return ""
 }
 
 var commandBodySchema = Obj(

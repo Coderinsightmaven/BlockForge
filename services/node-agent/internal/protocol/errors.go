@@ -21,6 +21,7 @@ const (
 	CodeChecksumMismatch   ErrorCode = "CHECKSUM_MISMATCH"
 	CodeDownloadFailed     ErrorCode = "DOWNLOAD_FAILED"
 	CodeHostNotAllowed     ErrorCode = "HOST_NOT_ALLOWED"
+	CodeImageNotAllowed    ErrorCode = "IMAGE_NOT_ALLOWED"
 	CodeRuntimeError       ErrorCode = "RUNTIME_ERROR"
 	CodeTimeout            ErrorCode = "TIMEOUT"
 	CodeBusy               ErrorCode = "BUSY"

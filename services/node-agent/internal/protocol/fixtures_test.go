@@ -78,16 +78,17 @@ func TestCommandFixtures(t *testing.T) {
 	k := keys(t)
 	now := time.UnixMilli(k.Now)
 	cases := map[string]string{
-		"cmd-workload-start.json":       "ok",
-		"cmd-workload-ensure.json":      "ok",
-		"cmd-fs-write.json":             "ok",
-		"cmd-artifact-fetch.json":       "ok",
-		"cmd-reject-bad-signature.json": "bad-signature",
-		"cmd-reject-wrong-node.json":    "wrong-node",
-		"cmd-reject-wrong-key.json":     "bad-signature",
-		"cmd-reject-lifetime.json":      "lifetime",
-		"cmd-reject-root-delete.json":   "invalid-payload",
-		"cmd-credentials-rotate.json":   "ok",
+		"cmd-workload-start.json":             "ok",
+		"cmd-workload-ensure.json":            "ok",
+		"cmd-fs-write.json":                   "ok",
+		"cmd-artifact-fetch.json":             "ok",
+		"cmd-reject-bad-signature.json":       "bad-signature",
+		"cmd-reject-wrong-node.json":          "wrong-node",
+		"cmd-reject-wrong-key.json":           "bad-signature",
+		"cmd-reject-lifetime.json":            "lifetime",
+		"cmd-reject-root-delete.json":         "invalid-payload",
+		"cmd-reject-reversed-timestamps.json": "lifetime",
+		"cmd-credentials-rotate.json":         "ok",
 	}
 	for file, want := range cases {
 		t.Run(file, func(t *testing.T) {
@@ -278,5 +279,59 @@ func TestRotationProofFixture(t *testing.T) {
 	cur, _ := auth.ParsePublicKeyB64(k.Agent.PublicKey)
 	if auth.VerifyRotationProof(cur, k.NodeID, res.ID, data.Proof) {
 		t.Fatal("proof must not verify with the current key")
+	}
+}
+
+// signed builds a cmd frame signed with the TEST-ONLY control-plane fixture key.
+func signed(t *testing.T, k fixtureKeys, issuedAt, expiresAt any) []byte {
+	t.Helper()
+	cp, _ := auth.KeyFromSeedHex(k.ControlPlane.SeedHex)
+	body, _ := json.Marshal(map[string]any{"id": "00000000-0000-4000-8000-0000000000f1", "nodeId": k.NodeID,
+		"type": "workload.kill", "issuedAt": issuedAt, "expiresAt": expiresAt, "payload": map[string]any{"workloadId": k.WorkloadID}})
+	f, _ := json.Marshal(protocol.CommandFrame{T: "cmd", Body: string(body), Sig: protocol.B64.EncodeToString(ed25519.Sign(cp, body))})
+	return f
+}
+
+// TestCommandTimeWindow covers the agent-protocol.md §4 order:
+// expired → reversed (lifetime) → future (issuedAt > now + 30 s) → lifetime (> 15 min).
+func TestCommandTimeWindow(t *testing.T) {
+	k := keys(t)
+	t0 := k.Now
+	now := time.UnixMilli(t0)
+	const maxSafe = int64(1<<53 - 1)
+	cases := []struct {
+		name                string
+		issuedAt, expiresAt any
+		want                string
+	}{
+		{"normal", t0, t0 + 60_000, "ok"},
+		{"reversed", t0 + 3_600_000, t0 + 60_000, "lifetime"},
+		{"reversed by 1 ms", t0 + 1, t0, "lifetime"},
+		{"issued exactly at skew limit", t0 + 30_000, t0 + 90_000, "ok"},
+		{"issued 1 ms beyond skew", t0 + 30_001, t0 + 90_000, "future"},
+		{"issued far in the future", t0 + 86_400_000, t0 + 86_400_000 + 60_000, "future"},
+		{"max lifetime", t0, t0 + 900_000, "ok"},
+		{"lifetime + 1 ms", t0, t0 + 900_001, "lifetime"},
+		{"expired beyond grace", t0 - 120_000, t0 - 30_001, "expired"},
+		{"expired within grace", t0 - 120_000, t0 - 30_000, "ok"},
+		{"huge expiresAt", int64(0), maxSafe, "lifetime"},
+		{"huge both, future", maxSafe - 1000, maxSafe, "future"},
+		{"beyond safe integer", t0, maxSafe + 2, "malformed"},
+		{"negative", int64(-1), t0, "malformed"},
+		{"float", 1.5, t0, "malformed"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := verifyCommand(t, signed(t, k, c.issuedAt, c.expiresAt), k, now); got != c.want {
+				t.Fatalf("got %q want %q", got, c.want)
+			}
+		})
+	}
+	// Direct boundary checks on the int64 helper (no schema in front of it).
+	if r := protocol.CheckCommandWindow(1<<62, 1<<62+1, t0); r != protocol.RejectMalformed {
+		t.Fatalf("out-of-range accepted: %q", r)
+	}
+	if r := protocol.CheckCommandWindow(0, 1<<53-1, -1<<62); r != protocol.RejectFuture { // no overflow in issuedAt-now
+		t.Fatalf("negative clock: %q", r)
 	}
 }

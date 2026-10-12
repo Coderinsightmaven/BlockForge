@@ -33,6 +33,9 @@ import (
 
 const testImage = "alpine:3.22"
 
+// itNodeID is the node id the integration drivers run as.
+const itNodeID = "6f1c2b9a-4d3e-4f5a-9b8c-7d6e5f4a3b2c"
+
 // The workload script runs inside the container (the agent itself never spawns a shell).
 const script = `echo READY uid=$(id -u) gid=$(id -g); echo hello > /data/fromcontainer; ` +
 	`(touch /rootfs-probe 2>/dev/null && echo ROOTFS_WRITABLE) || echo ROOTFS_READONLY; ` +
@@ -76,7 +79,7 @@ func setup(t *testing.T) *itEnv {
 	sb := fsops.NewSandbox(dataRoot, 1000, 1000)
 	e := &itEnv{t: t, sb: sb, netName: "bf-it-" + randHex(4)}
 	e.logs = logs.NewManager(func(protocol.LogsFrame) {})
-	d, err := NewDriver(Options{DataRoot: dataRoot, UID: 1000, GID: 1000, Images: images, Sandbox: sb, Logs: e.logs,
+	d, err := NewDriver(Options{NodeID: itNodeID, DataRoot: dataRoot, UID: 1000, GID: 1000, Images: images, Sandbox: sb, Logs: e.logs,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProbeJar: jvmprobe.Jar(),
 		Emit: func(ev string, data any) {
 			e.mu.Lock()
@@ -189,6 +192,10 @@ func TestDockerWorkloadLifecycle(t *testing.T) {
 	}
 	if !nnp || c.Labels[LabelManaged] != "true" || c.Labels[LabelWatchtower] != "false" || string(hc.NetworkMode) != e.netName {
 		t.Fatalf("security opts / labels: %v %v %v", hc.SecurityOpt, c.Labels, hc.NetworkMode)
+	}
+	if ni, err := e.cli.NetworkInspect(ctx, e.netName, client.NetworkInspectOptions{}); err != nil ||
+		ni.Network.Labels[LabelManaged] != "true" || ni.Network.Labels[LabelNode] != itNodeID || ni.Network.Driver != "bridge" {
+		t.Fatalf("agent-created network labels: %v %+v", err, ni.Network.Labels)
 	}
 	if _, ok := hc.Tmpfs["/tmp"]; !ok {
 		t.Fatal("no tmpfs /tmp")
@@ -401,8 +408,8 @@ func TestRestartLimitAndUnmanagedContainerUntouched(t *testing.T) {
 	// Disallowed image refused before anything is created.
 	bad := e.spec(newUUID())
 	bad.Image = "busybox:latest"
-	if _, err := e.d.Ensure(ctx, bad, nil); err == nil {
-		t.Fatal("image outside allowlist accepted")
+	if _, err := e.d.Ensure(ctx, bad, nil); errCode(err) != protocol.CodeImageNotAllowed {
+		t.Fatalf("image outside allowlist: %v", err)
 	}
 }
 
@@ -452,7 +459,7 @@ func TestPullSigtermOOMAndReattach(t *testing.T) {
 	// running container (tail from "now", persistent stdin attach re-created).
 	logs2 := logs.NewManager(func(protocol.LogsFrame) {})
 	images2, _ := config.NewImageAllowlist([]string{testImage})
-	d2, err := NewDriver(Options{DataRoot: e.d.o.DataRoot, UID: 1000, GID: 1000, Images: images2, Sandbox: e.sb, Logs: logs2,
+	d2, err := NewDriver(Options{NodeID: itNodeID, DataRoot: e.d.o.DataRoot, UID: 1000, GID: 1000, Images: images2, Sandbox: e.sb, Logs: logs2,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProbeJar: jvmprobe.Jar()})
 	if err != nil {
 		t.Fatal(err)
@@ -541,7 +548,7 @@ func TestDesiredStateRecoveredAfterAgentRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	images, _ := config.NewImageAllowlist([]string{testImage})
-	d2, err := NewDriver(Options{DataRoot: e.d.o.DataRoot, UID: 1000, GID: 1000, Images: images, Sandbox: e.sb,
+	d2, err := NewDriver(Options{NodeID: itNodeID, DataRoot: e.d.o.DataRoot, UID: 1000, GID: 1000, Images: images, Sandbox: e.sb,
 		Logs: logs.NewManager(func(protocol.LogsFrame) {}), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProbeJar: jvmprobe.Jar()})
 	if err != nil {
 		t.Fatal(err)
@@ -566,7 +573,7 @@ func TestDesiredStateRecoveredAfterAgentRestart(t *testing.T) {
 	}
 	cancel2()
 	time.Sleep(300 * time.Millisecond)
-	d3, _ := NewDriver(Options{DataRoot: e.d.o.DataRoot, UID: 1000, GID: 1000, Images: images, Sandbox: e.sb,
+	d3, _ := NewDriver(Options{NodeID: itNodeID, DataRoot: e.d.o.DataRoot, UID: 1000, GID: 1000, Images: images, Sandbox: e.sb,
 		Logs: logs.NewManager(func(protocol.LogsFrame) {}), Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), ProbeJar: jvmprobe.Jar()})
 	ctx3, cancel3 := context.WithCancel(ctx)
 	defer cancel3()
@@ -574,5 +581,71 @@ func TestDesiredStateRecoveredAfterAgentRestart(t *testing.T) {
 	time.Sleep(4 * time.Second)
 	if st, _ := d3.Status(ctx, id); st.State != protocol.StateExited {
 		t.Fatalf("deliberately stopped workload restarted after agent restart: %+v", st)
+	}
+}
+
+func errCode(err error) protocol.ErrorCode {
+	if pe, ok := protocol.AsError(err); ok {
+		return pe.Code
+	}
+	return ""
+}
+
+// A bf-* network that this agent did not create (no managed label, or another node's label) is
+// never joined: workload.ensure fails with CONFLICT before anything is created or persisted.
+func TestForeignBfNetworkRefused(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	cases := map[string]map[string]string{
+		"bf-x-" + randHex(3):       nil, // created by someone else
+		"bf-other-" + randHex(3):   {LabelManaged: "true", LabelNode: "99999999-9999-4999-8999-999999999999"},
+		"bf-nolabel-" + randHex(3): {LabelManaged: "true"},
+	}
+	for name, labels := range cases {
+		if _, err := e.cli.NetworkCreate(ctx, name, client.NetworkCreateOptions{Driver: "bridge", Labels: labels}); err != nil {
+			t.Fatal(err)
+		}
+		defer e.cli.NetworkRemove(context.Background(), name, client.NetworkRemoveOptions{})
+		id := newUUID()
+		s := e.spec(id)
+		s.Networks = []protocol.WorkloadNetwork{{Name: name, Aliases: []string{}}}
+		_, err := e.d.Ensure(ctx, s, nil)
+		if errCode(err) != protocol.CodeConflict {
+			t.Fatalf("%s (%v): want CONFLICT, got %v", name, labels, err)
+		}
+		if _, err := e.cli.ContainerInspect(ctx, ContainerName(id), client.ContainerInspectOptions{}); err == nil {
+			t.Fatalf("%s: container created despite the conflict", name)
+		}
+		ni, err := e.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{})
+		if err != nil || len(ni.Network.Containers) != 0 {
+			t.Fatalf("%s: network gained endpoints: %v %+v", name, err, ni.Network.Containers)
+		}
+		if _, err := os.Stat(e.sb.WorkloadBase(id)); !os.IsNotExist(err) {
+			t.Fatalf("%s: workload state persisted despite the conflict", name)
+		}
+		// Pruning never deletes a network this agent did not create.
+		e.d.pruneNetworks(ctx, []string{name})
+		if _, err := e.cli.NetworkInspect(ctx, name, client.NetworkInspectOptions{}); err != nil {
+			t.Fatalf("%s: foreign network was pruned", name)
+		}
+	}
+	// Start of an ensured workload whose network was swapped for a foreign one also refuses.
+	id := newUUID()
+	defer e.d.Remove(ctx, id, true)
+	s := e.spec(id)
+	if _, err := e.d.Ensure(ctx, s, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.cli.ContainerRemove(ctx, ContainerName(id), client.ContainerRemoveOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.cli.NetworkRemove(ctx, e.netName, client.NetworkRemoveOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.cli.NetworkCreate(ctx, e.netName, client.NetworkCreateOptions{Driver: "bridge"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.d.Start(ctx, id); errCode(err) != protocol.CodeConflict {
+		t.Fatalf("start onto a foreign network: %v", err)
 	}
 }
