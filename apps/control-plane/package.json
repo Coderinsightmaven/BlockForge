@@ -14,6 +14,8 @@
     "db:migrate": "tsx --conditions=@blockforge/source src/db/migrate-cli.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1149.0",
+    "@aws-sdk/s3-request-presigner": "^3.1149.0",
     "@blockforge/contracts": "workspace:*",
     "@blockforge/eggs": "workspace:*",
     "@blockforge/minecraft": "workspace:*",
@@ -24,6 +26,7 @@
     "@fastify/static": "^10.1.6",
     "@fastify/websocket": "^11.3.4",
     "@node-rs/argon2": "^2.2.2",
+    "croner": "^10.0.1",
     "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.5",
     "nodemailer": "^10.1.0",

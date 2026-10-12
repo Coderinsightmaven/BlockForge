@@ -66,6 +66,10 @@ const EnvSchema = z
     AGENT_MAX_QUEUED_BYTES: intFrom(64 * 1024, 1024 * 1024 * 1024).default(32 * 1024 * 1024),
     ALERT_EVAL_INTERVAL_MS: intFrom(100, 300_000).default(20_000),
     METRICS_FLUSH_INTERVAL_MS: intFrom(50, 60_000).default(1000),
+    /** Requests per minute and personal API key. */
+    API_KEY_RATE_LIMIT_PER_MIN: intFrom(1, 100_000).default(120),
+    /** Scheduler tick (due schedules are claimed with FOR UPDATE SKIP LOCKED). */
+    SCHEDULER_INTERVAL_MS: intFrom(100, 300_000).default(15_000),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === "production") {
@@ -115,6 +119,8 @@ export interface AppConfig {
   };
   alertEvalIntervalMs: number;
   metricsFlushIntervalMs: number;
+  apiKeyRateLimitPerMin: number;
+  schedulerIntervalMs: number;
 }
 
 export class ConfigError extends Error {
@@ -169,5 +175,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env, cwd = proces
     },
     alertEvalIntervalMs: e.ALERT_EVAL_INTERVAL_MS,
     metricsFlushIntervalMs: e.METRICS_FLUSH_INTERVAL_MS,
+    apiKeyRateLimitPerMin: e.API_KEY_RATE_LIMIT_PER_MIN,
+    schedulerIntervalMs: e.SCHEDULER_INTERVAL_MS,
   };
 }

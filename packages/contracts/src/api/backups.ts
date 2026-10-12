@@ -66,6 +66,12 @@ export const CreateBackupRequest = z.object({
   rotate: z.boolean().default(false),
 });
 
+/** `PATCH /servers/:id/backups/:backupId` (servers.backups.delete). */
+export const UpdateBackupRequest = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  locked: z.boolean().optional(),
+});
+
 export const RestoreBackupRequest = z.object({
   /** Delete existing files before extracting (except `.blockforge/`). Default replaces only files in the archive. */
   truncate: z.boolean().default(false),
@@ -91,3 +97,9 @@ export const BackupStorageSettings = z.discriminatedUnion("type", [
   }),
 ]);
 export type BackupStorageSettings = z.infer<typeof BackupStorageSettings>;
+/** `GET /settings/backups.storage` → `{key, value}`; the S3 secret is never returned, only whether one is stored. */
+export const BackupStorageSettingsView = z.object({
+  key: z.literal("backups.storage"),
+  value: BackupStorageSettings,
+  secretAccessKeySet: z.boolean(),
+});

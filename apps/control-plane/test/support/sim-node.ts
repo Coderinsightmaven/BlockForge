@@ -36,6 +36,17 @@ export interface SimOptions {
   fail?: Partial<Record<AgentCommandType, { code: string; message: string; retryable?: boolean }>>;
   /** Delay before answering a command type (ms). */
   delay?: Partial<Record<AgentCommandType, number>>;
+  /** Answer `save-all flush` with "Saved the game" (default true). */
+  saveConfirm?: boolean;
+  /** What `workload.logs.tail` returns (the agent's ring buffer / Docker logs). */
+  logTail?: string[];
+}
+
+/** A local backup archive as the sim stores it (content = JSON of the archived files). */
+export interface SimArchive {
+  bytes: Buffer;
+  sha256: string;
+  files: Record<string, string>;
 }
 
 class SimError extends Error {
@@ -108,6 +119,8 @@ export class SimNode {
   readonly denylists: { type: string; denylist: string[] | undefined }[] = [];
   /** Archive contents (`<workloadId>:<path>` → entry → content) created by fs.compress or planted by tests. */
   readonly archives = new Map<string, Record<string, string>>();
+  /** Local backup archives (`<workloadId>:<backupId>`). */
+  readonly backupArchives = new Map<string, SimArchive>();
 
   constructor(
     readonly agent: FakeAgent,
@@ -209,8 +222,94 @@ export class SimNode {
     });
 
     on("workload.console", (p) => {
-      this.consoleLines.push({ workloadId: String(p.workloadId), line: String(p.line) });
+      const id = String(p.workloadId);
+      const line = String(p.line);
+      this.consoleLines.push({ workloadId: id, line });
+      // Minecraft responses (vanilla/Paper wording) for the backup save cycle.
+      const out = (msg: string) => this.agent.trySend({ t: "logs", workloadId: id, lines: [{ ts: Date.now(), stream: "stdout", line: `[12:00:00 INFO]: ${msg}` }] });
+      if (line === "save-off") setTimeout(() => out("Automatic saving is now disabled"), 5);
+      if (line === "save-on") setTimeout(() => out("Automatic saving is now enabled"), 5);
+      if (line === "save-all flush") {
+        setTimeout(() => {
+          out("Saving the game (this may take a moment!)");
+          if (this.options.saveConfirm !== false) out("Saved the game");
+        }, 10);
+      }
       return {};
+    });
+
+    on("workload.logs.tail", (p) => {
+      const n = Number(p.lines ?? 500);
+      const ts = Date.now() - 60_000;
+      return { lines: (this.options.logTail ?? []).slice(-n).map((line, i) => ({ ts: ts + i, stream: "stdout", line })) };
+    });
+
+    // --- backups ------------------------------------------------------------------------------
+    on("backup.create", (p) => {
+      const id = String(p.workloadId);
+      const ignore = compileDenylist(p.ignore as string[]);
+      const files: Record<string, string> = {};
+      let skippedSymlinks = 0;
+      for (const [path, e] of this.files(id)) {
+        if (path === ".blockforge" || path.startsWith(".blockforge/")) continue;
+        if (e.type === "symlink") {
+          skippedSymlinks++;
+          continue;
+        }
+        if (e.type !== "file" || ignore.denied(path)) continue;
+        files[path] = e.data.toString("utf8");
+      }
+      const bytes = Buffer.from(JSON.stringify(files));
+      const archive = { bytes, sha256: sha(bytes), files };
+      this.backupArchives.set(`${id}:${String(p.backupId)}`, archive);
+      return { sizeBytes: bytes.length, sha256: archive.sha256, files: Object.keys(files).length, skippedSymlinks, durationMs: 5 };
+    });
+    on("backup.upload", async (p) => {
+      const key = `${String(p.workloadId)}:${String(p.backupId)}`;
+      const a = this.backupArchives.get(key);
+      if (!a) throw new SimError("NOT_FOUND", "no such backup");
+      const partSize = Number(p.partSize);
+      const parts: { partNumber: number; etag: string }[] = [];
+      for (const part of p.parts as { partNumber: number; url: string }[]) {
+        const body = a.bytes.subarray((part.partNumber - 1) * partSize, part.partNumber * partSize);
+        const res = await fetch(part.url, { method: "PUT", body: new Uint8Array(body) });
+        if (!res.ok) throw new SimError("RUNTIME_ERROR", `part ${part.partNumber}: HTTP ${res.status}`);
+        parts.push({ partNumber: part.partNumber, etag: res.headers.get("etag") ?? "" });
+      }
+      if (p.deleteLocal) this.backupArchives.delete(key);
+      return { parts };
+    });
+    on("backup.restore", async (p) => {
+      const id = String(p.workloadId);
+      const w = this.workloads.get(id);
+      if (w && (w.state === "running" || w.state === "restarting")) throw new SimError("BUSY", "the workload must be stopped");
+      const src = p.source as { type: "local" } | { type: "url"; url: string };
+      let bytes: Buffer;
+      if (src.type === "local") {
+        const a = this.backupArchives.get(`${id}:${String(p.backupId)}`);
+        if (!a) throw new SimError("NOT_FOUND", "no such backup");
+        bytes = a.bytes;
+      } else {
+        const res = await fetch(src.url);
+        if (!res.ok) throw new SimError("DOWNLOAD_FAILED", `HTTP ${res.status}`);
+        bytes = Buffer.from(await res.arrayBuffer());
+      }
+      if (sha(bytes) !== p.sha256) throw new SimError("CHECKSUM_MISMATCH", "sha256 mismatch");
+      const files = JSON.parse(bytes.toString("utf8")) as Record<string, string>;
+      if (p.truncate) for (const k of [...this.files(id).keys()]) if (k !== ".blockforge" && !k.startsWith(".blockforge/")) this.files(id).delete(k);
+      for (const [path, content] of Object.entries(files)) this.put(id, path, content);
+      return { files: Object.keys(files).length, bytes: bytes.length, durationMs: 5 };
+    });
+    on("backup.delete", (p) => {
+      this.backupArchives.delete(`${String(p.workloadId)}:${String(p.backupId)}`);
+      return {};
+    });
+    on("backup.transfer.push", async (p) => {
+      const a = this.backupArchives.get(`${String(p.workloadId)}:${String(p.backupId)}`);
+      if (!a) throw new SimError("NOT_FOUND", "no such backup");
+      const up = await this.agent.upload(String(p.transferId), a.bytes);
+      if (up.status !== 200) throw new SimError("RUNTIME_ERROR", `rendezvous answered ${up.status}`);
+      return { bytes: a.bytes.length, sha256: a.sha256 };
     });
 
     // --- fs.* (symlinks resolved inside the sandbox; `denylist` enforced on requested AND resolved paths) ---
@@ -373,7 +472,7 @@ export class SimNode {
       const path = this.resolve(id, String(p.path));
       this.deny(p, [norm(String(p.path)), path]);
       const res = await this.agent.download(String(p.transferId));
-      if (res.status !== 200) throw new SimError("TRANSFER_FAILED", `rendezvous answered ${res.status}`);
+      if (res.status !== 200) throw new SimError("RUNTIME_ERROR", `rendezvous answered ${res.status}`);
       const data = Buffer.from(await res.arrayBuffer());
       if (data.length > Number(p.maxBytes)) throw new SimError("QUOTA_EXCEEDED", "transfer larger than announced");
       this.put(id, path, data);
@@ -386,7 +485,7 @@ export class SimNode {
       const e = this.files(id).get(path);
       if (!e || e.type !== "file") throw new SimError("NOT_FOUND", "no such file");
       const up = await this.agent.upload(String(p.transferId), e.data);
-      if (up.status !== 200) throw new SimError("TRANSFER_FAILED", `rendezvous answered ${up.status}`);
+      if (up.status !== 200) throw new SimError("RUNTIME_ERROR", `rendezvous answered ${up.status}`);
       return { bytes: e.data.length, sha256: sha(e.data) };
     });
   }

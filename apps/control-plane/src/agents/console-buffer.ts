@@ -10,6 +10,8 @@ interface ServerConsole {
   nextSeq: number;
   dropped: number;
   lastAppendAt: number;
+  /** History was pulled from the agent once (after a restart); not repeated for this buffer. */
+  backfilled?: boolean;
 }
 
 /**
@@ -55,6 +57,14 @@ export class ConsoleBuffers {
   tail(serverId: string, n: number): ConsoleLinesEvent {
     const c = this.consoles.get(serverId);
     return { serverId, lines: c ? c.buffer.tail(Math.max(0, n)) : [], ...(c && c.dropped ? { dropped: c.dropped } : {}) };
+  }
+
+  markBackfilled(serverId: string): void {
+    this.get(serverId).backfilled = true;
+  }
+
+  isBackfilled(serverId: string): boolean {
+    return this.consoles.get(serverId)?.backfilled === true;
   }
 
   remove(serverId: string): void {

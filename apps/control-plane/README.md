@@ -27,7 +27,7 @@ restart until an owner exists.
 | `dev` | `tsx watch` on `src/main.ts` (workspace packages resolve to their TS sources) |
 | `build` / `start` | `tsc -p tsconfig.build.json` → `dist/`; `node dist/main.js` (needs `@blockforge/contracts` built) |
 | `typecheck` / `lint` | `tsc --noEmit` over src+test; root ESLint config |
-| `test` | vitest: unit + integration (real Postgres `blockforge_test` and VictoriaMetrics) |
+| `test` | vitest: unit + integration (real Postgres `blockforge_test`, VictoriaMetrics and MinIO from `pnpm infra:up`; the MinIO TLS certificate is trusted via `NODE_EXTRA_CA_CERTS` in the global setup) |
 | `db:generate` | drizzle-kit generate (run with the `@blockforge/source` condition) after schema changes (keep the `CREATE EXTENSION citext` line at the top of `0000_init.sql`) |
 | `db:migrate` | apply migrations without starting the server |
 
@@ -50,6 +50,8 @@ restart until an owner exists.
 | `PGBOSS_SCHEMA` | `pgboss` | |
 | `AGENT_HEARTBEAT_INTERVAL_MS` / `AGENT_METRICS_INTERVAL_MS` | 15000 / 5000 | sent to agents in `welcome` |
 | `NODE_OFFLINE_AFTER_MS`, `NODE_SWEEP_INTERVAL_MS`, `ALERT_EVAL_INTERVAL_MS`, `METRICS_FLUSH_INTERVAL_MS` | 5 min, 5 s, 20 s, 1 s | |
+| `API_KEY_RATE_LIMIT_PER_MIN` | 120 | requests per minute per personal API key |
+| `SCHEDULER_INTERVAL_MS` | 15000 | scheduler tick |
 
 ## Module layout (`src/`)
 
@@ -76,6 +78,9 @@ restart until an owner exists.
 | `servers/` | effective permissions (roles ∪ owner ∪ subuser), DTOs, create/settings/build/suspend/startup/subusers/console, operation locks + state transitions, provision/reinstall/power/delete jobs (Minecraft + eggs), reconciler from agent events |
 | `files/` | file manager over `fs.*` (template denylist, proxy-secret redaction, archive jobs), single-use session-bound browser transfer URLs streamed through the agent rendezvous |
 | `account/`, `sftp/` | SSH keys; `POST /agent/v1/sftp/auth` (username `<user>.<shortId>`, keys-only for MFA users, rate limits, audit) and `sftp.activity` → server activity |
+| `backups/` | backup/restore/delete jobs (Minecraft save cycle, live/stopped consistency), limits and rotation, local or S3 storage (presigned multipart, write-only secret), downloads |
+| `schedules/` | schedules CRUD, cron preview (croner), scheduler (claims due schedules with SKIP LOCKED, catch-up, recovery, retention) and the sequential task runner |
+| `apikeys/` | personal API keys: Bearer authentication, permission caps, IP allowlists, expiry, per-key rate limits |
 
 ## Security notes
 

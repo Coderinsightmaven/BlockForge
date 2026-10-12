@@ -521,7 +521,20 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
   private async onResult(session: AgentSession, raw: unknown): Promise<void> {
     const ok = (raw as { ok?: unknown }).ok === true;
     const frame = ok ? this.validate(session, ResultOkFrame, raw) : this.validate(session, ResultErrFrame, raw);
-    if (!frame) return;
+    if (!frame) {
+      // A malformed error result (e.g. an unknown error code) still ends its command now instead of
+      // leaving it to time out.
+      const id = (raw as { id?: unknown }).id;
+      const pending = !ok && typeof id === "string" ? session.pending.get(id) : undefined;
+      if (pending && typeof id === "string") {
+        session.pending.delete(id);
+        pending.cleanup();
+        const error = { code: "INTERNAL", message: "the agent returned an error result that does not match the contract", retryable: false };
+        void this.persistOutcome(id, "failed", error);
+        pending.reject(new AgentCommandError(error.code, error.message, false));
+      }
+      return;
+    }
     const pending = session.pending.get(frame.id);
     if (!pending) {
       this.stats.unknownResults++;

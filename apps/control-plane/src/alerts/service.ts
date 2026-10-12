@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ALERT_RULE_KINDS, type AlertIncident, type AlertRule } from "@blockforge/contracts";
 import { and, asc, desc, eq, inArray, lt, ne, or, type SQL } from "drizzle-orm";
 import type { Logger } from "pino";
-import type { AuditActor, AuditService } from "../audit/service.js";
+import { actorUserId, type AuditActor, type AuditService } from "../audit/service.js";
 import type { Db } from "../db/client.js";
 import { alertIncidents, alertRules, users } from "../db/schema/index.js";
 import { withTransaction } from "../db/tx.js";
@@ -208,7 +208,7 @@ export class AlertService {
     const [updated] = await withTransaction(this.db, async (tx) => {
       const r = await tx
         .update(alertIncidents)
-        .set({ status: "acknowledged", acknowledgedAt: new Date(this.clock.now()), acknowledgedBy: actor.actorId })
+        .set({ status: "acknowledged", acknowledgedAt: new Date(this.clock.now()), acknowledgedBy: actorUserId(actor) })
         .where(and(eq(alertIncidents.id, id), eq(alertIncidents.status, "firing")))
         .returning();
       await this.audit.record({ ...actor, action: "alert_incident.acknowledge", targetType: "alert_incident", targetId: id, outcome: "success" }, tx);
@@ -223,7 +223,7 @@ export class AlertService {
   async resolveManually(id: string, actor: AuditActor): Promise<AlertIncident> {
     const row = await this.incidentRow(id);
     if (row.status === "resolved") throw invalidState("Incident is already resolved");
-    const updated = await this.resolveRow(row, actor.actorId, actor);
+    const updated = await this.resolveRow(row, actorUserId(actor), actor);
     const [dto] = await this.incidentDtos([updated]);
     return dto as AlertIncident;
   }

@@ -16,6 +16,14 @@ export interface AuditActor {
   actorName: string | null;
   ip?: string | null;
   requestId?: string | null;
+  /** The human user behind the actor (the key owner for `api_token`); used for user foreign keys. */
+  userId?: string | null;
+}
+
+/** User id for `created_by`/`requested_by`-style columns (never an API key id). */
+export function actorUserId(actor: AuditActor): string | null {
+  if (actor.userId !== undefined) return actor.userId;
+  return actor.actorType === "user" ? actor.actorId : null;
 }
 
 export interface AuditEntry extends AuditActor {

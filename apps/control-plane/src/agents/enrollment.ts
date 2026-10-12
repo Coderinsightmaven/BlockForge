@@ -9,7 +9,7 @@ import {
 } from "@blockforge/contracts";
 import { and, desc, eq, inArray, like, or } from "drizzle-orm";
 import type { Logger } from "pino";
-import type { AuditActor, AuditService } from "../audit/service.js";
+import { actorUserId, type AuditActor, type AuditService } from "../audit/service.js";
 import type { Db } from "../db/client.js";
 import { enrollmentTokens, nodeCredentials, nodes, users } from "../db/schema/index.js";
 import { withTransaction } from "../db/tx.js";
@@ -93,7 +93,7 @@ export class EnrollmentService {
           tokenId,
           secretHash: sha256Hex(secret),
           label: input.label,
-          createdBy: actor.actorId,
+          createdBy: actorUserId(actor),
           createdAt: new Date(now),
           expiresAt: new Date(now + input.expiresInMinutes * 60_000),
           requiresApproval: input.requiresApproval,

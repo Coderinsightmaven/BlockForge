@@ -183,11 +183,13 @@ describe("Backup storage settings", () => {
     forcePathStyle: false,
     accessKeyId: "AKIA123",
   };
+  /** `GET/PUT /settings/backups.storage` respond with the generic settings wrapper. */
+  const view = (value: object, secretAccessKeySet: boolean) => ({ key: "backups.storage", value, secretAccessKeySet });
 
   it("keeps the stored secret, tests the saved settings and shows the result as text", async () => {
     const calls = routeFetch([
-      ["GET", /\/settings\/backups\.storage$/, () => jsonResponse(s3)],
-      ["PUT", /\/settings\/backups\.storage$/, () => jsonResponse({ ...s3, region: "eu-west-1" })],
+      ["GET", /\/settings\/backups\.storage$/, () => jsonResponse(view(s3, true))],
+      ["PUT", /\/settings\/backups\.storage$/, () => jsonResponse(view({ ...s3, region: "eu-west-1" }, true))],
       [
         "POST",
         /\/settings\/backups\.storage\/test$/,
@@ -213,14 +215,14 @@ describe("Backup storage settings", () => {
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
-    const body = calls.find((c) => c.method === "PUT")!.body as Record<string, unknown>;
-    expect(body).toEqual({ ...s3, region: "eu-west-1" });
-    expect(body).not.toHaveProperty("secretAccessKey");
+    const body = calls.find((c) => c.method === "PUT")!.body as { value: Record<string, unknown> };
+    expect(body).toEqual({ value: { ...s3, region: "eu-west-1" } });
+    expect(body.value).not.toHaveProperty("secretAccessKey");
   });
 
   it("requires the secret when switching to S3", async () => {
     const calls = routeFetch([
-      ["GET", /\/settings\/backups\.storage$/, () => jsonResponse({ type: "local" })],
+      ["GET", /\/settings\/backups\.storage$/, () => jsonResponse(view({ type: "local" }, false))],
     ]);
     const user = userEvent.setup();
     wrap(<BackupStorageCard />);

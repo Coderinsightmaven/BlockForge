@@ -14,3 +14,5 @@ test-results/
 *.tsbuildinfo
 .pnpm.lock.d/
 .cp-dev.log
+# Generated dev-only TLS certificate for the MinIO test service
+infra/compose/.minio-certs/

@@ -56,6 +56,8 @@ export function effectiveServerPermissions(principal: Principal, facts: ServerAc
   if (facts.suspended && !role.has("servers.admin")) {
     for (const p of [...out]) if (!p.endsWith(".view")) out.delete(p);
   }
+  // API keys never exceed their permission set (ownership and subuser grants included).
+  if (principal.apiKey) for (const p of [...out]) if (!principal.apiKey.cap.has(p)) out.delete(p);
   return out;
 }
 

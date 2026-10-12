@@ -3,3 +3,10 @@ export const TEST_DATABASE_URL =
 export const TEST_VICTORIA_METRICS_URL = process.env.TEST_VICTORIA_METRICS_URL ?? "http://127.0.0.1:58428";
 export const TEST_PUBLIC_URL = "http://127.0.0.1:5173";
 export const TEST_PGBOSS_SCHEMA = "pgboss_test";
+/** MinIO from infra/compose (HTTPS, self-signed: trusted via NODE_EXTRA_CA_CERTS in global setup). */
+export const TEST_S3 = {
+  endpoint: process.env.TEST_S3_ENDPOINT ?? "https://127.0.0.1:59000",
+  region: "us-east-1",
+  accessKeyId: process.env.TEST_S3_ACCESS_KEY ?? "blockforge",
+  secretAccessKey: process.env.TEST_S3_SECRET_KEY ?? "blockforge-dev-only",
+};

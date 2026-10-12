@@ -13,6 +13,8 @@ export interface BrowserTransfer {
   path: string;
   /** Upload: declared size (also the byte limit). Download: the file size limit. */
   maxBytes: number;
+  /** Set for backup downloads (`backup.transfer.push` instead of a file). */
+  backupId?: string;
   expiresAt: number;
 }
 

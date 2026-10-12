@@ -117,7 +117,10 @@ export function registerServerRoutes(app: FastifyInstance, ctx: AppContext): voi
 
   app.get("/servers/:id/console/history", async (req) => {
     const a = await access.require(req, parse(IdParams, req.params, "Path").id, "servers.console.view");
-    return ctx.consoles.tail(a.server.id, parse(HistoryQuery, req.query, "Query").lines);
+    const { lines } = parse(HistoryQuery, req.query, "Query");
+    // Empty after a restart: pull the agent's recent output once.
+    await ctx.consoleBackfill.ensure(a.server.id, lines);
+    return ctx.consoles.tail(a.server.id, lines);
   });
 
   // --- Startup -----------------------------------------------------------------------

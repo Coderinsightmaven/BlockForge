@@ -35,7 +35,8 @@ export class IdempotencyService {
     const key = Array.isArray(header) ? header[0] : header;
     if (key === undefined) return this.send(reply, await handler(), false);
     if (!KEY_RE.test(key)) throw badRequest("Idempotency-Key must be 1–128 printable ASCII characters");
-    const userId = req.session?.user.id;
+    // Keys are scoped to the user behind the request (session user or API key owner).
+    const userId = req.session?.user.id ?? req.principal?.userId;
     if (!userId) throw unauthenticated();
     // The query is part of the request (e.g. DELETE …?deleteData=true): a different query under the
     // same key must not replay the other response. Canonical JSON sorts keys; omitted when empty.

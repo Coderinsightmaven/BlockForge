@@ -145,6 +145,9 @@ export function registerRealtimeRoutes(app: FastifyInstance, ctx: AppContext): v
             return reply({ op: "error", topic: frame.topic, code: "FORBIDDEN", message: "not allowed to subscribe to this topic" });
           }
           ctx.hub.subscribe(client, frame.topic);
+          // First console subscription after a restart: backfill from the agent before acknowledging,
+          // so the history the client loads next is complete.
+          if (frame.topic.startsWith("console:")) await ctx.consoleBackfill.ensure(frame.topic.slice("console:".length));
           reply({ op: "subscribed", topic: frame.topic });
           if (frame.topic === "overview") {
             ctx.hub.sendTo(client, "overview", "overview.updated", await ctx.overview.summary(client.principal));

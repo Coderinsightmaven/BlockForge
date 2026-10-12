@@ -59,6 +59,8 @@ export interface ServerJobDeps {
   installTimeoutMs?: number;
   /** Masks secret variable values in install output written to the job log. */
   masks?: { forServer(serverId: string): Promise<readonly string[]> };
+  /** Deletes the server's backups (archives / objects) before the server is removed. */
+  deleteBackups?: (serverId: string, ctx: { jobId: string; signal: AbortSignal; log: StepContext<unknown>["log"] }) => Promise<void>;
 }
 
 const ProvisionInput = z.object({ serverId: z.uuid(), eulaAcceptedBy: z.string().max(254).nullable().default(null) });
@@ -229,7 +231,7 @@ async function configure(deps: ServerJobDeps, ctx: Ctx<{ serverId: string; eulaA
   await ctx.log("info", r.written.length ? `Config files updated: ${r.written.join(", ")}` : "Config files already up to date");
 }
 
-async function startWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext): Promise<void> {
+export async function startWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext): Promise<void> {
   await requireNode(deps, rt);
   await deps.state.transition(rt.server.id, "starting", {}, { reason: "start" });
   ctx.state.startedAt = deps.clock.now();
@@ -242,7 +244,7 @@ async function startWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>
   await ctx.log("info", "Container started; waiting for the server to become ready");
 }
 
-async function awaitReady(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext): Promise<void> {
+export async function awaitReady(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext): Promise<void> {
   const since = Number(ctx.state.startedAt ?? deps.clock.now());
   let r: { slp: boolean };
   try {
@@ -275,7 +277,7 @@ export function exitColumns(st: Pick<WorkloadStatus, "exitCode" | "oomKilled"> |
   return { lastExitCode: st?.exitCode ?? null, lastOomKilled: Boolean(st?.oomKilled) };
 }
 
-async function stopWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext, timeoutMs: number): Promise<WorkloadStatus | null> {
+export async function stopWorkload(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>, rt: ServerRuntimeContext, timeoutMs: number): Promise<WorkloadStatus | null> {
   await requireNode(deps, rt);
   try {
     return await send(deps).send(rt.server.nodeId, "workload.stop", { workloadId: rt.server.id, timeoutMs }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: timeoutMs + 30_000 });
@@ -332,6 +334,20 @@ async function convertHold(deps: ServerJobDeps, serverId: string): Promise<void>
     .update(resourceReservations)
     .set({ kind: "server", expiresAt: null })
     .where(and(eq(resourceReservations.serverId, serverId), eq(resourceReservations.kind, "hold")));
+}
+
+/** Ensures the container (current spec) and re-applies egg config files before a start. */
+export async function prepareServerStart(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>): Promise<void> {
+  const rt = await loadRuntimeContext(deps.db, ctx.input.serverId);
+  await ensureWorkload(deps, ctx, rt);
+  if (!isMinecraftTemplate(rt.template.kind)) await configure(deps, ctx, rt, false);
+}
+
+/** prepare → start → wait until ready (the start job's steps, for jobs that restart a server). */
+export async function startServerAndWait(deps: ServerJobDeps, ctx: Ctx<{ serverId: string }>): Promise<void> {
+  await prepareServerStart(deps, ctx);
+  await startWorkload(deps, ctx, await loadRuntimeContext(deps.db, ctx.input.serverId));
+  await awaitReady(deps, ctx, await loadRuntimeContext(deps.db, ctx.input.serverId));
 }
 
 export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[] {
@@ -429,11 +445,7 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
     },
   };
 
-  const prepareStart = async (ctx: Ctx<{ serverId: string }>) => {
-    const rt = await load(ctx.input.serverId);
-    await ensureWorkload(deps, ctx, rt);
-    if (!isMinecraftTemplate(rt.template.kind)) await configure(deps, ctx, rt, false);
-  };
+  const prepareStart = (ctx: Ctx<{ serverId: string }>) => prepareServerStart(deps, ctx);
 
   const failSettle = (fallback: ServerState) => async (f: FinalizeContext<{ serverId: string }>) => {
     if (f.status !== "succeeded") {
@@ -535,6 +547,8 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         run: async (ctx) => {
           const rt = await load(ctx.input.serverId);
           await requireNode(deps, rt);
+          // Backups first: their archives / objects must not outlive the server.
+          if (deps.deleteBackups) await deps.deleteBackups(rt.server.id, { jobId: ctx.jobId, signal: ctx.signal, log: ctx.log });
           try {
             await send(deps).send(rt.server.nodeId, "workload.remove", { workloadId: rt.server.id, deleteData: ctx.input.deleteData }, { jobId: ctx.jobId, signal: ctx.signal, timeoutMs: 300_000 });
           } catch (err) {

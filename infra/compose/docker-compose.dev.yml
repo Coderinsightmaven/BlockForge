@@ -24,6 +24,42 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  # S3-compatible object storage for backup tests (HTTPS with a generated self-signed certificate;
+  # tests trust it through NODE_EXTRA_CA_CERTS=infra/compose/.minio-certs/public.crt).
+  minio-certs:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - >-
+        [ -s /certs/public.crt ] && [ -s /certs/private.key ] && exit 0;
+        apk add --no-cache openssl >/dev/null &&
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj /CN=blockforge-dev-minio
+        -addext subjectAltName=DNS:localhost,IP:127.0.0.1
+        -keyout /certs/private.key -out /certs/public.crt &&
+        chmod 0644 /certs/public.crt /certs/private.key
+    volumes: ["./.minio-certs:/certs"]
+  minio:
+    # MinIO server 2025-05-24 (upstream no longer publishes images; Bitnami's legacy build, pinned by
+    # digest). Run directly (not through the Bitnami scripts) as root for the dev volume.
+    image: bitnamilegacy/minio@sha256:451fe6858cb770cc9d0e77ba811ce287420f781c7c1b806a386f6896471a349c
+    user: "0"
+    entrypoint: ["minio"]
+    command: ["server", "/data", "--certs-dir", "/certs", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: blockforge
+      MINIO_ROOT_PASSWORD: blockforge-dev-only
+    ports: ["127.0.0.1:59000:9000"]
+    volumes: ["miniodata:/data", "./.minio-certs:/certs:ro"]
+    depends_on:
+      minio-certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-skf", "https://127.0.0.1:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 volumes:
   pgdata: {}
   vmdata: {}
+  miniodata: {}

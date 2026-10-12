@@ -16,6 +16,14 @@ export interface AuthHookDeps {
   cookieSecure: boolean;
   /** PUBLIC_URL origin; a state-changing request carrying another `Origin` is rejected. */
   publicOrigin: string;
+  /** Personal API keys (`Authorization: Bearer bfk_…`). */
+  apiKeys?: { authenticate(header: string, ip: string): Promise<Principal> };
+}
+
+/** Routes that refuse API keys: the account itself, authentication, and the UI realtime socket. */
+function refusesApiKeys(url: string | undefined): boolean {
+  if (!url) return true;
+  return url.startsWith("/api/v1/auth/") || url.startsWith("/api/v1/account/") || url === "/api/v1/realtime";
 }
 
 /**
@@ -27,6 +35,14 @@ export function registerAuthHooks(app: FastifyInstance, deps: AuthHookDeps): voi
   app.decorateRequest("principal", null);
 
   app.addHook("onRequest", async (req) => {
+    const authz = req.headers.authorization;
+    if (authz !== undefined && /^Bearer\s/i.test(authz)) {
+      // An API key request: cookies are ignored entirely (no session, no CSRF).
+      if (refusesApiKeys(req.routeOptions.url)) throw new AppError(403, "FORBIDDEN", "API keys cannot be used for this route");
+      if (!deps.apiKeys) throw unauthenticated();
+      req.principal = await deps.apiKeys.authenticate(authz, req.ip);
+      return;
+    }
     const token = req.cookies[SESSION_COOKIE];
     if (token) req.session = await deps.sessions.lookup(token);
   });
@@ -34,6 +50,12 @@ export function registerAuthHooks(app: FastifyInstance, deps: AuthHookDeps): voi
   app.addHook("preHandler", async (req) => {
     const mode = req.routeOptions.config.auth ?? "user";
     const unsafe = !SAFE_METHODS.has(req.method);
+    if (req.principal?.apiKey) {
+      const origin = req.headers.origin;
+      if (unsafe && origin !== undefined && origin !== deps.publicOrigin) throw new AppError(403, "CSRF_INVALID", "Origin not allowed");
+      if (mode !== "user") throw new AppError(403, "FORBIDDEN", "API keys cannot be used for this route");
+      return;
+    }
     if (unsafe) {
       // Browsers send Origin on cross-origin (and same-origin POST) requests; non-browser clients
       // may omit it. A present but foreign Origin is always rejected.
@@ -88,14 +110,38 @@ export function requirePrincipal(req: FastifyRequest): Principal {
 }
 
 export function actorOf(req: FastifyRequest): AuditActor {
+  const key = req.principal?.apiKey;
+  if (key && req.principal) {
+    return {
+      actorType: "api_token",
+      actorId: key.id,
+      actorName: `${key.prefix} (${req.principal.username})`,
+      userId: req.principal.userId,
+      ip: req.ip ?? null,
+      requestId: String(req.id),
+    };
+  }
   const s = req.session;
   return {
     actorType: "user",
     actorId: s?.user.id ?? null,
     actorName: s?.user.email ?? null,
+    userId: s?.user.id ?? null,
     ip: req.ip ?? null,
     requestId: String(req.id),
   };
+}
+
+/** Binds single-use transfer URLs to the requester: the browser session, or the API key. */
+export function requesterBinding(req: FastifyRequest): string {
+  const key = req.principal?.apiKey;
+  if (key) return `api_key:${key.id}`;
+  return requireSession(req).id;
+}
+
+/** The user behind the request (session user or API key owner). */
+export function requesterUserId(req: FastifyRequest): string | null {
+  return req.session?.user.id ?? req.principal?.userId ?? null;
 }
 
 export function clientOf(req: FastifyRequest): { ip: string | null; userAgent: string | null; requestId: string } {

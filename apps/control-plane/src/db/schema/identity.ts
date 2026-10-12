@@ -1,6 +1,6 @@
 import { ALL_PERMISSIONS, ScopeType } from "@blockforge/contracts";
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, index, integer, jsonb, pgTable, primaryKey, text, unique, uuid } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, index, integer, pgTable, primaryKey, text, unique, uuid } from "drizzle-orm/pg-core";
 import { citext, enumCheck, tsz } from "./_helpers.js";
 
 export const USER_STATUSES = ["active", "disabled"] as const;
@@ -135,12 +135,16 @@ export const apiTokens = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    /** sha256 (hex) of the secret part of `bfk_<id>_<secret>`. */
     tokenHash: text("token_hash").notNull().unique("api_tokens_token_hash_unique"),
-    prefix: text("prefix").notNull(),
-    scopes: jsonb("scopes").notNull().default([]),
+    /** `bfk_<16 hex>`: the public part, used for lookup and display. */
+    prefix: text("prefix").notNull().unique("api_tokens_prefix_unique"),
+    /** null = all of the owner's permissions. */
+    permissions: text("permissions").array(),
+    allowedIps: text("allowed_ips").array().notNull().default(sql`'{}'::text[]`),
     expiresAt: tsz("expires_at"),
     lastUsedAt: tsz("last_used_at"),
-    revokedAt: tsz("revoked_at"),
+    lastUsedIp: text("last_used_ip"),
     createdAt: tsz("created_at").notNull().defaultNow(),
   },
   (t) => [index("api_tokens_user_idx").on(t.userId)],

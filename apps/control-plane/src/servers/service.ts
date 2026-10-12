@@ -19,7 +19,7 @@ import { commandErrorToHttp } from "../agents/errors.js";
 import type { AgentGateway } from "../agents/gateway.js";
 import type { NodeStateTracker } from "../agents/node-state.js";
 import type { WorkloadOwnership } from "../agents/workload-ownership.js";
-import type { AuditActor, AuditService } from "../audit/service.js";
+import { actorUserId, type AuditActor, type AuditService } from "../audit/service.js";
 import type { CatalogService } from "../catalog/service.js";
 import type { Db, DbOrTx, Tx } from "../db/client.js";
 import {
@@ -444,7 +444,7 @@ export class ServersService {
     const jobId = await this.d.jobs.enqueue(
       SERVER_JOBS.provision,
       { serverId: a.serverId, eulaAcceptedBy: a.eulaBy },
-      { targetType: "server", targetId: a.serverId, requestedBy: a.actor.actorId },
+      { targetType: "server", targetId: a.serverId, requestedBy: actorUserId(a.actor) },
       tx,
       after,
     );
@@ -490,7 +490,7 @@ export class ServersService {
     const jobId = await withTransaction(this.d.db, async (tx, after) => {
       const { from, row } = await this.d.state.begin(tx, serverId, op);
       if (op === "reinstall") await this.reacquireResources(tx, row);
-      const id = await this.d.jobs.enqueue(type, { serverId, ...input }, { targetType: "server", targetId: serverId, requestedBy: actor.actorId }, tx, after);
+      const id = await this.d.jobs.enqueue(type, { serverId, ...input }, { targetType: "server", targetId: serverId, requestedBy: actorUserId(actor) }, tx, after);
       await this.d.state.attachJob(tx, serverId, id);
       const desired = op === "start" || op === "restart" ? "running" : op === "stop" || op === "kill" ? "stopped" : null;
       if (desired) await tx.update(servers).set({ desiredState: desired }).where(eq(servers.id, serverId));
@@ -537,7 +537,7 @@ export class ServersService {
     const s = access.server;
     if (s.state !== "running" && s.state !== "degraded" && s.state !== "starting") throw invalidState(`The server is ${s.state}`);
     try {
-      await this.d.gateway.send(s.nodeId, "workload.console", { workloadId: s.id, line }, { userId: actor.actorId, timeoutMs: 10_000 });
+      await this.d.gateway.send(s.nodeId, "workload.console", { workloadId: s.id, line }, { userId: actorUserId(actor), timeoutMs: 10_000 });
     } catch (err) {
       throw commandErrorToHttp(err);
     }

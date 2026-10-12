@@ -17,7 +17,7 @@ import {
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
-import { actorOf, requireSession } from "../http/auth-hooks.js";
+import { actorOf, requesterBinding } from "../http/auth-hooks.js";
 import { parse } from "../http/validation.js";
 import { AppError, notFound, validationDetails } from "../lib/errors.js";
 import { normalizePath } from "./policy.js";
@@ -78,13 +78,13 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
     return reply.status(r.status).send(r.body);
   });
 
-  app.post("/servers/:id/files/upload-url", async (req) => f.uploadUrl(await write(req), requireSession(req).id, parse(UploadUrlRequest, req.body)));
-  app.get("/servers/:id/files/download-url", async (req) => f.downloadUrl(await read(req), requireSession(req).id, parse(DownloadUrlQuery, req.query, "Query").path));
+  app.post("/servers/:id/files/upload-url", async (req) => f.uploadUrl(await write(req), requesterBinding(req), parse(UploadUrlRequest, req.body)));
+  app.get("/servers/:id/files/download-url", async (req) => f.downloadUrl(await read(req), requesterBinding(req), parse(DownloadUrlQuery, req.query, "Query").path));
 
   // --- Single-use transfer URLs --------------------------------------------------------------
   app.put("/transfers/:token", { bodyLimit: Number.MAX_SAFE_INTEGER, config: { csrf: "token" } }, async (req) => {
     const { token } = parse(TokenParams, req.params, "Path");
-    const t = ctx.browserTransfers.consume(token, requireSession(req).id, "upload");
+    const t = ctx.browserTransfers.consume(token, requesterBinding(req), "upload");
     if (!t) throw notFound("Transfer");
     // Current access (revoked grants, suspension) decides, not the state when the URL was issued.
     const a = await access.require(req, t.serverId, "servers.files.write");
@@ -97,8 +97,15 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
 
   app.get("/transfers/:token", async (req, reply) => {
     const { token } = parse(TokenParams, req.params, "Path");
-    const t = ctx.browserTransfers.consume(token, requireSession(req).id, "download");
+    const t = ctx.browserTransfers.consume(token, requesterBinding(req), "download");
     if (!t) throw notFound("Transfer");
+    if (t.backupId) {
+      const ba = await access.require(req, t.serverId, "servers.backups.download");
+      const stream = await ctx.backups.streamLocal(ba, t.backupId, t.maxBytes, actorOf(req));
+      reply.header("content-type", "application/gzip");
+      reply.header("content-disposition", `attachment; filename="${t.path.replace(/[^A-Za-z0-9._-]+/g, "_")}"`);
+      return reply.send(stream);
+    }
     const a = await access.require(req, t.serverId, "servers.files.read");
     const stream = await f.sendDownload(a, t, actorOf(req));
     const name = (t.path.split("/").pop() ?? "download").replace(/[^A-Za-z0-9._-]+/g, "_");

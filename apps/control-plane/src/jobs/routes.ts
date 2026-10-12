@@ -48,7 +48,7 @@ export function registerJobRoutes(app: FastifyInstance, ctx: AppContext): void {
     if (!scopes.all && !authorize(principal, "jobs.view", { type: "global" })) {
       const nodeIds = await ctx.rbac.visibleNodeIds(scopes);
       const serverIds = await ctx.rbac.visibleServerIds(scopes);
-      const personal = await ctx.serverAccess.personalServerIds(principal.userId, "jobs.view");
+      const personal = principal.apiKey && !principal.apiKey.cap.has("jobs.view") ? [] : await ctx.serverAccess.personalServerIds(principal.userId, "jobs.view");
       visible = { nodeIds: nodeIds === "all" ? [] : nodeIds, serverIds: [...new Set([...(serverIds === "all" ? [] : serverIds), ...personal])] };
       if (!visible.nodeIds.length && !visible.serverIds.length) throw forbidden();
     }

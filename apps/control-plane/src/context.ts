@@ -33,6 +33,12 @@ import type { SecretBox } from "./secrets/secret-box.js";
 import type { SecretsService } from "./secrets/service.js";
 import type { SettingsService } from "./settings/service.js";
 import type { SshKeysService } from "./account/ssh-keys.js";
+import type { ApiKeysService } from "./apikeys/service.js";
+import type { BackupsService } from "./backups/service.js";
+import type { BackupStorage } from "./backups/storage.js";
+import type { Scheduler } from "./schedules/scheduler.js";
+import type { ConsoleBackfill } from "./servers/console-backfill.js";
+import type { SchedulesService } from "./schedules/service.js";
 import type { AllocationsService } from "./allocations/service.js";
 import type { CatalogService } from "./catalog/service.js";
 import type { BrowserTransfers } from "./files/browser-transfers.js";
@@ -93,5 +99,11 @@ export interface AppContext {
   files: FilesService;
   browserTransfers: BrowserTransfers;
   sshKeys: SshKeysService;
+  apiKeys: ApiKeysService;
+  backups: BackupsService;
+  backupStorage: BackupStorage;
+  schedules: SchedulesService;
+  scheduler: Scheduler;
+  consoleBackfill: ConsoleBackfill;
   sftp: SftpService;
 }

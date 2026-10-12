@@ -1,7 +1,7 @@
 import {
   ApiKey,
   Backup,
-  BackupStorageSettings,
+  BackupStorageSettingsView,
   BackupStorageTestResult,
   CreateBackupResponse,
   CreatedApiKey,
@@ -18,7 +18,8 @@ import type {
   CronPreviewRequest,
   RestoreBackupRequest,
   UpsertScheduleRequest,
-} from "@blockforge/contracts";
+
+  BackupStorageSettings} from "@blockforge/contracts";
 import { z } from "zod";
 import { apiClient } from "./client";
 
@@ -91,11 +92,16 @@ export const apiKeysApi = {
 };
 
 export const backupStorageApi = {
-  /** The S3 secret is write-only and never part of this response. */
-  get: (signal?: AbortSignal) =>
-    apiClient.get("/settings/backups.storage", { schema: BackupStorageSettings, signal }),
-  put: (body: In<typeof BackupStorageSettings>) =>
-    apiClient.put("/settings/backups.storage", { body, schema: BackupStorageSettings }),
-  /** Tests the saved configuration (HEAD bucket + put/delete a probe object). */
-  test: () => apiClient.post("/settings/backups.storage/test", { schema: BackupStorageTestResult }),
+  /** The S3 secret is write-only and never part of this response (only `secretAccessKeySet`). */
+  view: (signal?: AbortSignal) =>
+    apiClient.get("/settings/backups.storage", { schema: BackupStorageSettingsView, signal }),
+  get: async (signal?: AbortSignal) => (await backupStorageApi.view(signal)).value,
+  put: async (body: In<typeof BackupStorageSettings>) =>
+    (await apiClient.put("/settings/backups.storage", { body: { value: body }, schema: BackupStorageSettingsView })).value,
+  /** Tests the saved configuration, or `value` when given (HEAD bucket + put/delete a probe object). */
+  test: (value?: In<typeof BackupStorageSettings>) =>
+    apiClient.post("/settings/backups.storage/test", {
+      body: value === undefined ? {} : { value },
+      schema: BackupStorageTestResult,
+    }),
 };

@@ -6,13 +6,13 @@ import { zodDetails } from "../http/errors.js";
 import { parse } from "../http/validation.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { GLOBAL } from "../rbac/authorize.js";
-import { SETTINGS, type SettingKey } from "./service.js";
+import { DEDICATED_SETTINGS, SETTINGS, type SettingKey } from "./service.js";
 
 const KeyParams = z.object({ key: z.string().max(100) });
 const PutBody = z.object({ value: z.unknown() });
 
 function settingKey(key: string): SettingKey {
-  if (!(key in SETTINGS)) throw notFound("Setting");
+  if (!(key in SETTINGS) || DEDICATED_SETTINGS.includes(key as SettingKey)) throw notFound("Setting");
   return key as SettingKey;
 }
 

@@ -72,6 +72,14 @@ import { registerUserRoutes } from "./users/routes.js";
 import { UsersService } from "./users/service.js";
 import { registerAccountRoutes } from "./account/routes.js";
 import { SshKeysService } from "./account/ssh-keys.js";
+import { ApiKeysService } from "./apikeys/service.js";
+import { backupJobDefinitions, deleteAllBackups, type BackupJobDeps } from "./backups/jobs.js";
+import { registerBackupRoutes } from "./backups/routes.js";
+import { BackupsService } from "./backups/service.js";
+import { BackupStorage } from "./backups/storage.js";
+import { registerScheduleRoutes } from "./schedules/routes.js";
+import { Scheduler } from "./schedules/scheduler.js";
+import { SchedulesService } from "./schedules/service.js";
 import { registerAllocationRoutes } from "./allocations/routes.js";
 import { AllocationsService } from "./allocations/service.js";
 import { CatalogService } from "./catalog/service.js";
@@ -86,6 +94,7 @@ import { registerServerRoutes } from "./servers/routes.js";
 import { ServersService } from "./servers/service.js";
 import { ServerStateService } from "./servers/state.js";
 import { ConsoleSecretMasks } from "./servers/secret-masks.js";
+import { ConsoleBackfill } from "./servers/console-backfill.js";
 import { SftpService } from "./sftp/service.js";
 import { registerTemplateRoutes } from "./templates/routes.js";
 import { TemplatesService } from "./templates/service.js";
@@ -113,8 +122,10 @@ export interface BuildAppOptions {
   extraJobs?: JobDefinition<any>[];
   /** Test seams for the software catalogue (adapter overrides, transport, DNS). */
   catalog?: { adapters?: Partial<Catalog>; fetchImpl?: typeof fetch; lookup?: LookupFn; ttlMs?: number };
+  /** Scheduler test seams (task offsets). */
+  scheduler?: { sleep?: (ms: number, signal: AbortSignal) => Promise<void> };
   /** Server job timing (tests shorten the readiness wait). */
-  serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number };
+  serverJobs?: { readyTimeoutMs?: number; slpWaitMs?: number; installTimeoutMs?: number; saveTimeoutMs?: number };
 }
 
 export interface BuiltApp {
@@ -275,20 +286,41 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const browserTransfers = new BrowserTransfers(clock);
   const files = new FilesService({ gateway, audit, templates, transfers, browser: browserTransfers, jobs, logger: logger.child({ module: "files" }) });
   const sshKeys = new SshKeysService(db, audit);
+  const apiKeys = new ApiKeysService(db, clock, rbac, audit, logger.child({ module: "api-keys" }), config.apiKeyRateLimitPerMin);
   const sftp = new SftpService(db, clock, rbac, audit, logger.child({ module: "sftp" }));
+  const backupStorage = new BackupStorage(settings, secrets);
+  const backupsService = new BackupsService({
+    db, clock, logger: logger.child({ module: "backups" }), audit, hub, gateway, jobs, storage: backupStorage, access: serverAccess, state: serverState,
+    browser: browserTransfers, transfers,
+  });
+  const backupDeps: BackupJobDeps = {
+    db, clock, logger: logger.child({ module: "backup-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit, masks,
+    storage: backupStorage, publish: (id) => backupsService.publish(id), publishDeleted: (s, b) => backupsService.publishDeleted(s, b),
+    ...(opts.serverJobs ?? {}),
+  };
   for (const def of serverJobDefinitions({
     db, clock, logger: logger.child({ module: "server-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit, masks,
+    deleteBackups: (serverId, c) => deleteAllBackups(backupDeps, serverId, c),
     ...(opts.serverJobs ?? {}),
   })) {
     jobs.define(def as JobDefinition<unknown>);
   }
+  for (const def of backupJobDefinitions(backupDeps)) jobs.define(def as JobDefinition<unknown>);
+  const consoleBackfill = new ConsoleBackfill({ db, gateway, consoles, masks, logger: logger.child({ module: "console-backfill" }) });
+  let schedulesService: SchedulesService | null = null;
+  const scheduler = new Scheduler({
+    db, clock, logger: logger.child({ module: "scheduler" }), bus, rbac, access: serverAccess, servers, backups: backupsService, jobs,
+    schedules: () => schedulesService!,
+    ...(opts.scheduler?.sleep ? { sleep: opts.scheduler.sleep } : {}),
+  });
+  schedulesService = new SchedulesService({ db, clock, logger: logger.child({ module: "schedules" }), audit, hub, access: serverAccess, execute: (id) => scheduler.execute(id) });
   for (const def of files.jobDefinitions()) jobs.define(def as JobDefinition<unknown>);
 
   const ctx: AppContext = {
     config, logger, clock, pool, db, box, secrets, settings, audit, bus, hub, rbac, sessions, auth, users, idempotency, jobs,
     signer, authenticator, rotations, tracker, gateway, enrollment, ownership, consoles, transfers, nodes, latest, vmWriter,
     vmClient, metricsQuery, overview, overviewPublisher, alerts, alertEvaluator, notifications,
-    templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, sftp,
+    templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, apiKeys, sftp, backups: backupsService, backupStorage, schedules: schedulesService, scheduler, consoleBackfill,
   };
 
   // --- Seed & wiring -------------------------------------------------------------------
@@ -356,7 +388,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
 
   await app.register(
     async (api) => {
-      registerAuthHooks(api, { sessions, rbac, cookieSecure: config.cookieSecure, publicOrigin: config.publicOrigin });
+      registerAuthHooks(api, { sessions, rbac, cookieSecure: config.cookieSecure, publicOrigin: config.publicOrigin, apiKeys });
       registerAuthRoutes(api, ctx);
       registerUserRoutes(api, ctx);
       registerAuditRoutes(api, ctx);
@@ -369,6 +401,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
       registerAllocationRoutes(api, ctx);
       registerServerRoutes(api, ctx);
       registerFileRoutes(api, ctx);
+      registerBackupRoutes(api, ctx);
+      registerScheduleRoutes(api, ctx);
       registerAccountRoutes(api, ctx);
       registerRealtimeRoutes(api, ctx);
     },
@@ -391,6 +425,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const tasks: Record<string, PeriodicTask> = {
     nodeSweep: new PeriodicTask("node-sweep", config.agent.sweepIntervalMs, () => tracker.sweep(), logger),
     alertEval: new PeriodicTask("alert-eval", config.alertEvalIntervalMs, () => alertEvaluator.evaluate(), logger),
+    scheduler: new PeriodicTask("scheduler", config.schedulerIntervalMs, async () => void (await scheduler.tick()), logger),
     metricsFlush: new PeriodicTask("metrics-flush", config.metricsFlushIntervalMs, () => vmWriter.flush(), logger),
     outbox: new PeriodicTask("event-outbox", 10_000, async () => void (await bus.redispatchPending()), logger),
     deliveries: new PeriodicTask("notification-retries", 15_000, () => notifications.processPending(), logger),
@@ -402,6 +437,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
         await sessions.pruneExpired();
         await idempotency.prune();
         await runRetention({ db, clock, latest, consoles });
+        await scheduler.prune();
       },
       logger,
     ),
@@ -412,12 +448,14 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const startBackground = opts.startBackground ?? true;
   if (startBackground) {
     await jobs.start();
+    await scheduler.recover();
     for (const t of Object.values(tasks)) t.start();
   }
 
   app.addHook("onClose", async () => {
     for (const t of Object.values(tasks)) await t.stop();
     overviewPublisher.stop();
+    await scheduler.stop();
     if (startBackground) await jobs.stop();
     await vmWriter.flush(true);
     if (ownPool) await pool.end();

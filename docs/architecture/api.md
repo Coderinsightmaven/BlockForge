@@ -192,8 +192,8 @@ expire after 2 hours. World upload at creation is not implemented yet (`world.mo
 | DELETE | `/servers/:id/backups/:backupId` | → `{jobId}`; locked → 409 | servers.backups.delete |
 | GET | `/servers/:id/backups/:backupId/download` | → `TransferUrlResponse` (local: streamed via agent; S3: presigned GET, 5 min) | servers.backups.download |
 | POST | `/servers/:id/backups/:backupId/restore` | `RestoreBackupRequest` → `{jobId}` (server must be stopped/crashed or is stopped by the job) | servers.backups.restore |
-| GET · PUT | `/settings/backups.storage` | `BackupStorageSettings` (secret write-only, never returned) | settings.manage |
-| POST | `/settings/backups.storage/test` | → `{ok, error}` (HEAD bucket + put/delete a probe object) | settings.manage |
+| GET · PUT | `/settings/backups.storage` | GET → `BackupStorageSettingsView`; PUT `{value: BackupStorageSettings}` → same (generic settings wrapper; secret write-only) | settings.manage |
+| POST | `/settings/backups.storage/test` | optional `{value}` to test unsaved settings → `BackupStorageTestResult` (HEAD bucket + put/delete a probe object) | settings.manage |
 
 Backup jobs hold the server's operation lock (`backup`/`restore` in `lifecycle.ts`), so they never overlap
 power actions; rotation deletes the oldest unlocked successful backup; deleting a server deletes its backups.

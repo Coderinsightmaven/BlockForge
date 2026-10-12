@@ -14,6 +14,20 @@ export interface Principal {
   username: string;
   displayName: string;
   grants: readonly Grant[];
+  /**
+   * Set when the request is authenticated with a personal API key: every permission (also those from
+   * ownership and subuser grants) is limited to `cap`.
+   */
+  apiKey?: { id: string; prefix: string; cap: ReadonlySet<Permission> } | null;
+}
+
+/** The principal of an API key: the owner's grants, each limited to `cap`. */
+export function capPrincipal(owner: Principal, key: { id: string; prefix: string }, cap: ReadonlySet<Permission>): Principal {
+  return {
+    ...owner,
+    grants: owner.grants.map((g) => ({ ...g, permissions: new Set([...g.permissions].filter((p) => cap.has(p))) })),
+    apiKey: { ...key, cap },
+  };
 }
 
 /**

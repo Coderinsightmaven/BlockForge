@@ -31,7 +31,8 @@ export function transitionalStateFor(op: ServerOperation, from: ServerState): Se
     case "backup":
       return "backing_up";
     case "restore":
-      return "restoring";
+      // From running/degraded the restore job stops the server first (stopping → stopped → restoring).
+      return from === "running" || from === "degraded" ? "stopping" : "restoring";
     case "migrate":
       return "migrating";
   }

@@ -6,7 +6,7 @@ import { z } from "zod";
 import { AgentCommandError, type AgentGateway } from "../agents/gateway.js";
 import { commandErrorToHttp } from "../agents/errors.js";
 import type { TransferBroker } from "../agents/transfers.js";
-import type { AuditActor, AuditService } from "../audit/service.js";
+import { actorUserId, type AuditActor, type AuditService } from "../audit/service.js";
 import type { JobRunner } from "../jobs/runner.js";
 import { JobError, type JobDefinition } from "../jobs/types.js";
 import { AppError, badRequest, conflict, forbidden, notFound, validationDetails } from "../lib/errors.js";
@@ -109,7 +109,7 @@ export class FilesService {
 
   private async send<T extends Parameters<AgentGateway["send"]>[1]>(access: ServerAccess, type: T, payload: Parameters<AgentGateway["send"]>[2], actor: AuditActor, timeoutMs = 30_000) {
     try {
-      return await this.d.gateway.send(access.server.nodeId, type, payload as never, { userId: actor.actorId, timeoutMs });
+      return await this.d.gateway.send(access.server.nodeId, type, payload as never, { userId: actorUserId(actor), timeoutMs });
     } catch (err) {
       throw fsError(err);
     }
@@ -232,7 +232,7 @@ export class FilesService {
     await this.guard(access, paths);
     // Extraction writes files (secret files must not be planted); archives read them (bulk).
     const deny = await this.agentDeny(access, kind === "decompress" ? "content" : "bulk");
-    const jobId = await this.d.jobs.enqueue(FILE_JOBS[kind], { serverId: access.server.id, ...input, ...deny }, { targetType: "server", targetId: access.server.id, requestedBy: actor.actorId });
+    const jobId = await this.d.jobs.enqueue(FILE_JOBS[kind], { serverId: access.server.id, ...input, ...deny }, { targetType: "server", targetId: access.server.id, requestedBy: actorUserId(actor) });
     await this.audit(actor, access, kind, { ...input, jobId });
     try {
       const row = await this.d.jobs.waitForCompletion(jobId, ARCHIVE_SYNC_WAIT_MS);

@@ -61,7 +61,8 @@ export class UsersService {
           rows.map((r) => r.id),
         ),
       )
-      .orderBy(asc(roleBindings.createdAt));
+      // Bindings created together share created_at: role key and scope make the order deterministic.
+      .orderBy(asc(roleBindings.createdAt), asc(roles.key), asc(roleBindings.scopeType), asc(roleBindings.scopeId));
     const names = await this.rbac.scopeNames(bindings);
     const byUser = new Map<string, RoleBinding[]>();
     for (const b of bindings) {
