@@ -79,8 +79,8 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - Reviews are launched with T3 `delegate_task`, which only works on user-initiated turns. Queue them otherwise.
 
 ### 1.5 Sign-off
-After 1.1–1.4: re-run `.data/e2e_extensions.py`, `.data/e2e_ext_updates.py`, `.data/e2e_players.py` and
-`.data/e2e_players_stopped.py` against the test node. Record the evidence, mark the Plugins/mods and Players checklist
+After 1.1–1.4: re-run `scripts/e2e/e2e_extensions.py`, `scripts/e2e/e2e_ext_updates.py`, `scripts/e2e/e2e_players.py` and
+`scripts/e2e/e2e_players_stopped.py` against the test node. Record the evidence, mark the Plugins/mods and Players checklist
 lines `[x]`, and move "Current focus" to Phase 5.
 
 ## 2. Remaining Phase 3–4 features
@@ -182,8 +182,10 @@ replace the note with the concrete gap. Affected lines:
   `cliPluginsExtraDirs: ["/opt/homebrew/lib/docker/cli-plugins"]` in `~/.docker/config.json`). Two things did not come
   across from the Windows checkout because they were never committed: the gitignored `.data/` directory, including
   the e2e scripts named in 1.5 (`.data/e2e_*.py`), and the minecraft log fixtures (recaptured, see 5.2). The e2e
-  scripts must be rewritten, and this time committed (e.g. under `scripts/e2e/`), before sign-off. The
-  `scripts/dev-*.ps1` helpers are PowerShell; run them with `pwsh` or add shell equivalents.
+  scripts were rewritten and committed under `scripts/e2e/` (see its README). `scripts/dev-up.sh --tunnel` /
+  `scripts/dev-down.sh` are the macOS/Linux equivalents of the `.ps1` helpers; set `BF_TUNNEL_PORT=18081` while the
+  Windows workstation still holds node port 18080. The test-node agent was re-enrolled fresh against the Mac control
+  plane (old identity backed up on the node in `~/blockforge-agent-identity-windows-20261013`).
 - **Start and stop:** `scripts/dev-up.ps1 -Tunnel` starts the control plane and the reverse tunnel to the test node;
   `scripts/dev-down.ps1` stops them, together with the web dev server. Start the web dev server manually:
   `npx vite --port 5173 --strictPort` in `apps/web`, with its pid in `.data/web.pid`.
