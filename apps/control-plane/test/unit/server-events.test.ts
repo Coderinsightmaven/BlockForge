@@ -1,9 +1,6 @@
-import { EventEmitter } from "node:events";
 import type { Permission, ServerFrame } from "@blockforge/contracts";
 import pino from "pino";
 import { describe, expect, it } from "vitest";
-import type { AgentGateway } from "../../src/agents/gateway.js";
-import { ConsoleCommandTracker } from "../../src/players/console.js";
 import type { Principal } from "../../src/rbac/authorize.js";
 import { RealtimeHub, type RealtimeClient } from "../../src/realtime/hub.js";
 import { ServerEventPublisher } from "../../src/realtime/server-events.js";
@@ -74,32 +71,5 @@ describe("L1 realtime per-event permissions follow role changes at delivery time
     s.deleteUser();
     await s.publisher.publish(SERVER, "player.joined", { name: "Alex" }, "servers.players.view");
     expect(s.frames).toHaveLength(2);
-  });
-});
-
-describe("#4 ConsoleCommandTracker", () => {
-  it("foreign commands and unanswered own commands linger; answered own and quiet commands do not count", () => {
-    const gateway = new EventEmitter() as unknown as AgentGateway;
-    const clock = { now: 0 };
-    const tracker = new ConsoleCommandTracker(gateway, () => clock.now, 500);
-    tracker.begin(SERVER, "mine", false);
-    (gateway as unknown as EventEmitter).emit("consoleCommand", SERVER, "mine");
-    expect(tracker.exclusive(SERVER, "mine")).toBe(true);
-    tracker.begin(SERVER, "list", true);
-    expect(tracker.exclusive(SERVER, "mine")).toBe(true);
-    (gateway as unknown as EventEmitter).emit("consoleCommand", SERVER, "typed-by-someone");
-    expect(tracker.exclusive(SERVER, "mine")).toBe(false);
-    expect(tracker.exclusive("22222222-2222-4222-8222-222222222222", "x")).toBe(true);
-    clock.now = 500;
-    expect(tracker.exclusive(SERVER, "mine")).toBe(true);
-    tracker.begin(SERVER, "other", false);
-    expect(tracker.exclusive(SERVER, "mine")).toBe(false);
-    tracker.end(SERVER, "other", true);
-    expect(tracker.exclusive(SERVER, "mine")).toBe(true);
-    tracker.begin(SERVER, "timed-out", false);
-    tracker.end(SERVER, "timed-out", false);
-    expect(tracker.exclusive(SERVER, "mine")).toBe(false);
-    clock.now = 1000;
-    expect(tracker.exclusive(SERVER, "mine")).toBe(true);
   });
 });

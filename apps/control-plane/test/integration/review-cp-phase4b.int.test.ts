@@ -6,16 +6,20 @@ import { testPool } from "../support/db.js";
 import type { FakeAgent } from "../support/fake-agent.js";
 import { FakeUpstreams } from "../support/modrinth.js";
 import { catalogOptions, connectSimNode, paperRequest, publicLookup, templateIdByKey, waitJob, type SimNodeHandle } from "../support/panel.js";
+import { UiSocket } from "../support/realtime-client.js";
 
 /**
  * Regression tests for the Grok review of the control plane Phase 4b
  * (docs/reviews/2026-10-12-control-plane-phase4b.md): #4 player action feedback, #8 Mojang
- * Retry-After + shared limiter, L5 audited op/deop 403. (L1 is covered in test/unit/server-events.test.ts.)
+ * Retry-After + shared limiter, L5 audited op/deop 403, L1 realtime delivery after permission changes
+ * (also unit-tested in test/unit/server-events.test.ts).
  */
 
 let t: TestApp | null = null;
 const agents: FakeAgent[] = [];
+const sockets: UiSocket[] = [];
 afterEach(async () => {
+  for (const s of sockets.splice(0)) s.close();
   for (const a of agents.splice(0)) await a.close().catch(() => undefined);
   await t?.close();
   t = null;
@@ -133,6 +137,109 @@ describe("#4 player action feedback must be about the requested target", () => {
     const [steve, alex] = await Promise.all([act(owner, id, { action: "op", name: "Steve" }), act(owner, id, { action: "op", name: "Alex" })]);
     noFeedback(steve);
     expect(feedback(alex)).toEqual({ ok: true, message: "Made Alex a server operator" });
+  });
+});
+
+describe("#4 round 2: target-less lines never end the wait; decided at the end of the window", () => {
+  const ALREADY = "Nothing changed. The player is already an operator";
+
+  it("a batch printing a target-less failure and then our named success → ok:true", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner, node);
+    node.sim.options = { consoleReplies: { "op Steve": [info(ALREADY), info("Made Steve a server operator")] } };
+    expect(feedback(await act(owner, id, { action: "op", name: "Steve" }))).toEqual({ ok: true, message: "Made Steve a server operator" });
+  });
+
+  it("a target-less failure alone, uncontended for the whole window → ok:false after the window (kick refusals too)", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner, node);
+    node.sim.options = { consoleReplies: { "op Notch": [info(ALREADY)], "kick Owner": [info("Cannot kick the server owner in a LAN game")] } };
+    const started = Date.now();
+    expect(feedback(await act(owner, id, { action: "op", name: "Notch" }))).toEqual({ ok: false, message: ALREADY });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(FEEDBACK_TIMEOUT_MS - 50);
+    expect(feedback(await act(owner, id, { action: "kick", name: "Owner" }))).toEqual({ ok: false, message: "Cannot kick the server owner in a LAN game" });
+  });
+
+  it("a foreign command sent while we wait (after our target-less line) → 504; so does a second feedback line", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner, node);
+    node.sim.options = { consoleReplies: { "op Notch": [info(ALREADY)], "op Alex": [info(ALREADY), info("Made Carl a server operator")], "whitelist on": [info("Whitelist is now turned on")] } };
+    const pending = act(owner, id, { action: "op", name: "Notch" });
+    await sleep(FEEDBACK_TIMEOUT_MS / 2);
+    expect((await owner.post(`/servers/${id}/console`, { command: "say hi" })).statusCode).toBe(204);
+    noFeedback(await pending);
+    await sleep(LINGER_MS + 100);
+    // Another command's named answer in the window: the target-less line is nobody's.
+    noFeedback(await act(owner, id, { action: "op", name: "Alex" }));
+    // Whitelist toggles are target-less by nature: the same rule.
+    const toggle = act(owner, id, { action: "whitelist-set", enabled: true });
+    await sleep(FEEDBACK_TIMEOUT_MS / 2);
+    expect((await owner.post(`/servers/${id}/console`, { command: "say hi" })).statusCode).toBe(204);
+    noFeedback(await toggle);
+    await sleep(LINGER_MS + 100);
+    expect(feedback(await act(owner, id, { action: "whitelist-set", enabled: true }))).toEqual({ ok: true, message: "Whitelist is now turned on" });
+  });
+
+  it("a save-all keeps the console contended until the save finished (late output after a long save → 504)", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner, node);
+    node.sim.options = { saveConfirm: false, consoleReplies: { "op Notch": [info(ALREADY)] } };
+    expect((await owner.post(`/servers/${id}/console`, { command: "save-all flush" })).statusCode).toBe(204);
+    await sleep(LINGER_MS + 100); // longer than the ordinary linger: the save is still running
+    noFeedback(await act(owner, id, { action: "op", name: "Notch" }));
+    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: info("Saved the game") }]);
+    await sleep(LINGER_MS + 100);
+    expect(feedback(await act(owner, id, { action: "op", name: "Notch" }))).toEqual({ ok: false, message: ALREADY });
+  });
+
+  it("the op broadcast of an in-game command is not feedback", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner, node);
+    node.sim.options = { consoleReplies: { "op Steve": [info("System chat: [Alex: Made Steve a server operator]"), info("[Alex: Nothing changed. The player is already an operator]")] } };
+    noFeedback(await act(owner, id, { action: "op", name: "Steve" }));
+  });
+});
+
+describe("L1 player events follow permission changes at delivery time (real permissionsOf)", () => {
+  it("role revocation, subuser removal and ownership transfer stop player.* events; suspension keeps .view ones", async () => {
+    const { t, owner, node } = await boot();
+    const frank = await createUserClient(t, owner, "frank@example.com", [{ roleKey: "observer", scopeType: "global", scopeId: null }]);
+    const bob = await createUserClient(t, owner, "bob@example.com", []);
+    const dave = await createUserClient(t, owner, "dave@example.com", []);
+    const erin = await createUserClient(t, owner, "erin@example.com", []);
+    const idOf = async (c: ApiClient) => (await c.get("/auth/me")).json().user.id as string;
+    const [frankId, daveId, ownerId] = [await idOf(frank), await idOf(dave), await idOf(owner)];
+    const id = await paperServer(owner, node, { ownerId: daveId });
+    const bobSub = await owner.post(`/servers/${id}/subusers`, { user: "bob", permissions: ["servers.view", "servers.players.view"] });
+    expect(bobSub.statusCode, bobSub.body).toBe(201);
+    expect((await owner.post(`/servers/${id}/subusers`, { user: "erin", permissions: ["servers.view", "servers.players.view"] })).statusCode).toBe(201);
+    const users = { owner, frank, bob, dave, erin };
+    const ui: Record<string, UiSocket> = {};
+    for (const [name, c] of Object.entries(users)) {
+      ui[name] = await UiSocket.open(t, c);
+      sockets.push(ui[name]);
+      expect((await ui[name].subscribe(`server:${id}`)).op, name).toBe("subscribed");
+    }
+    const join = async (player: string): Promise<string[]> => {
+      node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: info(`${player} joined the game`) }]);
+      await ui.owner!.waitForEvent(`server:${id}`, "player.joined", 5000, (d) => (d as { name: string }).name === player);
+      await sleep(300);
+      return Object.keys(users).filter((n) => ui[n]!.frames.some((f) => f.op === "event" && f.type === "player.joined" && (f.data as { name: string }).name === player));
+    };
+    expect(await join("Pone")).toEqual(["owner", "frank", "bob", "dave", "erin"]);
+
+    const binding = (await owner.get(`/users/${frankId}`)).json().roles[0];
+    expect((await owner.delete(`/users/${frankId}/roles/${binding.id}`)).statusCode).toBe(200);
+    expect((await owner.delete(`/servers/${id}/subusers/${bobSub.json().id}`)).statusCode).toBe(204);
+    const transfer = await owner.patch(`/servers/${id}/build`, { ownerId });
+    expect(transfer.statusCode, transfer.body).toBe(200);
+    await sleep(1_100); // the per-user principal cache (1 s); the socket's own refresh would take 30 s
+    expect(await join("Ptwo")).toEqual(["owner", "erin"]);
+
+    // Suspension keeps `.view` permissions (effectiveServerPermissions), as over HTTP.
+    expect((await owner.post(`/servers/${id}/suspend`, {})).statusCode).toBe(200);
+    expect((await erin.get(`/servers/${id}/players`)).statusCode).not.toBe(403);
+    expect(await join("Pthree")).toEqual(["owner", "erin"]);
   });
 });
 

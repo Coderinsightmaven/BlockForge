@@ -316,33 +316,50 @@ export class PlayersService {
     const line = this.command(req);
     const target = "name" in req ? req.name.toLowerCase() : "ip" in req ? req.ip : null;
     const expected = FEEDBACK_ACTION[req.action];
-    const match = (lines: readonly string[], exclusive: readonly boolean[]): { ok: boolean; message: string } | null => {
-      for (let i = 0; i < lines.length; i++) {
-        const l = lines[i]!;
-        if (req.action === "whitelist-set" || req.action === "whitelist-reload") {
-          const msg = commandFeedbackMessage(l);
-          const re = WHITELIST_FEEDBACK[req.action === "whitelist-reload" ? "reload" : req.enabled ? "on" : "off"];
-          if (msg !== null && re.test(msg)) return { ok: true, message: msg.slice(0, 1024) };
-          continue;
-        }
+    type Feedback = { ok: boolean; message: string };
+    const toggle = req.action === "whitelist-set" || req.action === "whitelist-reload";
+    const relevant = (fb: CommandFeedback) => fb.action === expected || (fb.action === "player" && !fb.ok && "name" in req);
+    // Decides at once only on a line naming our target (success or 1.12.2 failure) for this action.
+    // Lines about another player, and target-less lines, never end the wait: a batch of commands or
+    // another operator's command may print them before our own named answer.
+    const decide = (lines: readonly string[]): Feedback | null => {
+      if (toggle) return null;
+      for (const l of lines) {
         const fb = parseCommandFeedback(l);
-        if (!fb) continue;
-        // Only this action's feedback about our target: another operator's command (console, schedule,
-        // another player action) or the late answer of an earlier one may print meanwhile.
-        if (fb.action !== expected && !(fb.action === "player" && !fb.ok && "name" in req)) continue;
-        if (fb.target !== null) {
-          if (fb.target.toLowerCase() === target) return toContractPlayerFeedback(fb);
-          continue;
-        }
-        // A failure naming nobody ("No player was found", "Nothing changed. …") is ours only if no other
-        // command could have been answering when it arrived; otherwise the outcome stays unknown (504).
-        if (exclusive[i]) return toContractPlayerFeedback(fb);
+        if (fb && relevant(fb) && fb.target !== null && fb.target.toLowerCase() === target) return toContractPlayerFeedback(fb);
       }
       return null;
     };
+    // End of the window without a named answer: a target-less line (26.3 "Nothing changed. …", "No player
+    // was found", whitelist toggles) is ours only if it is the only feedback seen and no other command was
+    // possibly answering at any time during the wait. Otherwise the outcome is unknown (504 no_feedback):
+    // an honest "sent, unconfirmed" beats a confident wrong answer.
+    const atDeadline = (lines: readonly string[], contended: boolean): Feedback | null => {
+      if (contended) return null;
+      const candidates: Feedback[] = [];
+      for (const l of lines) {
+        const fb = parseCommandFeedback(l);
+        const msg = commandFeedbackMessage(l);
+        const toggleLine = msg !== null && (WHITELIST_FEEDBACK.on.test(msg) || WHITELIST_FEEDBACK.off.test(msg) || WHITELIST_FEEDBACK.reload.test(msg));
+        if (toggle) {
+          if (fb) return null; // another command's answer
+          if (!toggleLine) continue;
+          const re = WHITELIST_FEEDBACK[req.action === "whitelist-reload" ? "reload" : req.enabled ? "on" : "off"];
+          if (!re.test(msg!)) return null;
+          candidates.push({ ok: true, message: msg!.slice(0, 1024) });
+          continue;
+        }
+        if (toggleLine) return null;
+        if (!fb) continue;
+        // Any named line here is about someone else (ours would have decided): an untracked command answered.
+        if (fb.target !== null || !relevant(fb)) return null;
+        candidates.push(toContractPlayerFeedback(fb));
+      }
+      return candidates.length === 1 ? candidates[0]! : null;
+    };
     let feedback;
     try {
-      feedback = await sendAndAwait(this.console, access.server.nodeId, access.server.id, line, match, this.d.feedbackTimeoutMs ?? 5000, { userId: actorUserId(actor) });
+      feedback = await sendAndAwait(this.console, access.server.nodeId, access.server.id, line, decide, this.d.feedbackTimeoutMs ?? 5000, { userId: actorUserId(actor), atDeadline });
     } catch (err) {
       throw commandErrorToHttp(err);
     }

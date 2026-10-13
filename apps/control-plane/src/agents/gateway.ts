@@ -192,7 +192,7 @@ export interface GatewayEvents {
    * route, scheduled commands, backups, player actions). Lets the player actions tell whether another
    * command may be answering on the same console.
    */
-  consoleCommand: [serverId: string, commandId: string];
+  consoleCommand: [serverId: string, commandId: string, line: string];
 }
 
 export interface GatewayDeps {
@@ -731,7 +731,10 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       await this.persistOutcome(cmd.id, "failed", { code: "CANCELLED", message: "cancelled before dispatch", retryable: false });
       throw new AgentCommandError("CANCELLED", "command cancelled", false);
     }
-    if (type === "workload.console") this.emit("consoleCommand", (parsed.data as CommandPayload<"workload.console">).workloadId, cmd.id);
+    if (type === "workload.console") {
+      const c = parsed.data as CommandPayload<"workload.console">;
+      this.emit("consoleCommand", c.workloadId, cmd.id, c.line);
+    }
 
     return new Promise<CommandResult<T>>((resolve, reject) => {
       if (session.closed || session.closing) {
