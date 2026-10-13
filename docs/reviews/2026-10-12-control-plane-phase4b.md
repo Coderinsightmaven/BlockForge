@@ -47,3 +47,25 @@ Tests: `apps/control-plane/test/integration/extensions-review.int.test.ts`, desc
 | 11 | Minor | Web: no job banner for `extensions` | Fixed — "Changing plugins/mods" banner, test: "shows a running plugin/mod change …" |
 | — | Tests | `keptAreaPath` edge cases; workload exit during an install | Added — "keptAreaPath accepts only files directly inside the keep area", "the reconciler keeps following the workload during a plugin/mod change" |
 
+### Round 3 (Grok grok-4.7, on the round-2 fixes) — CHANGES REQUIRED → fixed
+
+Round 2 verdict: 10 of 11 round-1 items resolved, M1 partially. Tests in the same file (describe "Phase 4b review round 2
+(Grok)") plus `packages/contracts/test/domain.test.ts` and `test/integration/jobs.int.test.ts`.
+
+| # | Sev | Finding | Resolution |
+|---|-----|---------|------------|
+| B | Blocker | After a pre-emption the undo touched files while the new holder was active (restart starting the server; kill releasing the lock so start/backup/install/schedule could overlap) | Fixed — fenced undo (`fencedUndo`): after losing its lock a change may touch plugin/mod files only under a new cleanup hold (`ServerStateService.lockForCleanup`: no live operation, state `stopped`/`crashed`), re-checked before every undo step; otherwise nothing is touched, the failed row records every kept file (path + digest) and every written file (path + SHA-512) and the job fails `PREEMPTED_UNDO_SKIPPED`. Same for synchronous changes (409 `preempted_undo_skipped`), tests: "2a: stop/kill with nothing else afterwards …", "2b: while another operation holds the server or it runs …" (restart overlapping the undo, kill then start, kill then backup), "2c: synchronous changes …" (unconditional mid-stop assertion) |
+| M | Major | A crash during the undo was not resumed (resumed jobs threw `LOCK_LOST` before reading the journal; undo progress was not journaled) | Fixed — a durable undo record (`UndoLog` in `ctx.state.undo`: every step from the moment it happened, entries, error, attempted/failed steps) checkpointed on every change; on resume a started undo is finished (own lock, else cleanup hold) or deliberately skipped, never the apply; the lock is checked inside the apply, after the journal is read; exactly one failed row, test: "crash during the undo: recover() finishes it under the job's lock, or under a cleanup hold, or skips it …" |
+| 1 | Minor | `placeVerified` move-back failure left foreign bytes at the destination, then upload completion restored onto the occupied path | Fixed — `PlacementStuckError` (`FILE_STUCK`); upload completion then never restores onto the destination, records a failed row (kept path + digest) and answers 409 `placement_stuck`, test: "minor 1: a changed upload that cannot be moved back is reported as stuck …" |
+| 2 | Minor | `deleteCreated` could orphan a file under `.blockforge/extensions/fetch/<uuid>.delete` silently | Fixed — `FILE_ORPHANED` error naming the quarantine path (ends up in the history row / job error) |
+| 3 | Minor | Upload pre-emption put the jar back with a raw rename and swallowed errors | Fixed — the placed upload and the kept file are undo steps (verified helpers, fenced), outcome reported truthfully |
+| 4 | Minor | Enable/disable checked the token only before the rename | Fixed — hashed before, re-checked after the rename; pre-empted → fenced rename back (or recorded), test: "2c …" |
+| 5 | Minor | A server that crashed during an install stayed blocked for start/restart until the job ended | Fixed — contracts (additive): `EXTENSIONS_PREEMPTED_WHEN_CRASHED_BY`, start/restart pre-empt `extensions` on crashed servers (same fenced undo); domain tests |
+| 6 | Minor | The 30-min sweep matched job-less rows regardless of token | Fixed — only token holds whose `operation_started_at` is older than the cutoff (plus holder-less rows); a change that lost its hold to the sweep sees it at the token check and applies the fenced rule |
+| 7 | Minor | Migration 0006 edited in place | Kept as one file for this branch; column adds are `ADD COLUMN IF NOT EXISTS` (and the constraint drop `IF EXISTS`) so a dev database with an earlier copy migrates |
+| — | Tests | rescan `LOCK_LOST`; throw after `checkpoint({ completeStep: true })` | Added — "rescan: a job that lost its lock after recording the change fails with LOCK_LOST …", "a step whose completing checkpoint committed stays succeeded when it throws afterwards" (jobs.int.test.ts) |
+
+Residual risk: the agent's own restart policy can restart a crashed workload without the control-plane lock
+(pre-existing for every operation on crashed servers); a cleanup undo on a `crashed` server can therefore still race
+a policy restart.
+

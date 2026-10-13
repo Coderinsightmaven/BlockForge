@@ -274,9 +274,14 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   rollback jobs; enable/disable, remove, upload completion) holds the server operation lock as
   `activeOperation: "extensions"` (no state change) for its whole duration: start, backup, restore, reinstall and
   delete answer the usual 409 `INVALID_STATE` meanwhile, and no extension change starts while another operation
-  runs. On a `running`/`degraded` server **stop, restart and kill pre-empt** the change (contracts
-  `canStartOperation`): the job notices the lost lock at its next re-check, undoes its file changes and fails with
-  `LOCK_LOST` (failed history row); a synchronous change undoes itself and answers 409 `preempted`. Every move of
+  runs. On a `running`/`degraded` server **stop, restart and kill pre-empt** the change, and so do start
+  and restart of a server that crashed meanwhile (contracts `canStartOperation`). The pre-empted change notices the
+  lost lock at its next re-check and may then touch plugin/mod files only under a new **cleanup hold** (an
+  `extensions` hold taken only when no other operation holds the server and it is `stopped`/`crashed`): with it
+  the undo runs and the job fails with `LOCK_LOST` (a synchronous change answers 409 `preempted`); without it no
+  file is touched, the failed history row records every kept file (`keptPath` + digest) and every file the change
+  wrote (path + SHA-512), and the job fails with `PREEMPTED_UNDO_SKIPPED` (409 `preempted_undo_skipped`). An undo
+  interrupted by a control-plane restart is resumed the same way (never the apply). Every move of
   a jar is hashed before and verified after (`fs.rename` takes no expected digest, so a swap in between is
   detected and undone/refused, not prevented): kept jars go back only while they have the digest taken when they
   were kept, downloads land in `.blockforge/extensions/fetch/` and are renamed into place without overwriting,
