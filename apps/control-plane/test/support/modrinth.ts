@@ -67,6 +67,8 @@ export class FakeUpstreams {
   /** Mojang profiles by lower-case name (in addition to the recorded Notch fixture). */
   readonly mojangProfiles = new Map<string, { id: string; name: string }>();
   mojang429 = false;
+  /** `Retry-After` header of the Mojang 429 (null: none). */
+  mojangRetryAfter: string | null = null;
   private sim: SimNode | null = null;
 
   constructor() {
@@ -231,7 +233,7 @@ export class FakeUpstreams {
     this.calls.push({ method, url, body, userAgent: ua });
     const u = new URL(url);
     if (u.host === "api.mojang.com") {
-      if (this.mojang429) return new Response("{}", { status: 429 });
+      if (this.mojang429) return new Response("{}", { status: 429, headers: this.mojangRetryAfter === null ? {} : { "retry-after": this.mojangRetryAfter } });
       const name = decodeURIComponent(u.pathname.replace("/users/profiles/minecraft/", "")).toLowerCase();
       const p = this.mojangProfiles.get(name);
       return p ? new Response(JSON.stringify(p), { status: 200 }) : new Response(fixture("players/mojang-profile-404.json"), { status: 404 });

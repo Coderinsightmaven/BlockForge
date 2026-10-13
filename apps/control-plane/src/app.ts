@@ -94,7 +94,7 @@ import { SchedulesService } from "./schedules/service.js";
 import { registerAllocationRoutes } from "./allocations/routes.js";
 import { AllocationsService } from "./allocations/service.js";
 import { CatalogService } from "./catalog/service.js";
-import type { Catalog } from "@blockforge/minecraft";
+import { MojangRateLimiter, type Catalog } from "@blockforge/minecraft";
 import { BrowserTransfers } from "./files/browser-transfers.js";
 import { registerFileRoutes } from "./files/routes.js";
 import { FilesService } from "./files/service.js";
@@ -145,8 +145,8 @@ export interface BuildAppOptions {
     testOverride?: TestTransportOverride;
     limiter?: { now?: () => number; sleep?: (ms: number) => Promise<void>; maxWaitMs?: number };
   };
-  /** Player action timing (tests shorten the feedback wait). */
-  players?: { feedbackTimeoutMs?: number };
+  /** Player action timing (tests shorten the feedback wait and the unconfirmed-command linger). */
+  players?: { feedbackTimeoutMs?: number; commandLingerMs?: number };
 }
 
 export interface BuiltApp {
@@ -337,15 +337,24 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     ...(opts.scheduler?.sleep ? { sleep: opts.scheduler.sleep } : {}),
   });
   const upstreams = new Upstreams({ logger: logger.child({ module: "upstream" }), version: APP_VERSION, contact: config.modrinthContact, ...(opts.upstream ?? {}) });
-  const serverEvents = new ServerEventPublisher(hub, serverAccess, logger.child({ module: "server-events" }));
+  const serverEvents = new ServerEventPublisher(hub, serverAccess, logger.child({ module: "server-events" }), {
+    load: (userId) => rbac.loadPrincipal(userId),
+    now: () => clock.now(),
+  });
   const extensionDeps: ExtensionDeps = {
     db, clock, logger: logger.child({ module: "extensions" }), gateway, audit, upstreams, settings, events: serverEvents, jobs, access: serverAccess, browser: browserTransfers, transfers, state: serverState,
   };
   for (const def of extensionJobDefinitions(extensionDeps)) jobs.define(def as JobDefinition<unknown>);
   const extensions = new ExtensionsService(extensionDeps);
   const playerSessions = new PlayerSessionTracker({ db, clock, logger: logger.child({ module: "player-sessions" }), events: serverEvents });
+  // One Mojang limiter per process (the profile API limit is per IP); PlayersService makes every Mojang lookup.
+  const mojangLimiter = new MojangRateLimiter({
+    maxWaitMs: opts.upstream?.limiter?.maxWaitMs ?? 2_000,
+    ...(opts.upstream?.limiter?.now ? { now: opts.upstream.limiter.now } : {}),
+    ...(opts.upstream?.limiter?.sleep ? { sleep: opts.upstream.limiter.sleep } : {}),
+  });
   const players = new PlayersService({
-    db, clock, logger: logger.child({ module: "players" }), gateway, consoles, latest, upstreams, audit, sessions: playerSessions, ...(opts.players ?? {}),
+    db, clock, logger: logger.child({ module: "players" }), gateway, consoles, latest, upstreams, audit, sessions: playerSessions, mojangLimiter, ...(opts.players ?? {}),
   });
   schedulesService = new SchedulesService({ db, clock, logger: logger.child({ module: "schedules" }), audit, hub, access: serverAccess, execute: (id) => scheduler.execute(id), lease: () => scheduler.lease() });
   for (const def of files.jobDefinitions()) jobs.define(def as JobDefinition<unknown>);

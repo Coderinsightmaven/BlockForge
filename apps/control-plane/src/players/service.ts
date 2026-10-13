@@ -13,6 +13,7 @@ import {
   playerCommands,
   PlayerInputError,
   removeFromPlayerList,
+  MojangRateLimiter,
   resolvePlayerProfile,
   serializePlayerList,
   setOperator,
@@ -41,7 +42,7 @@ import { decodeCursor, encodeCursor, TimeIdCursor } from "../lib/pagination.js";
 import type { LatestCache } from "../metrics/latest.js";
 import type { ServerAccess } from "../servers/access.js";
 import { loadRuntimeContext, minecraftGame } from "../servers/runtime.js";
-import { sendAndAwait } from "./console.js";
+import { ConsoleCommandTracker, sendAndAwait } from "./console.js";
 import type { PlayerSessionTracker } from "./sessions.js";
 
 export interface PlayersDeps {
@@ -56,6 +57,13 @@ export interface PlayersDeps {
   sessions: PlayerSessionTracker;
   /** Wait for the server's feedback after a console command (contract: ≤ 5 s). */
   feedbackTimeoutMs?: number;
+  /** How long an unconfirmed console command may still be answering (target-less feedback is ambiguous meanwhile). */
+  commandLingerMs?: number;
+  /**
+   * The process-wide Mojang profile limiter (the limit is per IP): every Mojang lookup of the control
+   * plane goes through it. Default: one created here (PlayersService is the only Mojang caller).
+   */
+  mojangLimiter?: MojangRateLimiter;
 }
 
 const FILES = { whitelist: "whitelist.json", ops: "ops.json", "banned-players": "banned-players.json", "banned-ips": "banned-ips.json" } as const satisfies Record<PlayerListKind, string>;
@@ -99,7 +107,17 @@ interface ReadFile {
 
 /** Players (api.md "Players (Phase 4b)"). */
 export class PlayersService {
-  constructor(private readonly d: PlayersDeps) {}
+  private readonly commands: ConsoleCommandTracker;
+  readonly mojangLimiter: MojangRateLimiter;
+
+  constructor(private readonly d: PlayersDeps) {
+    this.commands = new ConsoleCommandTracker(d.gateway, () => d.clock.now(), d.commandLingerMs);
+    this.mojangLimiter = d.mojangLimiter ?? new MojangRateLimiter();
+  }
+
+  private get console() {
+    return { gateway: this.d.gateway, consoles: this.d.consoles, commands: this.commands };
+  }
 
   private async kind(access: ServerAccess): Promise<"java" | "proxy"> {
     const game = minecraftGame(await loadRuntimeContext(this.d.db, access.server.id));
@@ -142,7 +160,7 @@ export class PlayersService {
   /** `list uuids` on the running server (complete list) — null when no recognised answer came. */
   private async listOnline(access: ServerAccess): Promise<PlayerListOutput | null> {
     try {
-      return await sendAndAwait(this.d, access.server.nodeId, access.server.id, playerCommands.list({ uuids: true }), (lines) => parsePlayerListOutput(lines), this.d.feedbackTimeoutMs ?? 5000);
+      return await sendAndAwait(this.console, access.server.nodeId, access.server.id, playerCommands.list({ uuids: true }), (lines) => parsePlayerListOutput(lines), this.d.feedbackTimeoutMs ?? 5000, { quiet: true });
     } catch {
       return null;
     }
@@ -234,6 +252,15 @@ export class PlayersService {
 
   async action(access: ServerAccess, req: PlayerActionRequest, actor: AuditActor): Promise<PlayerActionResult> {
     if (OPERATOR_PLAYER_ACTIONS.includes(req.action) && !access.permissions.has("servers.console.send")) {
+      // Audited like the route's own permission check (ServerAccessService.require).
+      await this.d.audit.record({
+        ...actor,
+        action: "authz.denied",
+        targetType: "server",
+        targetId: access.server.id,
+        outcome: "denied",
+        details: { permission: "servers.console.send", method: "POST", route: "/api/v1/servers/:id/players/actions", action: req.action },
+      });
       throw forbidden("Granting or revoking operator rights also requires servers.console.send");
     }
     const kind = await this.kind(access);
@@ -289,8 +316,9 @@ export class PlayersService {
     const line = this.command(req);
     const target = "name" in req ? req.name.toLowerCase() : "ip" in req ? req.ip : null;
     const expected = FEEDBACK_ACTION[req.action];
-    const match = (lines: readonly string[]): { ok: boolean; message: string } | null => {
-      for (const l of lines) {
+    const match = (lines: readonly string[], exclusive: readonly boolean[]): { ok: boolean; message: string } | null => {
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i]!;
         if (req.action === "whitelist-set" || req.action === "whitelist-reload") {
           const msg = commandFeedbackMessage(l);
           const re = WHITELIST_FEEDBACK[req.action === "whitelist-reload" ? "reload" : req.enabled ? "on" : "off"];
@@ -299,15 +327,22 @@ export class PlayersService {
         }
         const fb = parseCommandFeedback(l);
         if (!fb) continue;
-        // Only this action's feedback (and for our target: another admin's command may answer meanwhile).
-        if (fb.ok && fb.action === expected && fb.target.toLowerCase() === target) return toContractPlayerFeedback(fb);
-        if (!fb.ok && (fb.action === expected || (fb.action === "player" && "name" in req))) return toContractPlayerFeedback(fb);
+        // Only this action's feedback about our target: another operator's command (console, schedule,
+        // another player action) or the late answer of an earlier one may print meanwhile.
+        if (fb.action !== expected && !(fb.action === "player" && !fb.ok && "name" in req)) continue;
+        if (fb.target !== null) {
+          if (fb.target.toLowerCase() === target) return toContractPlayerFeedback(fb);
+          continue;
+        }
+        // A failure naming nobody ("No player was found", "Nothing changed. …") is ours only if no other
+        // command could have been answering when it arrived; otherwise the outcome stays unknown (504).
+        if (exclusive[i]) return toContractPlayerFeedback(fb);
       }
       return null;
     };
     let feedback;
     try {
-      feedback = await sendAndAwait(this.d, access.server.nodeId, access.server.id, line, match, this.d.feedbackTimeoutMs ?? 5000, { userId: actorUserId(actor) });
+      feedback = await sendAndAwait(this.console, access.server.nodeId, access.server.id, line, match, this.d.feedbackTimeoutMs ?? 5000, { userId: actorUserId(actor) });
     } catch (err) {
       throw commandErrorToHttp(err);
     }
@@ -319,7 +354,7 @@ export class PlayersService {
   private async profile(name: string, onlineMode: boolean | null): Promise<{ uuid: string; name: string }> {
     let p;
     try {
-      p = await resolvePlayerProfile(this.d.upstreams.mojang, name, { onlineMode: onlineMode ?? true });
+      p = await resolvePlayerProfile(this.d.upstreams.mojang, name, { onlineMode: onlineMode ?? true, limiter: this.mojangLimiter });
     } catch (err) {
       throw this.d.upstreams.httpError(err, "mojang", "Player");
     }
@@ -423,7 +458,7 @@ export class PlayersService {
     const onlineMode = kind === "java" ? (await this.properties(access)).onlineMode : true;
     let p;
     try {
-      p = await resolvePlayerProfile(this.d.upstreams.mojang, name, { onlineMode: onlineMode ?? true });
+      p = await resolvePlayerProfile(this.d.upstreams.mojang, name, { onlineMode: onlineMode ?? true, limiter: this.mojangLimiter });
     } catch (err) {
       throw this.d.upstreams.httpError(err, "mojang", "Player");
     }

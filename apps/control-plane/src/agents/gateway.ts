@@ -187,6 +187,12 @@ export interface GatewayEvents {
   sessionReady: [nodeId: string];
   sessionClosed: [nodeId: string];
   nodeMetrics: [nodeId: string];
+  /**
+   * A line is about to be typed into a workload's console (`workload.console`, any sender: console
+   * route, scheduled commands, backups, player actions). Lets the player actions tell whether another
+   * command may be answering on the same console.
+   */
+  consoleCommand: [serverId: string, commandId: string];
 }
 
 export interface GatewayDeps {
@@ -725,6 +731,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       await this.persistOutcome(cmd.id, "failed", { code: "CANCELLED", message: "cancelled before dispatch", retryable: false });
       throw new AgentCommandError("CANCELLED", "command cancelled", false);
     }
+    if (type === "workload.console") this.emit("consoleCommand", (parsed.data as CommandPayload<"workload.console">).workloadId, cmd.id);
 
     return new Promise<CommandResult<T>>((resolve, reject) => {
       if (session.closed || session.closing) {
