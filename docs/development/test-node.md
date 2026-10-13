@@ -139,7 +139,8 @@ Control plane restarted with migration 0005 (`servers.extensions.view` in the ro
   current, no problem); project route lists releases only by default (`luckperms` → `v5.5.71-bukkit`); a jar copied in
   through the file manager (as over SFTP) is identified on the next incremental scan (title, version, metadata) and
   removed again through the keep area. Follow-ups noted: identified on-disk copies are labelled `source: "modrinth"`
-  (contract says found-on-disk = `unknown` + a Modrinth ref), and two copies of the same plugin are not flagged.
+  (contract says found-on-disk = `unknown` + a Modrinth ref), and two copies of the same plugin are not flagged
+  (both fixed since, see `docs/OPEN_WORK.md` §1.2; not yet re-run live).
 * No error-level lines in the control-plane log.
 
 ## Phase 4b sign-off re-run (2026-10-13, main afebd2d)
@@ -160,5 +161,6 @@ order against `e2e-paper` (Paper 26.3, 25572) and `e2e-vanilla` (Pterodactyl Van
   (`P3y2MXnd`) and offered 1.5.3; then 1.4.40 installed through the install route and **updated to 1.5.3 through
   `POST …/extensions/updates/apply`** (job 1.2 s, result `updated`, history `update` 1.4.40 → 1.5.3 with
   `rollback.available`) — the first live verification of update apply.
-* Still open from this run: identified on-disk copies are labelled `source: "modrinth"` (see above); the project
+* Still open from this run: identified on-disk copies are labelled `source: "modrinth"` (see above; fixed since,
+  not yet re-run live); the project
   route's prerelease check used `luckperms`, which has no prereleases for 26.3 (the scripts now use `viaversion`).

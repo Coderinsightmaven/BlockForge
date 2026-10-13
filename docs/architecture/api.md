@@ -260,6 +260,20 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   (`full: true` re-reads everything) → Modrinth identification by SHA-512. A file renamed outside BlockForge
   keeps its row when its SHA-512 matches a vanished row of the same scan. Scans run automatically after every
   extension job and when the list is first opened (`scan.status: "never"`).
+* **`source` is provenance.** `modrinth` = BlockForge installed the file from Modrinth (install, update, or a
+  rollback that re-fetched it), `upload` = uploaded through BlockForge, `unknown` = found on disk. A scan never
+  sets `modrinth`/`upload`: a file copied in (file manager, SFTP) stays `unknown` even when the SHA-512 lookup
+  identifies it — the identification is in `InstalledExtension.modrinth` and drives update checks, plans and
+  rollback re-fetches exactly as for installed files — and a BlockForge-placed file whose content changes on disk
+  becomes `unknown` with `installedAt`/`installedBy` cleared. A history snapshot with a Modrinth version id and
+  SHA-512 can be re-fetched whatever its `source` (the download must match the SHA-512). Migration 0007 relabelled
+  rows a scan had labelled `modrinth` (`installed_at` null).
+* **Duplicate copies.** Two enabled jars of the install dir whose selected metadata declare the same plugin name /
+  mod id (case-insensitive; Bukkit names with spaces read as `_`; every mod of a multi-mod jar) both get a
+  `DUPLICATE_ID` problem naming the other path(s): a warning for plugins (Paper/Velocity load one copy), an error
+  for mods (`loadable: false`; Fabric/Forge/NeoForge refuse to start). Disabled, unread and otherwise unloadable
+  jars do not count. The problem depends on the other files, so it is added whenever extensions are read (list,
+  single read, enable/disable and upload responses) and is never stored with the row.
 * **Install with re-plan.** The UI shows `POST …/plan` and sends the plan's files as `expect`. At install time
   the control plane plans again; if the fresh plan is not installable or its (projectId, versionId, action) set
   differs from `expect` → 409 `CONFLICT` with `ModrinthPlanChangedDetails` `{reason: "plan_changed", plan}` and
