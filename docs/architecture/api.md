@@ -270,10 +270,12 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   size/mtime) and is retried on the next scan. Migration 0007 relabelled rows a scan had labelled `modrinth`
   (`installed_at` null).
 * **Rollback source.** A rollback restores `from` from the keep area whenever the entry has an unexpired kept file
-  (no network); if that file no longer matches its digest, or there is none, it re-fetches the exact file from
+  (no network); if that file is gone or no longer matches its digest, or there is none, it re-fetches the exact file from
   Modrinth when the snapshot has a version id + SHA-512 (whatever its `source`; the download must match). A
   re-fetched file is `source: "modrinth"` with `installedAt` set; a kept file keeps its recorded source, and an
-  `unknown` one gets no `installedAt`. The rescan stamps only the row whose SHA-512 equals the restored bytes.
+  `unknown` one gets no `installedAt`. The rescan stamps only the row whose SHA-512 equals the restored bytes. A
+  kept file that cannot be hashed (I/O error) fails the job with `HASH_FAILED` before anything moves (run the
+  rollback again); it never switches the rollback to a download.
 * **Duplicate copies.** Two enabled jars of the install dir whose selected metadata declare the same plugin name /
   mod id (case-insensitive; Bukkit names with spaces read as `_`; every mod of a multi-mod jar) both get a
   `DUPLICATE_ID` problem naming the other path(s): a warning for plugins (Paper/Velocity load one copy), an error
@@ -283,7 +285,8 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   read (list, single read, enable/disable and upload responses) and is never stored with the row; the upload's
   `DUPLICATE_ID` warning uses the same rule. Every change that can alter it (enable, disable, remove, upload, and
   scans, which every install/update/rollback job ends with) lists in `extensions.updated.changed` all rows sharing
-  a plugin name / mod id with the changed rows before or after the change, so clients re-read each affected row.
+  a plugin name / mod id with the changed rows before or after the change, so clients re-read each affected row
+  (more than 256 ids → `changed: null`, for every publisher).
 * **Install with re-plan.** The UI shows `POST …/plan` and sends the plan's files as `expect`. At install time
   the control plane plans again; if the fresh plan is not installable or its (projectId, versionId, action) set
   differs from `expect` → 409 `CONFLICT` with `ModrinthPlanChangedDetails` `{reason: "plan_changed", plan}` and

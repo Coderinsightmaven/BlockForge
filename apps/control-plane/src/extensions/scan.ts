@@ -298,5 +298,6 @@ export async function setScanStatus(d: ExtensionDeps, serverId: string, status: 
 /** `extensions.updated` to subscribers holding `servers.extensions.view`. */
 export async function publishExtensions(d: ExtensionDeps, serverId: string, changed: string[] | null): Promise<void> {
   const [row] = await d.db.select().from(extensionScans).where(eq(extensionScans.serverId, serverId));
-  await d.events.publish(serverId, "extensions.updated", { serverId, scan: scanStatusOf(row), changed }, "servers.extensions.view");
+  // The event carries at most 256 ids (contracts `ExtensionsUpdatedEvent`); more collapse to null (refetch all).
+  await d.events.publish(serverId, "extensions.updated", { serverId, scan: scanStatusOf(row), changed: changed && changed.length > 256 ? null : changed }, "servers.extensions.view");
 }

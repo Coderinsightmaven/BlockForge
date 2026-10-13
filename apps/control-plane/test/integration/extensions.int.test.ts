@@ -607,6 +607,46 @@ describe("source provenance and duplicate copies (Phase 4b live-run follow-ups)"
     expect((await pScan).sort()).toEqual([b.id, third.id].sort());
   });
 
+  it("a synchronous change listing more than 256 ids publishes changed: null (event cap)", async () => {
+    const { t, owner, node } = await boot();
+    const id = await paperServer(owner);
+    for (let i = 0; i < 257; i++) node.sim.put(id, `plugins/Chunky-${String(i).padStart(3, "0")}.jar`, pluginJar("Chunky", "1.0"));
+    node.sim.put(id, "plugins/Chunky-off.jar.disabled", pluginJar("Chunky", "1.0"));
+    const off = byName(await scanned(owner, owner, id), "Chunky-off.jar.disabled")!;
+    const ui = await UiSocket.open(t, owner);
+    sockets.push(ui);
+    await ui.subscribe(`server:${id}`);
+    ui.frames.splice(0);
+    expect((await owner.patch(`/servers/${id}/extensions/${off.id}`, { enabled: true })).statusCode).toBe(200);
+    const ev = await ui.waitForEvent(`server:${id}`, "extensions.updated");
+    expect((ev.data as { changed: unknown }).changed).toBeNull();
+    expect(ui.invalid).toEqual([]);
+  });
+
+  it("a kept file that cannot be hashed fails the rollback (retryable, no download); a later rollback uses it", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    up.addProject({ id: "Chunky00", slug: "chunky", title: "Chunky", type: "plugin", loaders: ["paper"] });
+    const chunky = up.addVersion("Chunky00", { id: "ChunkV14", number: "1.4.40", filename: "Chunky-1.4.40.jar", jar: pluginJar("Chunky", "1.4.40") });
+    node.sim.put(id, "plugins/Chunky-1.4.40.jar", chunky.jar);
+    const copied = byName(await scanned(owner, owner, id), "Chunky-1.4.40.jar")!;
+    const rm = RemoveExtensionResponse.parse((await owner.delete(`/servers/${id}/extensions/${copied.id}`)).json());
+    const fetched = node.sim.fetched.length;
+    node.sim.options = { ioErrorPaths: [`.blockforge/extensions/kept/${rm.historyEntryId}.jar`] };
+    const rb = await owner.post(`/servers/${id}/extensions/history/${rm.historyEntryId}/rollback`);
+    expect(rb.statusCode, rb.body).toBe(202);
+    const failed = await waitJob(owner, rb.json().jobId);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toMatchObject({ code: "HASH_FAILED" });
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(node.sim.read(id, "plugins/Chunky-1.4.40.jar")).toBeNull();
+    node.sim.options = {};
+    const again = await owner.post(`/servers/${id}/extensions/history/${rm.historyEntryId}/rollback`);
+    expect((await waitJob(owner, again.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(byName(await list(owner, id), "Chunky-1.4.40.jar")).toMatchObject({ source: "unknown", installedAt: null });
+  });
+
   it("a failed hash keeps provenance, digest and metadata; the next good scan of the same bytes does not demote", async () => {
     const { owner, node, up } = await boot();
     const id = await paperServer(owner);

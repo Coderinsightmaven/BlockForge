@@ -9,6 +9,7 @@ import {
   ensureDir,
   EXTENSION_JOBS,
   FETCH_DIR,
+  jobAgentError,
   releaseExtensionLock,
   restartRequired,
   keptUsable,
@@ -32,6 +33,7 @@ import {
   recordedCleanupTokens,
   restoreKept,
   sha512Of,
+  sha512OrAbsent,
   stableId,
   stampInstalled,
   writeHistory,
@@ -419,8 +421,16 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           const rb = ((ctx.state.rb as Progress | undefined) ?? {}) as Progress;
           const resumed = rb.started === true;
           if (!rb.mode && entry.from && fromKeep && refetchable(entry.from)) {
-            // A kept file that changed since it was kept falls back to the Modrinth re-fetch.
-            const sha = await sha512Of(d, c, entry.keptPath!).catch(() => null);
+            // A kept file that is gone or changed since it was kept falls back to the Modrinth re-fetch. Any other
+            // hash failure (I/O error, agent unreachable) fails the step before the choice is recorded, so a later
+            // attempt decides again.
+            let sha: string | null;
+            try {
+              sha = await sha512OrAbsent(d, c, entry.keptPath!);
+            } catch (err) {
+              if (err instanceof JobError) throw new JobError(err.code, `${err.message}; try the rollback again`, true);
+              throw jobAgentError(err, "fs.hash");
+            }
             if (sha !== entry.keptSha512) fromKeep = false;
           }
           if (entry.from) rb.mode = fromKeep ? "keep" : "modrinth";
