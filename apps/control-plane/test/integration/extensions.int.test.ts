@@ -297,7 +297,10 @@ describe("installs, updates, removal and rollback", () => {
     expect(byName(l, "BetaPlug-1.0.0.jar")).toMatchObject({ source: "modrinth", installedBy: { id: ownerId, name: "owner" }, installedAt: expect.any(Number), compatibility: { loadable: true } });
     expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", installedBy: null, installedAt: null });
     expect(byName(l, "BetaPlug-1.0.0.jar")!.modrinth).toMatchObject({ projectId: "BetaPlug", versionId: "BetaV100", slug: "betaplug" });
-    expect(node.sim.fetched.slice(before).map((f) => f.destPath)).toEqual(["plugins/BetaPlug-1.0.0.jar"]);
+    // Downloaded to a temporary name, then renamed into place without overwriting (review round 2, item 6).
+    expect(node.sim.fetched.slice(before).map((f) => f.destPath)).toEqual([expect.stringMatching(/^\.blockforge\/extensions\/fetch\/[0-9a-f-]{36}\.jar$/)]);
+    expect(node.sim.files(id).get("plugins/BetaPlug-1.0.0.jar")!.data.equals(up.projects.get("BetaPlug")!.versions[0]!.jar)).toBe(true);
+    expect([...node.sim.files(id).keys()].filter((k) => k.startsWith(".blockforge/extensions/fetch/"))).toEqual([]);
     expect((cmds(node, "artifact.fetch").at(-1)!.payload as { checksum: { algorithm: string; value: string } }).checksum).toEqual({ algorithm: "sha512", value: up.projects.get("BetaPlug")!.versions[0]!.sha512 });
     const h = await history(owner, id);
     expect(h.items.map((e) => [e.action, e.status, e.path])).toEqual([["install", "succeeded", "plugins/BetaPlug-1.0.0.jar"]]);

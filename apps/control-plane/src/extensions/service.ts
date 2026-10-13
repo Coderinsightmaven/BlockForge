@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import type {
+  ExtensionFileSnapshot,
   ExtensionHistoryEntry,
   ExtensionList,
   ExtensionUpdatesResponse,
@@ -73,13 +74,25 @@ import {
   type ExtensionRow,
   type ExtensionTarget,
 } from "./model.js";
-import { deleteFile, exists, keepFile, KeptFileChangedError, restoreKept, sha512Of, writeHistory, type FileCtx, type Kept } from "./ops.js";
+import { deleteFile, exists, HashFailedError, keepFile, KeptFileChangedError, placeVerified, restoreKept, sha512Of, UnverifiedKeptError, writeHistory, type FileCtx, type Kept } from "./ops.js";
+import { JobError } from "../jobs/types.js";
 import { publishExtensions } from "./scan.js";
 
 type UploadWarning = { code: "REPLACED_EXISTING" | "INCOMPATIBLE_ALLOWED" | "DUPLICATE_ID" | "NO_METADATA"; level: "info" | "warning"; message: string };
 
 const rejected = (status: 409 | 422, reason: string, message: string, extra: { compatibility?: unknown; existing?: unknown } = {}) =>
   new AppError(status, status === 409 ? "CONFLICT" : "PRECONDITION_FAILED", message, { reason, compatibility: extra.compatibility ?? null, existing: extra.existing ?? null });
+
+const preempted = () => conflict("A stop, restart or kill of the server interrupted the change; it was undone", { reason: "preempted" });
+
+/** HTTP form of a refused file operation (hash failure, unverifiable or changed kept file) or an agent error. */
+function fileError(err: unknown): unknown {
+  if (err instanceof HashFailedError) return new AppError(409, "CONFLICT", err.message, { reason: "hash_failed" });
+  if (err instanceof UnverifiedKeptError) return new AppError(409, "CONFLICT", err.message, { reason: "kept_file_unverified", keptPath: err.keptPath });
+  if (err instanceof KeptFileChangedError) return new AppError(409, "CONFLICT", err.message, { reason: "kept_file_changed", keptPath: err.keptPath });
+  if (err instanceof JobError) return new AppError(409, "CONFLICT", err.message, { reason: err.code.toLowerCase() });
+  return commandErrorToHttp(err);
+}
 
 /** Plugins & mods (api.md "Plugins & mods (Phase 4b)"). */
 export class ExtensionsService {
@@ -103,6 +116,29 @@ export class ExtensionsService {
     return r;
   }
 
+  /**
+   * A synchronous change left a file in the keep area it cannot vouch for (or could not put back): a
+   * failed history row points at it (digest only when known) so an operator can inspect it and pruning
+   * removes it later; it is never restored automatically.
+   */
+  private async recordUnverified(
+    access: ServerAccess,
+    actor: AuditActor,
+    historyId: string,
+    action: "remove" | "upload",
+    r: { name: string; path: string; from: ExtensionFileSnapshot },
+    err: UnverifiedKeptError,
+    keptSha512: string | null = null,
+  ): Promise<void> {
+    await writeHistory(
+      this.d,
+      access.server.id,
+      [{ id: historyId, action, extensionId: null, extensionName: r.name, path: r.path, from: r.from, to: null, keptPath: err.keptPath, keptSha512, leftInKeep: true }],
+      { actor: await historyActor(this.d.db, actor), jobId: null, status: "failed", error: err.message },
+    );
+    await this.d.audit.record({ ...actor, action: `server.extension.${action}`, targetType: "server", targetId: access.server.id, outcome: "failed", details: { path: r.path, keptPath: err.keptPath, reason: err.code } });
+  }
+
   private async audit(actor: AuditActor, access: ServerAccess, action: string, details: Record<string, unknown>): Promise<void> {
     await this.d.audit.record({ ...actor, action: `server.extension.${action}`, targetType: "server", targetId: access.server.id, outcome: "success", details });
   }
@@ -117,9 +153,12 @@ export class ExtensionsService {
     assertAgentSupportsExtensions(this.d.gateway, access.server.nodeId);
     const serverId = access.server.id;
     return withTransaction(this.d.db, async (tx, after) => {
+      // The server row is locked first (like backups and power actions), then the job is created.
+      const fileChange = type !== EXTENSION_JOBS.scan;
+      if (fileChange) await lockExtensions(this.d, tx, serverId);
       const jobId = await this.d.jobs.enqueue(type, { serverId, ...input }, { targetType: "server", targetId: serverId, requestedBy: actor ? actorUserId(actor) : null }, tx, after);
-      if (type !== EXTENSION_JOBS.scan) {
-        await lockExtensions(this.d, tx, serverId, jobId);
+      if (fileChange) {
+        await this.d.state.attachJob(tx, serverId, jobId);
         after.add(() => this.d.state.notify(serverId));
       }
       await acquireExtensionLock(tx, serverId, jobId);
@@ -129,20 +168,24 @@ export class ExtensionsService {
 
   /**
    * A synchronous file change (enable/disable, remove, upload completion) holds the server's `extensions`
-   * operation lock for its whole duration, taken atomically with the extension-job check (L3).
+   * operation lock for its whole duration, taken atomically with the extension-job check (L3). `held`
+   * re-checks it before each file operation: a pre-empting stop/restart/kill makes the change undo
+   * itself and answer 409 `preempted`.
    */
-  private async syncChange<T>(access: ServerAccess, fn: () => Promise<T>): Promise<T> {
+  private async syncChange<T>(access: ServerAccess, fn: (held: () => Promise<boolean>) => Promise<T>): Promise<T> {
     assertExtensionsAllowed(access.server);
     const serverId = access.server.id;
-    await withTransaction(this.d.db, async (tx) => {
-      await lockExtensions(this.d, tx, serverId, null);
+    const token = await withTransaction(this.d.db, async (tx) => {
+      const t = await lockExtensions(this.d, tx, serverId);
       await ensureScanRow(tx, serverId);
       await assertNoExtensionJob(tx, serverId, { lock: true });
+      return t;
     });
+    this.d.state.notify(serverId);
     try {
-      return await fn();
+      return await fn(() => this.d.state.holdsToken(serverId, token));
     } finally {
-      await this.d.state.unlock(serverId, "extensions");
+      await this.d.state.unlock(serverId, token);
     }
   }
 
@@ -188,11 +231,12 @@ export class ExtensionsService {
     const r = await this.row(access.server.id, id);
     const to = toggledExtensionPath(r.path, enabled);
     if (to === null) return { extension: (await toDtos(this.d.db, [r]))[0]!, restartRequired: false };
-    const updated = await this.syncChange(access, async () => {
+    const updated = await this.syncChange(access, async (held) => {
       const cur = await this.row(access.server.id, id);
       if (cur.path !== r.path) throw conflict("The extension changed meanwhile; reload it", { reason: "exists" });
       const c = this.ctx(access, actor);
       if (await exists(this.d, c, to).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)))) throw conflict(`${to} already exists`, { reason: "exists" });
+      if (!(await held())) throw preempted();
       try {
         await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: r.path, to }, agentOpts(c));
       } catch (err) {
@@ -219,16 +263,27 @@ export class ExtensionsService {
     requireTarget(access.server);
     await this.row(access.server.id, id);
     const historyId = randomUUID();
-    const { r, kept } = await this.syncChange(access, async () => {
+    const { r, kept } = await this.syncChange(access, async (held) => {
       const r = await this.row(access.server.id, id);
       const c = this.ctx(access, actor);
       let kept: Kept | null = null;
+      if (!(await held())) throw preempted();
       try {
-        // The digest of what was actually kept (#6), not the scan-time hash.
+        // The digest of what was actually kept (#6, hashed before and verified after the move), not the scan-time hash.
         kept = await keepFile(this.d, c, r.path, historyId);
       } catch (err) {
         // Already gone from disk: only the row is removed.
-        if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) throw commandErrorToHttp(err);
+        if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) {
+          if (err instanceof UnverifiedKeptError) await this.recordUnverified(access, actor, historyId, "remove", { name: displayName(r), path: r.path, from: snapshotOf(r) }, err);
+          throw fileError(err);
+        }
+      }
+      if (kept && !(await held())) {
+        const k = kept;
+        await restoreKept(this.d, c, k.path, k.sha512, r.path).catch(async (e: unknown) => {
+          await this.recordUnverified(access, actor, historyId, "remove", { name: displayName(r), path: r.path, from: snapshotOf(r) }, new UnverifiedKeptError(k.path, `could not be put back after the removal was interrupted (${(e as Error).message})`), k.sha512);
+        });
+        throw preempted();
       }
       await this.d.db.delete(installedExtensions).where(eq(installedExtensions.id, r.id));
       await writeHistory(
@@ -459,7 +514,9 @@ export class ExtensionsService {
     if (!info.compatibility.loadable && !req.allowIncompatible) throw rejected(422, "incompatible", "The jar cannot be loaded by this server's software", { compatibility: info.compatibility });
 
     const dest = `${t.installDir}/${u.filename}`;
-    return this.syncChange(access, () => this.installUpload(access, u, t, dest, hashed, info, req, actor, c));
+    const staged = hashed.sha512;
+    if (!staged) throw new AppError(502, "UPSTREAM_ERROR", "The agent returned no SHA-512 for the staged file");
+    return this.syncChange(access, (held) => this.installUpload(access, u, t, dest, { ...hashed, sha512: staged }, info, req, actor, c, held));
   }
 
   /** The file-changing half of `completeUpload` (under the server's `extensions` operation lock). */
@@ -468,11 +525,12 @@ export class ExtensionsService {
     u: typeof extensionUploads.$inferSelect,
     t: ExtensionTarget,
     dest: string,
-    hashed: { sizeBytes: number; mtime: number; sha1?: string | undefined; sha512?: string | undefined },
+    hashed: { sizeBytes: number; mtime: number; sha1?: string | undefined; sha512: string },
     info: ReturnType<typeof toContractJarInfo>,
     req: { replaceExisting: boolean; allowIncompatible: boolean },
     actor: AuditActor,
     c: FileCtx,
+    held: () => Promise<boolean>,
   ): Promise<{ extension: InstalledExtension; compatibility: NonNullable<InstalledExtension["compatibility"]>; warnings: UploadWarning[]; restartRequired: boolean }> {
     const [again] = await this.d.db.select({ completedAt: extensionUploads.completedAt }).from(extensionUploads).where(eq(extensionUploads.id, u.id));
     if (!again || again.completedAt) throw conflict("The upload was completed meanwhile; repeat the request", { reason: "exists", existing: null });
@@ -484,40 +542,62 @@ export class ExtensionsService {
     const warnings: UploadWarning[] = [];
     const historyId = randomUUID();
     let kept: Kept | null = null;
+    const existingSnapshot = {
+      name: existingRow ? displayName(existingRow) : u.filename,
+      path: dest,
+      from: existingRow ? snapshotOf(existingRow) : ({ source: "unknown", path: dest, projectId: null, versionId: null, versionNumber: null, sha512: null, sizeBytes: null } as const),
+    };
+    if (!(await held())) throw preempted();
     if (onDisk) {
       try {
-        // The digest of what was actually kept (#6), not the scan-time hash (null for unscanned paths).
+        // The digest of what was actually kept (#6, hashed before and verified after the move; also for unscanned paths).
         kept = await keepFile(this.d, c, dest, historyId);
       } catch (err) {
-        if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) throw commandErrorToHttp(err);
+        if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) {
+          if (err instanceof UnverifiedKeptError) await this.recordUnverified(access, actor, historyId, "upload", existingSnapshot, err);
+          throw fileError(err);
+        }
       }
       warnings.push({ code: "REPLACED_EXISTING", level: "info", message: `Replaced ${dest} (kept for rollback)` });
     }
-    try {
-      await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: u.serverId, from: u.stagingPath, to: dest }, agentOpts(c));
-    } catch (err) {
+    const failUpload = async (status: 409 | 422, reason: string, message: string, err: unknown): Promise<never> => {
+      // Undo: the kept jar goes back only while it is exactly what was kept (#1).
+      let undo: string | null = null;
       if (kept) {
-        // Undo: the kept jar goes back only while it is exactly what was kept (#1).
         const k = kept;
         try {
           await restoreKept(this.d, c, k.path, k.sha512, dest);
         } catch (e) {
-          const changed = e instanceof KeptFileChangedError;
-          await this.d.audit.record({
-            ...actor,
-            action: "server.extension.upload.complete",
-            targetType: "server",
-            targetId: access.server.id,
-            outcome: "failed",
-            details: { uploadId: u.id, path: dest, undo: changed ? "kept_file_changed" : "failed", keptPath: k.path },
-          });
-          throw new AppError(409, "CONFLICT", `Installing the upload failed and ${changed ? `the kept file ${k.path} changed, so it was not restored` : `restoring ${k.path} failed`}; it is left in the keep area`, {
-            reason: changed ? "kept_file_changed" : "undo_failed",
-            keptPath: k.path,
-          });
+          undo = e instanceof KeptFileChangedError ? "kept_file_changed" : "failed";
+          await this.recordUnverified(access, actor, historyId, "upload", existingSnapshot, new UnverifiedKeptError(k.path, `could not be put back (${(e as Error).message})`), e instanceof KeptFileChangedError ? null : k.sha512);
         }
       }
+      await this.d.audit.record({
+        ...actor,
+        action: "server.extension.upload.complete",
+        targetType: "server",
+        targetId: access.server.id,
+        outcome: "failed",
+        details: { uploadId: u.id, path: dest, reason, undo, keptPath: undo ? kept?.path : null, error: (err as Error | null)?.message ?? null },
+      });
+      throw new AppError(status, status === 409 ? "CONFLICT" : "PRECONDITION_FAILED", undo ? `${message}; the replaced file ${kept?.path} could not be restored and is left in the keep area` : message, {
+        reason: undo ? (undo === "kept_file_changed" ? "kept_file_changed" : "undo_failed") : reason,
+        keptPath: undo ? (kept?.path ?? null) : null,
+      });
+    };
+    if (kept && !(await held())) return failUpload(409, "preempted", "The upload was interrupted by a stop/restart/kill of the server; nothing was changed", null);
+    try {
+      // Verified after the move: staged bytes that changed after they were checked are moved back and refused.
+      await placeVerified(this.d, c, u.stagingPath, dest, hashed.sha512);
+    } catch (err) {
+      if (err instanceof JobError && err.code === "FILE_CHANGED") return failUpload(409, "upload_changed", "The staged file changed after it was checked; upload it again", err);
+      if (err instanceof JobError && err.code === "CONFLICT") return failUpload(409, "exists", `${dest} appeared meanwhile; nothing was replaced`, err);
+      if (kept) return failUpload(409, "install_failed", `Installing the upload failed: ${(err as Error).message}`, err);
       throw commandErrorToHttp(err);
+    }
+    if (!(await held())) {
+      await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: u.serverId, from: dest, to: u.stagingPath }, agentOpts(c)).catch(() => undefined);
+      return failUpload(409, "preempted", "The upload was interrupted by a stop/restart/kill of the server; nothing was changed", null);
     }
     if (!info.compatibility.loadable) warnings.push({ code: "INCOMPATIBLE_ALLOWED", level: "warning", message: "Installed although the server software cannot load it" });
     if (info.metadata.length === 0) warnings.push({ code: "NO_METADATA", level: "warning", message: "No plugin/mod metadata found in the jar" });

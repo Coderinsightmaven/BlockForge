@@ -5,13 +5,11 @@ import { z } from "zod";
 import { extensionHistory, installedExtensions, servers } from "../db/schema/index.js";
 import { JobError, type JobDefinition, type StepContext } from "../jobs/types.js";
 import {
-  agentOpts,
   assertHoldsLock,
   ensureDir,
   EXTENSION_JOBS,
   FETCH_DIR,
   jobAgentError,
-  keptPathOf,
   releaseExtensionLock,
   restartRequired,
   refetchable,
@@ -26,8 +24,9 @@ import {
   deleteCreated,
   exists,
   fetchModrinthFile,
-  keepFile,
+  keepJournaled,
   KeptFileChangedError,
+  placeVerified,
   restoreKept,
   sha512Of,
   stableId,
@@ -37,8 +36,10 @@ import {
   type FileCtx,
   type HistoryActorFields,
   type JournalEntry,
+  type KeepRecord,
   type Kept,
   type PendingEntry,
+  UnverifiedKeptError,
 } from "./ops.js";
 import { publishExtensions, runScan, setScanStatus } from "./scan.js";
 
@@ -95,12 +96,27 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         if (s) await publishExtensions(d, f.input.serverId, null);
       }
     } finally {
-      await releaseExtensionLock(d.db, f.input.serverId, f.jobId);
-      // The server's `extensions` operation lock (file-changing jobs; a no-op for scans).
-      await d.state.end(f.input.serverId, f.jobId);
+      // Each lock is released on its own: a failing release never pins the other (the maintenance sweep
+      // and lock takeover handle a lock whose release failed, since the job is terminal by then).
+      try {
+        await releaseExtensionLock(d.db, f.input.serverId, f.jobId);
+      } catch (err) {
+        d.logger.error({ err, jobId: f.jobId }, "releasing the extension job lock failed");
+      }
+      try {
+        // The server's `extensions` operation lock (file-changing jobs; a no-op for scans and after a pre-emption).
+        await d.state.end(f.input.serverId, f.jobId);
+      } catch (err) {
+        d.logger.error({ err, jobId: f.jobId }, "releasing the server operation lock failed");
+      }
     }
   };
   const holdsLock = <I extends { serverId: string }>(ctx: StepContext<I>) => assertHoldsLock(d, ctx.input.serverId, ctx.jobId);
+  /** Rescans only while the job still holds the lock (the files were changed and recorded already). */
+  const holdsLockForRescan = async <I extends { serverId: string }>(ctx: StepContext<I>) => {
+    if (await d.state.holds(ctx.input.serverId, "extensions", ctx.jobId)) return;
+    throw new JobError("LOCK_LOST", "the plugin/mod files were changed (see the history), but the server's operation lock was taken over before the rescan; scan again later");
+  };
 
   const scan: JobDefinition<z.infer<typeof ScanInput>> = {
     type: EXTENSION_JOBS.scan,
@@ -145,15 +161,16 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), ctx.input.plan.files, { actor, jobId: ctx.jobId, journal: journalOf(ctx), assertLock: () => holdsLock(ctx) });
           ctx.state.entries = r.entries;
           delete ctx.state.journal;
-          // History, state and step success in one transaction: a resumed job never applies twice.
-          await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx), { completeStep: true });
           await ctx.log("info", `Installed ${ctx.input.plan.files.length} file(s)${restartRequired(s.state) ? "; they take effect at the next restart" : ""}`);
+          // History, state and step success in one transaction (nothing fallible after it): a resumed job never applies twice.
+          await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx), { completeStep: true });
         },
       },
       {
         key: "rescan",
         label: "Rescan plugins/mods",
         run: async (ctx) => {
+          await holdsLockForRescan(ctx);
           const changed = await rescan(d, ctx, ctx.input.serverId);
           const stamped = await stampInstalled(d, ctx.input.serverId, ctx.input.plan.files, (ctx.state.entries as PendingEntry[]) ?? [], ctx.input.userId);
           await publishExtensions(d, ctx.input.serverId, changed === null ? null : [...new Set([...changed, ...stamped])]);
@@ -258,6 +275,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         key: "rescan",
         label: "Rescan plugins/mods",
         run: async (ctx) => {
+          await holdsLockForRescan(ctx);
           const changed = await rescan(d, ctx, ctx.input.serverId);
           const stamped: string[] = [];
           for (const a of (ctx.state.applied as { files: ModrinthPlannedFile[]; entries: PendingEntry[] }[]) ?? []) {
@@ -295,7 +313,8 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             ctx.state.restored = entry.from ?? null;
             ctx.state.entryId = id;
             delete ctx.state.rb;
-            // History, the consumed kept file and step success in one transaction (never applied twice).
+            await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
+            // History, the consumed kept file and step success in one transaction (never applied twice; nothing fallible after it).
             await ctx.checkpoint(
               async (tx) => {
                 if (p) await writeHistory(d, s.id, [p], { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
@@ -303,7 +322,6 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
               },
               { completeStep: true },
             );
-            await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
           };
           // Idempotency (#5): an interrupted attempt that already recorded its history is not re-run.
           const [prior] = await d.db.select().from(extensionHistory).where(eq(extensionHistory.id, id));
@@ -316,8 +334,8 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           if (!avail.available) throw new JobError("ROLLBACK_UNAVAILABLE", `the change can no longer be rolled back (${avail.reason})`);
           const rows = await d.db.select().from(installedExtensions).where(eq(installedExtensions.serverId, s.id));
           const current = entry.to ? (rows.find((r) => r.path === entry.to!.path) ?? null) : null;
-          // Progress of an interrupted attempt (checkpointed after every file operation).
-          type Progress = { started?: boolean; kept?: Kept | null; restored?: boolean };
+          // Progress of an interrupted attempt (checkpointed around every file operation).
+          type Progress = { started?: boolean; keep?: KeepRecord; kept?: Kept | null; restored?: boolean };
           const rb = ((ctx.state.rb as Progress | undefined) ?? {}) as Progress;
           const resumed = rb.started === true;
           rb.started = true;
@@ -336,12 +354,21 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           };
           const fetchTemp = `${FETCH_DIR}/${id}.jar`;
           try {
-            // The current file (the change being undone) goes to the keep area, hashed right after the move.
+            // The current file (the change being undone) goes to the keep area: digest journaled before the move.
             if (entry.to && rb.kept === undefined) {
-              const keptName = keptPathOf(id);
-              if (await exists(d, c, entry.to.path)) rb.kept = await keepFile(d, c, entry.to.path, id);
-              else if (resumed && (await exists(d, c, keptName))) rb.kept = { path: keptName, sha512: await sha512Of(d, c, keptName) };
-              else rb.kept = null;
+              try {
+                rb.kept = await keepJournaled(d, c, entry.to.path, id, {
+                  record: rb.keep,
+                  resumed,
+                  save: async (r) => {
+                    rb.keep = r;
+                    await ctx.checkpoint();
+                  },
+                });
+              } catch (err) {
+                if (err instanceof UnverifiedKeptError) Object.assign(pending, { keptPath: err.keptPath, keptSha512: null, leftInKeep: true });
+                throw err;
+              }
               await ctx.checkpoint();
             }
             if (rb.kept) {
@@ -352,8 +379,8 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
               await holdsLock(ctx);
               const from = entry.from;
               if (!fromKeep) {
-                // Downloaded to a temporary name first, then renamed into place: `fs.rename` never overwrites,
-                // so an unrelated file that now has the old name is neither replaced nor later deleted (#2).
+                // Downloaded to a temporary name first, then moved into place without overwriting (verified after
+                // the move), so an unrelated file that now has the old name is neither replaced nor later deleted (#2).
                 const placed = resumed && !(await exists(d, c, fetchTemp)) && (await sha512Of(d, c, from.path)) === from.sha512;
                 if (!placed) {
                   const downloaded = resumed && (await sha512Of(d, c, fetchTemp)) === from.sha512;
@@ -372,7 +399,8 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
                     await ensureDir(d.gateway, c.nodeId, s.id, FETCH_DIR, c);
                     await fetchModrinthFile(d, c, { url: picked.url, destPath: fetchTemp, sha512: from.sha512!, sizeBytes: picked.file.size });
                   }
-                  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: fetchTemp, to: from.path }, agentOpts(c));
+                  await holdsLock(ctx);
+                  await placeVerified(d, c, fetchTemp, from.path, from.sha512!);
                 }
               } else {
                 if (!entry.keptPath || !entry.keptSha512) throw new JobError("ROLLBACK_UNAVAILABLE", "the previous file is no longer kept (file_unavailable)");
@@ -382,7 +410,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
                   try {
                     await restoreKept(d, c, entry.keptPath, entry.keptSha512, from.path);
                   } catch (err) {
-                    if (err instanceof KeptFileChangedError) throw new JobError("ROLLBACK_UNAVAILABLE", "the kept file is missing or changed (file_unavailable)");
+                    if (err instanceof KeptFileChangedError) throw new JobError("ROLLBACK_UNAVAILABLE", `the kept file is missing or changed (file_unavailable): ${err.message}`);
                     throw err;
                   }
                 }
@@ -390,9 +418,9 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
               rb.restored = true;
               await ctx.checkpoint();
             }
+            await holdsLock(ctx);
           } catch (err) {
-            if (err instanceof JobError && err.code === "LOCK_LOST") throw err;
-            // Undo: only files this job wrote are removed, and kept files go back only while unchanged.
+            // Undo (also after a lost lock): only files this job wrote are removed, and kept files go back only while unchanged.
             const notes: string[] = [];
             const undo = async (what: string, fn: () => Promise<void>): Promise<boolean> => {
               try {
@@ -410,9 +438,10 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
               else if (entry.keptPath && entry.keptSha512) {
                 const keptPath = entry.keptPath;
                 const sha = entry.keptSha512;
+                // Back into the keep area, verified (it must still be exactly the restored file).
                 await undo(from.path, async () => {
                   if ((await sha512Of(d, c, from.path)) !== sha) throw new JobError("FILE_CHANGED", `${from.path} changed after it was restored; it was not moved back to the keep area`);
-                  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: from.path, to: keptPath }, agentOpts(c));
+                  await placeVerified(d, c, from.path, keptPath, sha);
                 });
               }
             }
@@ -435,6 +464,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         key: "rescan",
         label: "Rescan plugins/mods",
         run: async (ctx) => {
+          await holdsLockForRescan(ctx);
           const changed = await rescan(d, ctx, ctx.input.serverId);
           const restored = ctx.state.restored as { source: string; path: string; projectId: string | null; versionId: string | null; versionNumber: string | null; sha512: string | null } | null;
           if (restored) {

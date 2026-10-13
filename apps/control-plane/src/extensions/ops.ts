@@ -10,6 +10,7 @@ import {
   agentOpts,
   displayName,
   ensureDir,
+  FETCH_DIR,
   jobAgentError,
   KEPT_DIR,
   KEPT_RETENTION_MS,
@@ -20,6 +21,14 @@ import {
   type HistoryRow,
   type SendOpts,
 } from "./model.js";
+
+/*
+ * Verify-after-move: the agent's `fs.rename` takes no expected digest, so every move of a jar is
+ * bracketed by hashes — before (what we decided to move) and after (what actually arrived). A swap in
+ * the window between the first hash and the rename is detected after the fact and the move is undone
+ * or refused; it is not prevented. An agent-side "rename if digest matches" would close that residual
+ * window (possible later improvement; not part of the agent protocol today).
+ */
 
 export type HistoryActorFields = Pick<HistoryRow, "actorType" | "actorId" | "actorName">;
 
@@ -60,34 +69,25 @@ export async function exists(d: ExtensionDeps, c: FileCtx, path: string): Promis
   }
 }
 
-/** SHA-512 of one file (null when it does not exist or cannot be hashed). */
-export async function sha512Of(d: ExtensionDeps, c: FileCtx, path: string): Promise<string | null> {
+/** SHA-512 of one regular file, or the agent's per-file error (`NOT_FOUND`, `NOT_REGULAR`, `IO_ERROR`, …). */
+export async function hashFile(d: ExtensionDeps, c: FileCtx, path: string): Promise<{ ok: true; sha512: string } | { ok: false; error: string }> {
   const r = await d.gateway.send(c.nodeId, "fs.hash", { workloadId: c.serverId, paths: [path], algorithms: ["sha512"], maxBytesPerFile: 2 * 1024 ** 3, maxTotalBytes: 16 * 1024 ** 3 }, agentOpts(c));
   const f = r.files.length === 1 && r.files[0]?.path === path ? r.files[0] : undefined;
-  return f?.ok ? (f.sha512 ?? null) : null;
+  if (!f) return { ok: false, error: "PROTOCOL" };
+  if (!f.ok) return { ok: false, error: f.error };
+  return f.sha512 ? { ok: true, sha512: f.sha512 } : { ok: false, error: "NO_DIGEST" };
 }
 
-/** A jar in the keep area and the SHA-512 of exactly what was kept (null: it could not be hashed). */
+/** SHA-512 of one file (null when it does not exist or cannot be hashed). */
+export async function sha512Of(d: ExtensionDeps, c: FileCtx, path: string): Promise<string | null> {
+  const h = await hashFile(d, c, path);
+  return h.ok ? h.sha512 : null;
+}
+
+/** A jar in the keep area and the SHA-512 it had when it was moved there. */
 export interface Kept {
   path: string;
-  sha512: string | null;
-}
-
-/**
- * Moves a jar into the keep area (`.blockforge/extensions/kept/<name>.jar`) and hashes the kept file
- * right away: that digest — never a scan-time one — is what a later restore must find again.
- */
-export async function keepFile(d: ExtensionDeps, c: FileCtx, path: string, name: string): Promise<Kept> {
-  await ensureDir(d.gateway, c.nodeId, c.serverId, KEPT_DIR, c);
-  const kept = keptPathOf(name);
-  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: kept }, agentOpts(c));
-  let sha512: string | null = null;
-  try {
-    sha512 = await sha512Of(d, c, kept);
-  } catch (err) {
-    await c.log?.("warn", `Hashing the kept file ${kept} failed: ${(err as Error).message}`);
-  }
-  return { path: kept, sha512 };
+  sha512: string;
 }
 
 /** A kept file that changed (or vanished) since it was kept is never moved back. */
@@ -95,28 +95,152 @@ export class KeptFileChangedError extends JobError {
   constructor(
     readonly keptPath: string,
     readonly target: string,
+    detail = "is missing or changed since it was kept",
   ) {
-    super("KEPT_FILE_CHANGED", `the kept file ${keptPath} is missing or changed since it was kept; it was not restored to ${target} (left in the keep area)`);
+    super("KEPT_FILE_CHANGED", `the kept file ${keptPath} ${detail}; it was not restored to ${target} (left in the keep area)`);
     this.name = "KeptFileChangedError";
   }
 }
 
 /**
- * Moves a kept jar back to `to` only while it still has the digest taken right after it was kept; the
- * agent's `fs.rename` never overwrites an existing `to`.
+ * A file in the keep area whose content cannot be vouched for (it changed while being moved there, or an
+ * interrupted attempt left it without a recorded digest). It is never restored automatically; the
+ * history row points at it (no digest) so an operator can inspect it, and pruning removes it later.
+ */
+export class UnverifiedKeptError extends JobError {
+  constructor(
+    readonly keptPath: string,
+    detail: string,
+  ) {
+    super("KEPT_FILE_UNVERIFIED", `the kept file ${keptPath} ${detail}; it is left in the keep area for inspection and will not be restored`);
+    this.name = "UnverifiedKeptError";
+  }
+}
+
+/** A file could not be hashed, so it was not moved (nothing changed). */
+export class HashFailedError extends JobError {
+  constructor(path: string, reason: string) {
+    super("HASH_FAILED", `${path} could not be hashed (${reason}); nothing was moved`);
+    this.name = "HashFailedError";
+  }
+}
+
+/**
+ * Moves a jar into the keep area (`.blockforge/extensions/kept/<name>.jar`): hashed before the move
+ * (`beforeMove` gets the digest, e.g. to journal it), verified after it. A missing source fails with
+ * the agent's `NOT_FOUND`; any other hash error fails before anything moves.
+ */
+export async function keepFile(d: ExtensionDeps, c: FileCtx, path: string, name: string, o: { beforeMove?: (sha512: string) => Promise<void> } = {}): Promise<Kept> {
+  const h = await hashFile(d, c, path);
+  if (!h.ok) {
+    if (h.error === "NOT_FOUND") throw new AgentCommandError("NOT_FOUND", `${path} does not exist`, false);
+    throw new HashFailedError(path, h.error);
+  }
+  await o.beforeMove?.(h.sha512);
+  await ensureDir(d.gateway, c.nodeId, c.serverId, KEPT_DIR, c);
+  const kept = keptPathOf(name);
+  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: kept }, agentOpts(c));
+  if ((await sha512Of(d, c, kept)) !== h.sha512) throw new UnverifiedKeptError(kept, `changed while it was being moved from ${path}`);
+  return { path: kept, sha512: h.sha512 };
+}
+
+/** Journal state of one keep: the digest recorded before the move, and whether the move was confirmed. */
+export interface KeepRecord {
+  sha512: string;
+  moved: boolean;
+}
+
+/**
+ * `keepFile` for resumable jobs. The digest is journaled before the move and the move confirmed after
+ * it; on resume a confirmed keep is reused, a pending one is adopted only if the kept file still has the
+ * journaled digest, and a kept file without a journaled digest is never adopted (`UnverifiedKeptError`).
+ * Null: the source does not exist (nothing to keep).
+ */
+export async function keepJournaled(
+  d: ExtensionDeps,
+  c: FileCtx,
+  path: string,
+  name: string,
+  jr: { record: KeepRecord | undefined; save(r: KeepRecord): Promise<void>; resumed: boolean },
+): Promise<Kept | null> {
+  const keptPath = keptPathOf(name);
+  if (jr.record?.moved) return { path: keptPath, sha512: jr.record.sha512 };
+  if (jr.record || jr.resumed) {
+    const [src, kept] = [await exists(d, c, path), await exists(d, c, keptPath)];
+    if (kept) {
+      if (!jr.record) throw new UnverifiedKeptError(keptPath, "was found without a digest recorded before the move");
+      if (src) throw new UnverifiedKeptError(keptPath, `exists while ${path} is still in place`);
+      if ((await sha512Of(d, c, keptPath)) !== jr.record.sha512) throw new UnverifiedKeptError(keptPath, "no longer has the digest recorded before the move");
+      await jr.save({ sha512: jr.record.sha512, moved: true });
+      return { path: keptPath, sha512: jr.record.sha512 };
+    }
+    if (!src) return null;
+  }
+  try {
+    const k = await keepFile(d, c, path, name, { beforeMove: (sha512) => jr.save({ sha512, moved: false }) });
+    await jr.save({ sha512: k.sha512, moved: true });
+    return k;
+  } catch (err) {
+    if (err instanceof AgentCommandError && err.code === "NOT_FOUND") return null;
+    throw err;
+  }
+}
+
+/**
+ * Moves `from` to `to` (never overwriting) and verifies `to` has `sha512` afterwards; on a mismatch the
+ * file is moved back to `from` (when still free) and the move is refused.
+ */
+export async function placeVerified(d: ExtensionDeps, c: FileCtx, from: string, to: string, sha512: string): Promise<void> {
+  // `fs.rename` does not create parents (a fresh server may have no plugins/ or mods/ yet).
+  const dir = to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
+  if (dir) await ensureDir(d.gateway, c.nodeId, c.serverId, dir, c);
+  try {
+    await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from, to }, agentOpts(c));
+  } catch (err) {
+    if (err instanceof AgentCommandError && (err.code === "ALREADY_EXISTS" || err.code === "CONFLICT")) throw new JobError("CONFLICT", `${to} is occupied by another file; it was not replaced`);
+    throw err;
+  }
+  if ((await sha512Of(d, c, to)) === sha512) return;
+  let back = "moved back";
+  try {
+    await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: to, to: from }, agentOpts(c));
+  } catch (e) {
+    back = `could not be moved back (${(e as Error).message})`;
+  }
+  throw new JobError("FILE_CHANGED", `${from} changed while it was being moved to ${to}; it ${back}`);
+}
+
+/**
+ * Moves a kept jar back to `to` only while it still has the digest taken when it was kept (verified
+ * before and after the move; the agent's `fs.rename` never overwrites an existing `to`).
  */
 export async function restoreKept(d: ExtensionDeps, c: FileCtx, kept: string, expectedSha512: string | null, to: string): Promise<void> {
   const actual = await sha512Of(d, c, kept);
   if (!expectedSha512 || actual !== expectedSha512) throw new KeptFileChangedError(kept, to);
-  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: kept, to }, agentOpts(c));
+  try {
+    await placeVerified(d, c, kept, to, expectedSha512);
+  } catch (err) {
+    if (err instanceof JobError && err.code === "FILE_CHANGED") throw new KeptFileChangedError(kept, to, "changed while it was being restored");
+    throw err;
+  }
 }
 
-/** Deletes a file this job wrote, only while it still has the digest it was written with (else it is left alone). */
+/**
+ * Deletes a file this job wrote, only while it still has the digest it was written with: it is moved to
+ * a private name first and verified there (else put back and refused).
+ */
 export async function deleteCreated(d: ExtensionDeps, c: FileCtx, path: string, sha512: string): Promise<void> {
   const actual = await sha512Of(d, c, path);
   if (actual === null) return;
   if (actual !== sha512) throw new JobError("FILE_CHANGED", `${path} changed after it was written; it was not deleted`);
-  await deleteFile(d, c, path);
+  await ensureDir(d.gateway, c.nodeId, c.serverId, FETCH_DIR, c);
+  const doomed = `${FETCH_DIR}/${randomUUID()}.delete`;
+  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: doomed }, agentOpts(c));
+  if ((await sha512Of(d, c, doomed)) !== sha512) {
+    await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: doomed, to: path }, agentOpts(c)).catch(() => undefined);
+    throw new JobError("FILE_CHANGED", `${path} changed while it was being removed; it was not deleted`);
+  }
+  await deleteFile(d, c, doomed);
 }
 
 /** `artifact.fetch` of a Modrinth file (CDN host re-checked, SHA-512 verified by the agent). */
@@ -156,8 +280,6 @@ export const plannedSnapshot = (f: ModrinthPlannedFile): ExtensionFileSnapshot =
 /** A placeholder snapshot of a file found on disk without a row. */
 const bareSnapshot = (path: string): ExtensionFileSnapshot => ({ source: "unknown", path, projectId: null, versionId: null, versionNumber: null, sha512: null, sizeBytes: null });
 
-type Undo = { kind: "delete"; path: string; sha512: string } | { kind: "restore"; kept: string; sha512: string | null; path: string };
-
 export interface PendingEntry {
   id: string;
   action: ExtensionHistoryAction;
@@ -168,9 +290,11 @@ export interface PendingEntry {
   to: ExtensionFileSnapshot | null;
   keptPath: string | null;
   keptSha512: string | null;
-  /** A failed change could not put the kept file back (it changed): the row keeps `keptPath` (pruned later). */
+  /** A failed change could not put the kept file back: the row keeps `keptPath` (and its digest, if any) for inspection and pruning. */
   leftInKeep?: boolean;
 }
+
+type Undo = { kind: "delete"; path: string; sha512: string } | { kind: "restore"; kept: string; sha512: string; path: string; entry: PendingEntry };
 
 export const pendingOf = (r: HistoryRow): PendingEntry => ({
   id: r.id,
@@ -195,8 +319,9 @@ export async function writeHistory(
   const now = d.clock.now();
   await db.insert(extensionHistory).values(
     entries.map((e, i) => {
-      // A failed change put the kept file back: nothing is kept for it (unless it could not be put back).
-      const keptPath = o.status === "succeeded" || e.leftInKeep ? e.keptPath : null;
+      // A failed change put the kept file back: nothing is kept for it — unless it could not be put back.
+      const keep = o.status === "succeeded" || e.leftInKeep === true;
+      const keptPath = keep ? e.keptPath : null;
       return {
         id: e.id,
         serverId,
@@ -213,7 +338,7 @@ export async function writeHistory(
         jobId: o.jobId,
         error: o.status === "failed" ? (o.error ?? "failed").slice(0, 1024) : null,
         keptPath,
-        keptSha512: o.status === "succeeded" ? e.keptSha512 : null,
+        keptSha512: keep ? e.keptSha512 : null,
         keptUntil: keptPath ? new Date(now + KEPT_RETENTION_MS) : null,
       };
     }),
@@ -222,7 +347,7 @@ export async function writeHistory(
 
 /**
  * Progress of an interrupted apply, persisted by the job (`ctx.state`) before and after every file
- * operation: whether the destination was occupied and the digest of every file kept so far.
+ * operation: whether the destination was occupied and the keep records (digest journaled before each move).
  */
 export interface ApplyJournal {
   get(id: string): JournalEntry | undefined;
@@ -230,8 +355,8 @@ export interface ApplyJournal {
 }
 export interface JournalEntry {
   atDest: boolean;
-  /** Source path → SHA-512 of its kept copy (taken right after the move). */
-  kept: Record<string, string | null>;
+  /** Source path → keep record. */
+  kept: Record<string, KeepRecord>;
 }
 
 export interface ApplyResult {
@@ -240,11 +365,29 @@ export interface ApplyResult {
   recorded: boolean;
 }
 
+/** Runs the undo list (newest first); returns the failures as notes. Kept files that stay get `leftInKeep`. */
+export async function runUndo(d: ExtensionDeps, c: FileCtx, undo: Undo[]): Promise<string[]> {
+  const notes: string[] = [];
+  for (const u of [...undo].reverse()) {
+    try {
+      if (u.kind === "delete") await deleteCreated(d, c, u.path, u.sha512);
+      else await restoreKept(d, c, u.kept, u.sha512, u.path);
+    } catch (e) {
+      notes.push((e as Error).message);
+      if (u.kind === "restore") u.entry.leftInKeep = true;
+      await c.log?.("error", `Undo failed for ${u.path}: ${(e as Error).message}`);
+    }
+  }
+  return notes;
+}
+
 /**
  * Applies planned Modrinth files in dependency order: an existing file at the destination is moved
- * to the keep area first, the new file is fetched (SHA-512 verified), then the files it `replaces` are
- * kept. Any failure undoes everything done so far (fetched files removed while unchanged, kept files
- * restored while unchanged) and records the history entries as failed.
+ * to the keep area first, the new file is fetched (SHA-512 verified) to a temporary name and renamed
+ * into place (never over another file), then the files it `replaces` are kept. Any failure — including
+ * a lost server lock (`LOCK_LOST`, e.g. a pre-empting stop/kill) — undoes everything done so far
+ * (written files removed while unchanged, kept files restored while unchanged) and records the history
+ * entries as failed; every kept file has an entry from the moment it was kept.
  *
  * Idempotent for a resumed job step (#5): history ids and keep-area names derive from the job id, an
  * already recorded history is returned as is, and with a journal a file that was already kept or
@@ -261,7 +404,7 @@ export async function applyPlannedFiles(
     /** Distinguishes several applies of one job (stable ids). */
     key?: string;
     journal?: ApplyJournal;
-    /** Re-checks the server's operation lock before every file. */
+    /** Re-checks the server's operation lock before every file, after every download and at the end. */
     assertLock?: () => Promise<void>;
   },
 ): Promise<ApplyResult> {
@@ -298,51 +441,36 @@ export async function applyPlannedFiles(
         await o.journal?.set(id, j);
       }
       const journal = j;
-      /**
-       * Keeps `path` as `name` once: a copy recorded by an interrupted attempt is reused, and a copy it
-       * made just before it could record it is adopted. Null: nothing to keep (`optional` source missing).
-       */
-      const keepOnce = async (path: string, name: string, optional: boolean): Promise<Kept | null> => {
-        const target = keptPathOf(name);
-        if (path in journal.kept) return { path: target, sha512: journal.kept[path] ?? null };
-        let k: Kept;
-        if (await exists(d, c, path)) k = await keepFile(d, c, path, name);
-        else if (resumed && (await exists(d, c, target))) k = { path: target, sha512: await sha512Of(d, c, target) };
-        else if (optional) return null;
-        else k = await keepFile(d, c, path, name); // fails with NOT_FOUND
-        journal.kept[path] = k.sha512;
-        await o.journal?.set(id, journal);
-        return k;
+      /** Keeps `path` as `name` (journaled); the entry is recorded as soon as something is kept, also when it cannot be vouched for. */
+      const keepFor = async (entry: PendingEntry, path: string, name: string): Promise<Kept | null> => {
+        try {
+          const k = await keepJournaled(d, c, path, name, {
+            record: journal.kept[path],
+            resumed,
+            save: async (r) => {
+              journal.kept[path] = r;
+              await o.journal?.set(id, journal);
+            },
+          });
+          if (k) {
+            entry.keptPath = k.path;
+            entry.keptSha512 = k.sha512;
+            if (!entries.includes(entry)) entries.push(entry);
+            undo.push({ kind: "restore", kept: k.path, sha512: k.sha512, path, entry });
+          }
+          return k;
+        } catch (err) {
+          if (err instanceof UnverifiedKeptError) {
+            Object.assign(entry, { keptPath: err.keptPath, keptSha512: null, leftInKeep: true });
+            if (!entries.includes(entry)) entries.push(entry);
+          }
+          throw err;
+        }
       };
 
       const primary = journal.atDest ? f.destPath : (others[0]?.path ?? null);
       const primaryRow = primary ? (byPath.get(primary) ?? null) : null;
-      let keptPrimary: Kept | null = null;
-      if (journal.atDest) {
-        keptPrimary = await keepOnce(f.destPath, id, false);
-        undo.push({ kind: "restore", kept: keptPrimary!.path, sha512: keptPrimary!.sha512, path: f.destPath });
-      }
-      // Skip the download when an interrupted attempt already put exactly this file in place.
-      const fetched = resumed && (await sha512Of(d, c, f.destPath)) === f.sha512;
-      if (!fetched) {
-        if (resumed && (await exists(d, c, f.destPath))) throw new JobError("CONFLICT", `${f.destPath} is occupied by a file this job did not write`);
-        await c.log?.("info", `Downloading ${f.filename} (${f.projectTitle ?? f.projectId} ${f.versionNumber})`);
-        await fetchModrinthFile(d, c, f);
-      }
-      undo.push({ kind: "delete", path: f.destPath, sha512: f.sha512 });
-      const extra: PendingEntry[] = [];
-      for (const [i, x] of others.entries()) {
-        const asPrimary = !journal.atDest && i === 0;
-        const k = await keepOnce(x.path, asPrimary ? id : x.id, true);
-        if (!k) continue;
-        undo.push({ kind: "restore", kept: k.path, sha512: k.sha512, path: x.path });
-        if (asPrimary) keptPrimary = k;
-        else {
-          const r = byPath.get(x.path);
-          extra.push({ id: x.id, action: "remove", extensionId: r?.id ?? null, extensionName: r ? displayName(r) : x.path, path: x.path, from: r ? snapshotOf(r) : bareSnapshot(x.path), to: null, keptPath: k.path, keptSha512: k.sha512 });
-        }
-      }
-      entries.push({
+      const entry: PendingEntry = {
         id,
         action: o.action?.(f, primaryRow) ?? (primary ? "update" : "install"),
         extensionId: primaryRow?.id ?? null,
@@ -350,32 +478,44 @@ export async function applyPlannedFiles(
         path: f.destPath,
         from: primary ? (primaryRow ? snapshotOf(primaryRow) : bareSnapshot(primary)) : null,
         to: plannedSnapshot(f),
-        keptPath: keptPrimary?.path ?? null,
-        keptSha512: keptPrimary?.sha512 ?? null,
-      });
-      entries.push(...extra);
-    }
-  } catch (err) {
-    if (err instanceof JobError && err.code === "LOCK_LOST") throw err;
-    const notes: string[] = [];
-    for (const u of undo.reverse()) {
-      try {
-        if (u.kind === "delete") await deleteCreated(d, c, u.path, u.sha512);
-        else await restoreKept(d, c, u.kept, u.sha512, u.path);
-      } catch (e) {
-        notes.push((e as Error).message);
-        if (u.kind === "restore") for (const en of entries) if (en.keptPath === u.kept) en.leftInKeep = true;
-        await c.log?.("error", `Undo failed for ${u.path}: ${(e as Error).message}`);
+        keptPath: null,
+        keptSha512: null,
+      };
+      if (journal.atDest && !(await keepFor(entry, f.destPath, id))) throw new JobError("NOT_FOUND", `${f.destPath} disappeared before it could be kept`);
+      // Skip the download when an interrupted attempt already put exactly this file in place.
+      const placed = resumed && (await sha512Of(d, c, f.destPath)) === f.sha512;
+      if (!placed) {
+        const temp = `${FETCH_DIR}/${id}.jar`;
+        const downloaded = resumed && (await sha512Of(d, c, temp)) === f.sha512;
+        if (!downloaded) {
+          await c.log?.("info", `Downloading ${f.filename} (${f.projectTitle ?? f.projectId} ${f.versionNumber})`);
+          await ensureDir(d.gateway, c.nodeId, c.serverId, FETCH_DIR, c);
+          await fetchModrinthFile(d, c, { ...f, destPath: temp });
+        }
+        undo.push({ kind: "delete", path: temp, sha512: f.sha512 });
+        await o.assertLock?.();
+        await placeVerified(d, c, temp, f.destPath, f.sha512);
+      }
+      undo.push({ kind: "delete", path: f.destPath, sha512: f.sha512 });
+      if (!entries.includes(entry)) entries.push(entry);
+      for (const [i, x] of others.entries()) {
+        const asPrimary = !journal.atDest && i === 0;
+        const r = byPath.get(x.path);
+        const target: PendingEntry = asPrimary
+          ? entry
+          : { id: x.id, action: "remove", extensionId: r?.id ?? null, extensionName: r ? displayName(r) : x.path, path: x.path, from: r ? snapshotOf(r) : bareSnapshot(x.path), to: null, keptPath: null, keptSha512: null };
+        await keepFor(target, x.path, asPrimary ? id : x.id);
       }
     }
+    await o.assertLock?.();
+  } catch (err) {
+    const notes = await runUndo(d, c, undo);
     const base = err instanceof Error ? err.message : String(err);
     const message = notes.length ? `${base}; undo: ${notes.join("; ")}` : base;
     await writeHistory(d, c.serverId, entries, { actor: o.actor, jobId: o.jobId, status: "failed", error: message });
-    if (notes.length) {
-      const e = jobAgentError(err, "install");
-      throw new JobError(e instanceof JobError ? e.code : "INSTALL_FAILED", `${e instanceof Error ? e.message : base}; undo: ${notes.join("; ")}`);
-    }
-    throw jobAgentError(err, "install");
+    const e = jobAgentError(err, "install");
+    if (notes.length) throw new JobError(e instanceof JobError ? e.code : "INSTALL_FAILED", `${e instanceof Error ? e.message : base}; undo: ${notes.join("; ")}`);
+    throw e;
   }
   return { entries, recorded: false };
 }

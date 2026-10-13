@@ -184,12 +184,13 @@ export async function assertNoExtensionJob(db: DbOrTx, serverId: string, opts: {
 
 /**
  * Takes the server's `extensions` operation lock (`servers.active_operation`, the lock backup, restore,
- * reinstall and delete take) for `jobId` (null = a synchronous change). Another extension change holding
- * it is reported as `extension_job_running`; any other operation as the usual 409 INVALID_STATE.
+ * reinstall and delete take) inside `tx`, before anything else is written, and returns the holder token
+ * (a job then `attachJob`s itself in the same transaction). Another extension change holding it is
+ * reported as `extension_job_running`; any other operation as the usual 409 INVALID_STATE.
  */
-export async function lockExtensions(d: Pick<ExtensionDeps, "state">, tx: DbOrTx, serverId: string, jobId: string | null): Promise<void> {
+export async function lockExtensions(d: Pick<ExtensionDeps, "state">, tx: DbOrTx, serverId: string): Promise<string> {
   try {
-    await d.state.lock(tx, serverId, "extensions", jobId);
+    return await d.state.lock(tx, serverId, "extensions");
   } catch (err) {
     if (err instanceof AppError && (err.details as { activeOperation?: unknown } | undefined)?.activeOperation === "extensions") throw jobRunning();
     throw err;
