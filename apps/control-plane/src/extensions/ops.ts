@@ -201,13 +201,24 @@ export async function placeVerified(d: ExtensionDeps, c: FileCtx, from: string, 
     throw err;
   }
   if ((await sha512Of(d, c, to)) === sha512) return;
-  let back = "moved back";
   try {
     await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: to, to: from }, agentOpts(c));
   } catch (e) {
-    back = `could not be moved back (${(e as Error).message})`;
+    throw new PlacementStuckError(to, from, (e as Error).message);
   }
-  throw new JobError("FILE_CHANGED", `${from} changed while it was being moved to ${to}; it ${back}`);
+  throw new JobError("FILE_CHANGED", `${from} changed while it was being moved to ${to}; it was moved back`);
+}
+
+/** A file that changed during a move could not be moved back: `path` holds bytes nobody vouches for. */
+export class PlacementStuckError extends JobError {
+  constructor(
+    readonly path: string,
+    readonly from: string,
+    reason: string,
+  ) {
+    super("FILE_STUCK", `${path} received bytes that changed during the move from ${from}, and they could not be moved back (${reason}); check ${path} by hand`);
+    this.name = "PlacementStuckError";
+  }
 }
 
 /**
@@ -237,8 +248,12 @@ export async function deleteCreated(d: ExtensionDeps, c: FileCtx, path: string, 
   const doomed = `${FETCH_DIR}/${randomUUID()}.delete`;
   await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: doomed }, agentOpts(c));
   if ((await sha512Of(d, c, doomed)) !== sha512) {
-    await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: doomed, to: path }, agentOpts(c)).catch(() => undefined);
-    throw new JobError("FILE_CHANGED", `${path} changed while it was being removed; it was not deleted`);
+    try {
+      await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: doomed, to: path }, agentOpts(c));
+    } catch (e) {
+      throw new JobError("FILE_ORPHANED", `${path} changed while it was being removed and could not be put back (${(e as Error).message}); it is at ${doomed}`);
+    }
+    throw new JobError("FILE_CHANGED", `${path} changed while it was being removed; it was put back, not deleted`);
   }
   await deleteFile(d, c, doomed);
 }
@@ -294,8 +309,6 @@ export interface PendingEntry {
   leftInKeep?: boolean;
 }
 
-type Undo = { kind: "delete"; path: string; sha512: string } | { kind: "restore"; kept: string; sha512: string; path: string; entry: PendingEntry };
-
 export const pendingOf = (r: HistoryRow): PendingEntry => ({
   id: r.id,
   action: r.action as ExtensionHistoryAction,
@@ -336,13 +349,167 @@ export async function writeHistory(
         // Strictly increasing within one write so "newest entry" is well defined.
         at: new Date(now + i),
         jobId: o.jobId,
-        error: o.status === "failed" ? (o.error ?? "failed").slice(0, 1024) : null,
+        error: o.status === "failed" ? (o.error ?? "failed").slice(0, 2048) : null,
         keptPath,
         keptSha512: keep ? e.keptSha512 : null,
         keptUntil: keptPath ? new Date(now + KEPT_RETENTION_MS) : null,
       };
     }),
   );
+}
+
+// --- Undo -------------------------------------------------------------------------------------
+
+/**
+ * One reversible file operation: `delete` removes a file this change wrote (while it has `sha512`),
+ * `restore` moves `kept` back to `path` (while it has `sha512`; also used to move a placed file back).
+ */
+export type UndoStep = { kind: "delete"; path: string; sha512: string } | { kind: "restore"; kept: string; sha512: string; path: string; entryId?: string };
+
+/**
+ * The durable undo record of one change: every reversible step from the moment it happened, the history
+ * entries, and — once the change failed — the error and which steps were attempted/failed. Jobs keep it
+ * in `ctx.state` (checkpointed on every change), so an undo interrupted by a crash is finished (or
+ * deliberately skipped) on resume instead of the apply being resumed.
+ */
+export interface UndoLog {
+  steps: UndoStep[];
+  entries: PendingEntry[];
+  started: boolean;
+  error: { code: string; message: string } | null;
+  done: number[];
+  failed: number[];
+  notes: string[];
+}
+
+export interface UndoStore {
+  log: UndoLog;
+  save(): Promise<void>;
+}
+
+export const emptyUndoLog = (): UndoLog => ({ steps: [], entries: [], started: false, error: null, done: [], failed: [], notes: [] });
+
+/** An undo record that lives only as long as the request (synchronous changes). */
+export function memoryUndo(): UndoStore {
+  return { log: emptyUndoLog(), save: async () => undefined };
+}
+
+const sameStep = (a: UndoStep, b: UndoStep) => a.kind === b.kind && a.path === b.path && a.sha512 === b.sha512 && (a.kind !== "restore" || (b.kind === "restore" && a.kept === b.kept));
+
+/** Records a step (once) and persists the record. */
+export async function pushUndo(store: UndoStore, step: UndoStep): Promise<void> {
+  if (store.log.steps.some((s) => sameStep(s, step))) return;
+  store.log.steps.push(step);
+  await store.save();
+}
+
+/** Records (or refreshes) a history entry by id; the live object is kept so later field changes are persisted. */
+export async function upsertEntry(store: UndoStore, entry: PendingEntry): Promise<void> {
+  const i = store.log.entries.findIndex((e) => e.id === entry.id);
+  if (i >= 0) {
+    if (store.log.entries[i] === entry) return;
+    store.log.entries[i] = entry;
+  } else store.log.entries.push(entry);
+  await store.save();
+}
+
+async function runStep(d: ExtensionDeps, c: FileCtx, s: UndoStep): Promise<void> {
+  if (s.kind === "delete") await deleteCreated(d, c, s.path, s.sha512);
+  else await restoreKept(d, c, s.kept, s.sha512, s.path);
+}
+
+/**
+ * Runs the recorded undo — fenced. While the change still holds its lock (`stillHeld`) it undoes under
+ * it; after a pre-emption it may only touch plugin/mod files under a new cleanup hold (`lockForCleanup`:
+ * no other operation, server stopped or crashed). Without one — or if the hold is lost midway — nothing
+ * (more) is touched and the result is `skipped`. Steps run newest first, once each (progress persisted).
+ */
+export async function fencedUndo(d: ExtensionDeps, c: FileCtx, store: UndoStore, stillHeld: () => Promise<boolean>): Promise<{ skipped: boolean; preempted: boolean }> {
+  const log = store.log;
+  let held = stillHeld;
+  let token: string | null = null;
+  let preempted = false;
+  if (!(await stillHeld())) {
+    preempted = true;
+    token = await d.state.lockForCleanup(c.serverId);
+    if (!token) return { skipped: true, preempted };
+    const t = token;
+    held = () => d.state.holdsToken(c.serverId, t);
+  }
+  try {
+    for (let i = log.steps.length - 1; i >= 0; i--) {
+      if (log.done.includes(i)) continue;
+      if (!(await held())) return { skipped: true, preempted: true };
+      try {
+        await runStep(d, c, log.steps[i]!);
+      } catch (e) {
+        log.failed.push(i);
+        log.notes.push((e as Error).message);
+        await c.log?.("error", `Undo failed for ${log.steps[i]!.path}: ${(e as Error).message}`);
+      }
+      log.done.push(i);
+      await store.save();
+    }
+    return { skipped: false, preempted };
+  } finally {
+    if (token) await d.state.unlock(c.serverId, token);
+  }
+}
+
+/**
+ * Turns a fenced undo's outcome into the failure record: entries whose kept file did not go back keep
+ * `keptPath`/`keptSha512`; when the undo was skipped the error lists every kept file and every file the
+ * change wrote (path + SHA-512) so an operator can put things right from the history.
+ */
+export function describeUndo(log: UndoLog, outcome: { skipped: boolean }): { message: string; code: string } {
+  const error = log.error ?? { code: "FAILED", message: "the change failed" };
+  const notDone = (i: number) => !log.done.includes(i) || log.failed.includes(i);
+  log.steps.forEach((s, i) => {
+    if (s.kind === "restore" && s.entryId && notDone(i)) {
+      const e = log.entries.find((x) => x.id === s.entryId);
+      if (e) e.leftInKeep = true;
+    }
+  });
+  if (outcome.skipped) {
+    const left = log.steps.filter((_, i) => notDone(i));
+    const kept = left.filter((s) => s.kind === "restore").map((s) => `${(s as { kept: string }).kept} (was ${s.path}, sha512 ${s.sha512})`);
+    const written = left.filter((s) => s.kind === "delete").map((s) => `${s.path} (sha512 ${s.sha512})`);
+    const message =
+      `${error.message}; undo skipped: another operation holds the server or it is not stopped, so no file was touched` +
+      (kept.length ? `; kept files: ${kept.join(", ")}` : "") +
+      (written.length ? `; files written by this change: ${written.join(", ")}` : "") +
+      (log.notes.length ? `; undo: ${log.notes.join("; ")}` : "");
+    return { code: "PREEMPTED_UNDO_SKIPPED", message };
+  }
+  return { code: error.code, message: log.notes.length ? `${error.message}; undo: ${log.notes.join("; ")}` : error.message };
+}
+
+const errorOf = (err: unknown, what: string): { code: string; message: string } => {
+  const e = jobAgentError(err, what);
+  if (e instanceof JobError) return { code: e.code, message: e.message };
+  return { code: "INTERNAL", message: e instanceof Error ? e.message : String(e) };
+};
+
+/**
+ * The failure path of a job's change: marks the undo record started (persisted), runs the fenced undo,
+ * writes the failed history rows and throws the resulting `JobError`. Also the resume path of an undo
+ * that a crash interrupted (`err` undefined, record already started).
+ */
+export async function failWithUndo(
+  d: ExtensionDeps,
+  c: FileCtx,
+  store: UndoStore,
+  o: { err?: unknown; what: string; stillHeld: () => Promise<boolean>; actor: HistoryActorFields; jobId: string | null },
+): Promise<never> {
+  if (!store.log.started) {
+    store.log.started = true;
+    store.log.error = errorOf(o.err, o.what);
+    await store.save();
+  }
+  const outcome = await fencedUndo(d, c, store, o.stillHeld);
+  const r = describeUndo(store.log, outcome);
+  await writeHistory(d, c.serverId, store.log.entries, { actor: o.actor, jobId: o.jobId, status: "failed", error: r.message });
+  throw new JobError(r.code, r.message);
 }
 
 /**
@@ -365,33 +532,16 @@ export interface ApplyResult {
   recorded: boolean;
 }
 
-/** Runs the undo list (newest first); returns the failures as notes. Kept files that stay get `leftInKeep`. */
-export async function runUndo(d: ExtensionDeps, c: FileCtx, undo: Undo[]): Promise<string[]> {
-  const notes: string[] = [];
-  for (const u of [...undo].reverse()) {
-    try {
-      if (u.kind === "delete") await deleteCreated(d, c, u.path, u.sha512);
-      else await restoreKept(d, c, u.kept, u.sha512, u.path);
-    } catch (e) {
-      notes.push((e as Error).message);
-      if (u.kind === "restore") u.entry.leftInKeep = true;
-      await c.log?.("error", `Undo failed for ${u.path}: ${(e as Error).message}`);
-    }
-  }
-  return notes;
-}
-
 /**
  * Applies planned Modrinth files in dependency order: an existing file at the destination is moved
  * to the keep area first, the new file is fetched (SHA-512 verified) to a temporary name and renamed
  * into place (never over another file), then the files it `replaces` are kept. Any failure — including
- * a lost server lock (`LOCK_LOST`, e.g. a pre-empting stop/kill) — undoes everything done so far
- * (written files removed while unchanged, kept files restored while unchanged) and records the history
- * entries as failed; every kept file has an entry from the moment it was kept.
+ * a lost server lock (`LOCK_LOST`, e.g. a pre-empting stop/kill) — runs the fenced undo (`failWithUndo`)
+ * and records the history entries as failed; every kept file has an entry from the moment it was kept.
  *
  * Idempotent for a resumed job step (#5): history ids and keep-area names derive from the job id, an
- * already recorded history is returned as is, and with a journal a file that was already kept or
- * fetched is neither kept again nor fetched again.
+ * already recorded history is returned as is (or its failure re-thrown), an interrupted undo is finished
+ * (never the apply), and with a journal a file already kept or fetched is neither kept nor fetched again.
  */
 export async function applyPlannedFiles(
   d: ExtensionDeps,
@@ -404,11 +554,17 @@ export async function applyPlannedFiles(
     /** Distinguishes several applies of one job (stable ids). */
     key?: string;
     journal?: ApplyJournal;
-    /** Re-checks the server's operation lock before every file, after every download and at the end. */
-    assertLock?: () => Promise<void>;
+    undo?: UndoStore;
+    /** Whether the job still holds the server's operation lock (re-checked before every file, after every download and at the end). */
+    holdsLock?: () => Promise<boolean>;
   },
 ): Promise<ApplyResult> {
   const key = o.key ?? "apply";
+  const store = o.undo ?? memoryUndo();
+  const stillHeld = o.holdsLock ?? (async () => true);
+  const assertLock = async () => {
+    if (!(await stillHeld())) throw new JobError("LOCK_LOST", "the server's operation lock was taken over (e.g. by a stop/restart/kill); the plugin/mod change stopped");
+  };
   const plan = files.map((f) => ({
     f,
     id: stableId(o.jobId, `${key}:${f.destPath}`),
@@ -423,17 +579,18 @@ export async function applyPlannedFiles(
       .orderBy(asc(extensionHistory.at));
     if (prior.length) {
       const failed = prior.find((r) => r.status === "failed");
-      if (failed) throw new JobError("INSTALL_FAILED", `install: ${failed.error ?? "failed"}`);
+      if (failed) throw new JobError(store.log.error?.code ?? "INSTALL_FAILED", `install: ${failed.error ?? "failed"}`);
       return { entries: prior.map(pendingOf), recorded: true };
     }
   }
+  const fail = (err?: unknown) => failWithUndo(d, c, store, { err, what: "install", stillHeld, actor: o.actor, jobId: o.jobId });
+  // A crash interrupted the undo: finish it (fenced), never resume the apply.
+  if (store.log.started) return fail();
   const rows = await d.db.select().from(installedExtensions).where(eq(installedExtensions.serverId, c.serverId));
   const byPath = new Map(rows.map((r) => [r.path, r]));
-  const undo: Undo[] = [];
-  const entries: PendingEntry[] = [];
   try {
     for (const { f, id, others } of plan) {
-      await o.assertLock?.();
+      await assertLock();
       let j = o.journal?.get(id);
       const resumed = j !== undefined;
       if (!j) {
@@ -455,14 +612,14 @@ export async function applyPlannedFiles(
           if (k) {
             entry.keptPath = k.path;
             entry.keptSha512 = k.sha512;
-            if (!entries.includes(entry)) entries.push(entry);
-            undo.push({ kind: "restore", kept: k.path, sha512: k.sha512, path, entry });
+            await upsertEntry(store, entry);
+            await pushUndo(store, { kind: "restore", kept: k.path, sha512: k.sha512, path, entryId: entry.id });
           }
           return k;
         } catch (err) {
           if (err instanceof UnverifiedKeptError) {
             Object.assign(entry, { keptPath: err.keptPath, keptSha512: null, leftInKeep: true });
-            if (!entries.includes(entry)) entries.push(entry);
+            await upsertEntry(store, entry);
           }
           throw err;
         }
@@ -487,17 +644,18 @@ export async function applyPlannedFiles(
       if (!placed) {
         const temp = `${FETCH_DIR}/${id}.jar`;
         const downloaded = resumed && (await sha512Of(d, c, temp)) === f.sha512;
+        // Recorded before the download: whatever lands at the temporary name with this digest is ours.
+        await pushUndo(store, { kind: "delete", path: temp, sha512: f.sha512 });
         if (!downloaded) {
           await c.log?.("info", `Downloading ${f.filename} (${f.projectTitle ?? f.projectId} ${f.versionNumber})`);
           await ensureDir(d.gateway, c.nodeId, c.serverId, FETCH_DIR, c);
           await fetchModrinthFile(d, c, { ...f, destPath: temp });
         }
-        undo.push({ kind: "delete", path: temp, sha512: f.sha512 });
-        await o.assertLock?.();
+        await assertLock();
         await placeVerified(d, c, temp, f.destPath, f.sha512);
       }
-      undo.push({ kind: "delete", path: f.destPath, sha512: f.sha512 });
-      if (!entries.includes(entry)) entries.push(entry);
+      await pushUndo(store, { kind: "delete", path: f.destPath, sha512: f.sha512 });
+      await upsertEntry(store, entry);
       for (const [i, x] of others.entries()) {
         const asPrimary = !journal.atDest && i === 0;
         const r = byPath.get(x.path);
@@ -507,17 +665,11 @@ export async function applyPlannedFiles(
         await keepFor(target, x.path, asPrimary ? id : x.id);
       }
     }
-    await o.assertLock?.();
+    await assertLock();
   } catch (err) {
-    const notes = await runUndo(d, c, undo);
-    const base = err instanceof Error ? err.message : String(err);
-    const message = notes.length ? `${base}; undo: ${notes.join("; ")}` : base;
-    await writeHistory(d, c.serverId, entries, { actor: o.actor, jobId: o.jobId, status: "failed", error: message });
-    const e = jobAgentError(err, "install");
-    if (notes.length) throw new JobError(e instanceof JobError ? e.code : "INSTALL_FAILED", `${e instanceof Error ? e.message : base}; undo: ${notes.join("; ")}`);
-    throw e;
+    return fail(err);
   }
-  return { entries, recorded: false };
+  return { entries: store.log.entries, recorded: false };
 }
 
 /**

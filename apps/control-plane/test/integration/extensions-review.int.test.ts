@@ -443,7 +443,22 @@ describe("Phase 4b review round 2 (Grok)", () => {
     expect((await waitJob(owner, backup.json().jobId)).status).toBe("succeeded");
   });
 
-  it("2: stop and kill pre-empt a running plugin/mod change, which undoes itself (jobs and synchronous changes)", async () => {
+  /** Original jar back in place, nothing left in the keep/fetch areas, a fresh scan. */
+  async function resetGamma(owner: ApiClient, node: SimNodeHandle, id: string, original: Buffer) {
+    for (const k of [...node.sim.files(id).keys()]) if (k.startsWith(KEPT) || k.startsWith(".blockforge/extensions/fetch/")) node.sim.files(id).delete(k);
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    await scanned(owner, id);
+  }
+  const fetchFiles = (node: SimNodeHandle, id: string) => [...node.sim.files(id).keys()].filter((k) => k.startsWith(".blockforge/extensions/fetch/") && k.endsWith(".jar"));
+  /** fs.rename / fs.delete commands that touched plugin/mod or extension-area files since `mark`. */
+  const fileOps = (node: SimNodeHandle, mark: number) =>
+    node.agent.commands.slice(mark).filter((c) => {
+      if (c.type !== "fs.rename" && c.type !== "fs.delete") return false;
+      const p = c.payload as { path?: string; from?: string; to?: string };
+      return [p.path, p.from, p.to].some((x) => typeof x === "string" && (x.startsWith("plugins/") || x.startsWith(".blockforge/extensions/")));
+    });
+
+  it("2a: stop/kill with nothing else afterwards: the pre-empted change takes a cleanup hold and undoes itself", async () => {
     const { owner, node, up } = await boot();
     const id = await runningServer(owner);
     const original = pluginJar("Gamma", "0.9-local");
@@ -452,62 +467,318 @@ describe("Phase 4b review round 2 (Grok)", () => {
     up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
 
     for (const action of ["kill", "stop"] as const) {
-      // The power action arrives while the download runs (the original jar is already in the keep area).
-      let power: Awaited<ReturnType<ApiClient["post"]>> | null = null;
+      let power: string | null = null;
       let backupDuring = 0;
       node.sim.options = {
         before: {
+          // While the download runs (the original jar is already kept): backup stays blocked, the power action
+          // pre-empts and finishes before the download returns (the server is stopped and free afterwards).
           "artifact.fetch": async () => {
-            // Backup stays blocked; the power action is accepted.
             backupDuring = (await owner.post(`/servers/${id}/backups`, {})).statusCode;
-            power = await owner.post(`/servers/${id}/actions`, { action });
+            const r = await owner.post(`/servers/${id}/actions`, { action });
+            expect(r.statusCode, r.body).toBe(202);
+            power = r.json().jobId as string;
+            expect((await waitJob(owner, power!)).status).toBe("succeeded");
           },
         },
       };
       const job = await install(owner, id, "gammapl");
       const ej = await waitJob(owner, job);
+      node.sim.options = {};
       expect(backupDuring).toBe(409);
-      expect(power!.statusCode, power!.body).toBe(202);
       expect(ej.status).toBe("failed");
       expect(ej.error).toMatchObject({ code: "LOCK_LOST" });
-      expect((await waitJob(owner, power!.json().jobId)).status).toBe("succeeded");
-      node.sim.options = {};
-      // The original jar is back; nothing of the new version is left anywhere.
       expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
       expect(keptFiles(node, id)).toEqual([]);
-      expect([...node.sim.files(id).keys()].filter((k) => k.startsWith(".blockforge/extensions/fetch/"))).toEqual([]);
-      const row = (await testPool().query("SELECT status, kept_path, error FROM extension_history WHERE job_id = $1", [job])).rows;
-      expect(row).toEqual([{ status: "failed", kept_path: null, error: expect.stringContaining("operation lock") }]);
-      // The server lock ended with the power action.
+      expect(fetchFiles(node, id)).toEqual([]);
+      const rows = (await testPool().query("SELECT status, kept_path FROM extension_history WHERE job_id = $1", [job])).rows;
+      expect(rows).toEqual([{ status: "failed", kept_path: null }]);
       expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null, activeJobId: null, state: "stopped" });
       const start = await owner.post(`/servers/${id}/actions`, { action: "start" });
       expect((await waitJob(owner, start.json().jobId)).status).toBe("succeeded");
     }
+  });
 
-    // A synchronous remove interrupted by a stop puts the jar back and answers 409 preempted; its release
-    // does not drop the stop's lock (token).
-    const gamma = (await list(owner, id)).items.find((x) => x.filename === "Gamma-1.0.jar")!;
+  it("2b: while another operation holds the server or it runs, the pre-empted change touches no file and records what it left", async () => {
+    const { owner, node, up } = await boot();
+    const id = await runningServer(owner);
+    const original = pluginJar("Gamma", "0.9-local");
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    await scanned(owner, id);
+    const newJar = pluginJar("Gamma", "1.0");
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: newJar });
+    const waitIdle = async () => poll(async () => (await owner.get(`/servers/${id}`)).json().activeOperation === null, 15_000, 50);
+
+    const scenarios: Record<string, { delay: Record<string, number>; during: () => Promise<void> }> = {
+      // restart: its job stops, then starts the server (slow start) while holding the lock.
+      "restart overlapping the undo": {
+        delay: { "workload.start": 2500 },
+        during: async () => {
+          const r = await owner.post(`/servers/${id}/actions`, { action: "restart" });
+          expect(r.statusCode, r.body).toBe(202);
+          await poll(async () => {
+            const s = (await owner.get(`/servers/${id}`)).json();
+            return s.activeOperation === "restart" && s.state === "starting";
+          }, 10_000, 20);
+        },
+      },
+      // kill, then a start before the download returns: the server runs (lock free, but not stopped).
+      "kill then start": {
+        delay: {},
+        during: async () => {
+          const k = await owner.post(`/servers/${id}/actions`, { action: "kill" });
+          expect((await waitJob(owner, k.json().jobId)).status).toBe("succeeded");
+          const s = await owner.post(`/servers/${id}/actions`, { action: "start" });
+          expect((await waitJob(owner, s.json().jobId)).status).toBe("succeeded");
+        },
+      },
+      // kill, then a backup that holds the lock when the download returns.
+      "kill then backup": {
+        delay: { "backup.create": 2500 },
+        during: async () => {
+          const k = await owner.post(`/servers/${id}/actions`, { action: "kill" });
+          expect((await waitJob(owner, k.json().jobId)).status).toBe("succeeded");
+          const b = await owner.post(`/servers/${id}/backups`, {});
+          expect(b.statusCode, b.body).toBe(202);
+          await poll(async () => (await owner.get(`/servers/${id}`)).json().activeOperation === "backup", 10_000, 20);
+        },
+      },
+    };
+    for (const [name, sc] of Object.entries(scenarios)) {
+      let mark = 0;
+      node.sim.options = {
+        delay: sc.delay,
+        before: {
+          "artifact.fetch": async () => {
+            await sc.during();
+            mark = node.agent.commands.length;
+          },
+        },
+      };
+      const job = await install(owner, id, "gammapl");
+      const ej = await waitJob(owner, job, 30_000);
+      expect(ej.status, name).toBe("failed");
+      expect(ej.error, name).toMatchObject({ code: "PREEMPTED_UNDO_SKIPPED" });
+      // No file was touched after the pre-emption: the original stays kept, the download stays in the fetch area.
+      expect(fileOps(node, mark), name).toEqual([]);
+      expect(node.sim.read(id, "plugins/Gamma-1.0.jar"), name).toBeNull();
+      const [kept] = keptFiles(node, id);
+      expect(node.sim.files(id).get(kept!)!.data.equals(original), name).toBe(true);
+      const [temp] = fetchFiles(node, id);
+      expect(node.sim.files(id).get(temp!)!.data.equals(newJar), name).toBe(true);
+      // The history row records every kept file and every file the change wrote.
+      const rows = (await testPool().query("SELECT status, kept_path, kept_sha512, error FROM extension_history WHERE job_id = $1", [job])).rows;
+      expect(rows, name).toEqual([{ status: "failed", kept_path: kept, kept_sha512: sha512(original), error: expect.stringContaining("undo skipped") }]);
+      expect(rows[0].error).toContain(temp!);
+      expect(rows[0].error).toContain(sha512(newJar));
+      await waitIdle();
+      node.sim.options = {};
+      const s = (await owner.get(`/servers/${id}`)).json();
+      if (s.state !== "running") {
+        const st = await owner.post(`/servers/${id}/actions`, { action: "start" });
+        expect((await waitJob(owner, st.json().jobId)).status).toBe("succeeded");
+      }
+      await resetGamma(owner, node, id, original);
+    }
+  });
+
+  it("2c: synchronous changes: a pre-empted remove under a running stop touches nothing; after a finished kill it undoes itself", async () => {
+    const { owner, node } = await boot();
+    const id = await runningServer(owner);
+    const original = pluginJar("Gamma", "0.9-local");
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    const gamma = (await scanned(owner, id)).items.find((x) => x.filename === "Gamma-1.0.jar")!;
+
+    // Stop (slow) pre-empts while the jar moves to the keep area: the remove decides under the stop's lock.
     let stopJob: string | null = null;
     node.sim.options = {
+      delay: { "workload.stop": 2500 },
       before: {
         "fs.rename": async (p) => {
           if (stopJob || !String(p.to).startsWith(KEPT)) return;
           const r = await owner.post(`/servers/${id}/actions`, { action: "stop" });
           expect(r.statusCode, r.body).toBe(202);
           stopJob = r.json().jobId as string;
+          await poll(async () => (await owner.get(`/servers/${id}`)).json().state === "stopping", 5000, 20);
         },
       },
     };
     const rm = await owner.delete(`/servers/${id}/extensions/${gamma.id}`);
-    node.sim.options = {};
     expect(rm.statusCode, rm.body).toBe(409);
-    expect(rm.json().error.details).toMatchObject({ reason: "preempted" });
+    expect(rm.json().error.details).toMatchObject({ reason: "preempted_undo_skipped" });
+    // Still inside the stop: the lock is the stop's (the remove released nothing but its own token).
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: "stop", activeJobId: stopJob, state: "stopping" });
+    const [kept] = keptFiles(node, id);
+    expect(node.sim.files(id).get(kept!)!.data.equals(original)).toBe(true);
+    expect(node.sim.read(id, "plugins/Gamma-1.0.jar")).toBeNull();
+    const { rows } = await testPool().query("SELECT action, status, kept_path, kept_sha512 FROM extension_history WHERE server_id = $1", [id]);
+    expect(rows).toEqual([{ action: "remove", status: "failed", kept_path: kept, kept_sha512: sha512(original) }]);
+    expect((await waitJob(owner, stopJob!)).status).toBe("succeeded");
+    node.sim.options = {};
+
+    // Kill finished before the move returns (server stopped, lock free): cleanup hold, the jar goes back.
+    node.sim.files(id).delete(kept!);
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    const start = await owner.post(`/servers/${id}/actions`, { action: "start" });
+    expect((await waitJob(owner, start.json().jobId)).status).toBe("succeeded");
+    const g2 = (await scanned(owner, id)).items.find((x) => x.filename === "Gamma-1.0.jar")!;
+    let killed = false;
+    node.sim.options = {
+      before: {
+        "fs.rename": async (p) => {
+          if (killed || !String(p.to).startsWith(KEPT)) return;
+          killed = true;
+          const k = await owner.post(`/servers/${id}/actions`, { action: "kill" });
+          expect((await waitJob(owner, k.json().jobId)).status).toBe("succeeded");
+        },
+      },
+    };
+    const rm2 = await owner.delete(`/servers/${id}/extensions/${g2.id}`);
+    node.sim.options = {};
+    expect(rm2.statusCode, rm2.body).toBe(409);
+    expect(rm2.json().error.details).toMatchObject({ reason: "preempted" });
     expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
     expect(keptFiles(node, id)).toEqual([]);
-    const during = (await owner.get(`/servers/${id}`)).json();
-    if (during.activeJobId) expect(during).toMatchObject({ activeOperation: "stop", activeJobId: stopJob });
-    expect((await waitJob(owner, stopJob!)).status).toBe("succeeded");
     expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null, state: "stopped" });
+
+    // Enable/disable re-checks after its rename too (minor 4): pre-empted → renamed back under a cleanup hold.
+    const st2 = await owner.post(`/servers/${id}/actions`, { action: "start" });
+    expect((await waitJob(owner, st2.json().jobId)).status).toBe("succeeded");
+    let killed2 = false;
+    node.sim.options = {
+      before: {
+        "fs.rename": async (p) => {
+          if (killed2 || String(p.to) !== "plugins/Gamma-1.0.jar.disabled") return;
+          killed2 = true;
+          const k = await owner.post(`/servers/${id}/actions`, { action: "kill" });
+          expect((await waitJob(owner, k.json().jobId)).status).toBe("succeeded");
+        },
+      },
+    };
+    const off = await owner.patch(`/servers/${id}/extensions/${g2.id}`, { enabled: false });
+    node.sim.options = {};
+    expect(off.statusCode, off.body).toBe(409);
+    expect(off.json().error.details).toMatchObject({ reason: "preempted" });
+    expect(node.sim.read(id, "plugins/Gamma-1.0.jar.disabled")).toBeNull();
+    expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
+  });
+
+  it("crash during the undo: recover() finishes it under the job's lock, or under a cleanup hold, or skips it — one failed row each time", async () => {
+    const { t, owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    const original = pluginJar("Gamma", "0.9-local");
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    await scanned(owner, id);
+    const gamma = up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+    node.sim.artifacts.set(gamma.url, Buffer.from("tampered on the CDN"));
+    for (const variant of ["job still holds its lock", "lock lost, server free and stopped", "lock held by another change"] as const) {
+      const jobId = await install(owner, id, "gammapl");
+      expect((await waitJob(owner, jobId)).status).toBe("failed");
+      const entryId = stableId(jobId, "apply:plugins/Gamma-1.0.jar");
+      const keptPath = `${KEPT}${entryId}.jar`;
+      const temp = `.blockforge/extensions/fetch/${entryId}.jar`;
+      // Crash state: the original was kept (journaled), the download failed, the undo started and had done the
+      // temp-file step but not yet moved the original back.
+      node.sim.files(id).delete("plugins/Gamma-1.0.jar");
+      node.sim.put(id, keptPath, original);
+      const entry = { id: entryId, action: "update", extensionId: null, extensionName: "Gamma", path: "plugins/Gamma-1.0.jar", from: null, to: null, keptPath, keptSha512: sha512(original) };
+      await crashInto(t, id, jobId, {
+        journal: { [entryId]: { atDest: true, kept: { "plugins/Gamma-1.0.jar": { sha512: sha512(original), moved: true } } } },
+        undo: {
+          install: {
+            steps: [
+              { kind: "restore", kept: keptPath, sha512: sha512(original), path: "plugins/Gamma-1.0.jar", entryId },
+              { kind: "delete", path: temp, sha512: gamma.sha512 },
+            ],
+            entries: [entry],
+            started: true,
+            error: { code: "CHECKSUM_MISMATCH", message: "install: sha512 mismatch" },
+            done: [1],
+            failed: [],
+            notes: [],
+          },
+        },
+      });
+      const foreign = "00000000-0000-4000-8000-00000000f00d";
+      if (variant === "lock lost, server free and stopped") await testPool().query("UPDATE servers SET active_operation = NULL, active_job_id = NULL WHERE id = $1", [id]);
+      if (variant === "lock held by another change")
+        await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, operation_token = $2, operation_started_at = now() WHERE id = $1", [id, foreign]);
+      const fetched = node.sim.fetched.length;
+      await t.ctx.jobs.start();
+      const row = await t.ctx.jobs.waitForCompletion(jobId);
+      expect(row.status, variant).toBe("failed");
+      expect(node.sim.fetched.length, variant).toBe(fetched); // the apply is never resumed
+      const { rows } = await testPool().query("SELECT status, kept_path, kept_sha512, error FROM extension_history WHERE job_id = $1", [jobId]);
+      expect(rows.length, variant).toBe(1);
+      if (variant === "lock held by another change") {
+        expect(row.error, variant).toMatchObject({ code: "PREEMPTED_UNDO_SKIPPED" });
+        expect(node.sim.read(id, "plugins/Gamma-1.0.jar"), variant).toBeNull();
+        expect(rows[0], variant).toMatchObject({ status: "failed", kept_path: keptPath, kept_sha512: sha512(original) });
+        expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: "extensions", activeJobId: null });
+        await testPool().query("UPDATE servers SET active_operation = NULL, operation_token = NULL, operation_started_at = NULL WHERE id = $1", [id]);
+        node.sim.files(id).delete(keptPath);
+        node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+      } else {
+        expect(row.error, variant).toMatchObject({ code: "CHECKSUM_MISMATCH" });
+        expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original), variant).toBe(true);
+        expect(node.sim.read(id, keptPath), variant).toBeNull();
+        expect(rows[0], variant).toMatchObject({ status: "failed", kept_path: null });
+        expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+      }
+      await scanned(owner, id);
+    }
+  });
+
+  it("rescan: a job that lost its lock after recording the change fails with LOCK_LOST and changes nothing more", async () => {
+    const { t, owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await scanned(owner, id);
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+    const jobId = await install(owner, id, "gammapl");
+    expect((await waitJob(owner, jobId)).status).toBe("succeeded");
+    await t.ctx.jobs.stop();
+    await testPool().query("UPDATE jobs SET status = 'running', finished_at = NULL, result = NULL, error = NULL WHERE id = $1", [jobId]);
+    await testPool().query("UPDATE job_steps SET status = CASE WHEN key = 'fetch' THEN 'succeeded' ELSE 'running' END WHERE job_id = $1", [jobId]);
+    await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, operation_token = gen_random_uuid(), operation_started_at = now() WHERE id = $1", [id]);
+    await testPool().query("UPDATE extension_scans SET active_job_id = $2 WHERE server_id = $1", [id, jobId]);
+    const mark = node.agent.commands.length;
+    await t.ctx.jobs.start();
+    const row = await t.ctx.jobs.waitForCompletion(jobId);
+    expect(row.status).toBe("failed");
+    expect(row.error).toMatchObject({ code: "LOCK_LOST", message: expect.stringContaining("files were changed") });
+    expect(node.agent.commands.slice(mark).filter((c) => c.type === "fs.list" || c.type === "fs.hash")).toEqual([]);
+    expect((await testPool().query("SELECT status FROM extension_history WHERE job_id = $1", [jobId])).rows).toEqual([{ status: "succeeded" }]);
+    await testPool().query("UPDATE servers SET active_operation = NULL, operation_token = NULL, operation_started_at = NULL WHERE id = $1", [id]);
+  });
+
+  it("minor 1: a changed upload that cannot be moved back is reported as stuck; the kept file is not restored onto it", async () => {
+    const { t, owner, node } = await boot();
+    const id = await paperServer(owner);
+    const original = pluginJar("Uploaded", "1.0");
+    node.sim.put(id, "plugins/Uploaded.jar", original);
+    await scanned(owner, id);
+    const v2 = pluginJar("Uploaded", "2.0");
+    const u = ExtensionUploadResponse.parse((await owner.post(`/servers/${id}/extensions/uploads`, { filename: "Uploaded.jar", sizeBytes: v2.length })).json());
+    const put = await t.app.inject({ method: "PUT", url: u.url, headers: { cookie: owner.cookieHeader(), "content-type": "application/octet-stream" }, payload: v2 });
+    expect(put.statusCode, put.body).toBe(200);
+    const staging = `.blockforge/extensions/uploads/${u.uploadId}.jar.part`;
+    node.sim.options = {
+      before: {
+        "fs.rename": (p) => {
+          if (p.from === staging) node.sim.put(id, staging, "SWAPPED-AFTER-CHECK");
+          if (p.from === "plugins/Uploaded.jar" && p.to === staging) node.sim.put(id, staging, "BLOCKS-THE-MOVE-BACK");
+        },
+      },
+    };
+    const done = await owner.post(`/servers/${id}/extensions/uploads/${u.uploadId}/complete`, { replaceExisting: true });
+    node.sim.options = {};
+    expect(done.statusCode, done.body).toBe(409);
+    expect(done.json().error.details).toMatchObject({ reason: "placement_stuck", path: "plugins/Uploaded.jar" });
+    expect(node.sim.read(id, "plugins/Uploaded.jar")).toBe("SWAPPED-AFTER-CHECK");
+    const [kept] = keptFiles(node, id);
+    expect(node.sim.files(id).get(kept!)!.data.equals(original)).toBe(true);
+    const { rows } = await testPool().query("SELECT action, status, kept_path, kept_sha512, error FROM extension_history WHERE server_id = $1", [id]);
+    expect(rows).toEqual([{ action: "upload", status: "failed", kept_path: kept, kept_sha512: sha512(original), error: expect.stringContaining("could not be moved back") }]);
   });
 
   it("3: a resumed job never adopts a kept file whose digest was not journaled before the move", async () => {

@@ -139,13 +139,6 @@ export function assertAgentSupportsExtensions(gateway: AgentGateway, nodeId: str
   }
 }
 
-/** Long extension jobs re-check at every step that they still hold the server's `extensions` lock. */
-export async function assertHoldsLock(d: Pick<ExtensionDeps, "state">, serverId: string, jobId: string): Promise<void> {
-  if (!(await d.state.holds(serverId, "extensions", jobId))) {
-    throw new JobError("LOCK_LOST", "the server's operation lock is no longer held by this job; the plugin/mod change stopped");
-  }
-}
-
 export const jobRunning = () => conflict("Another extension job is running for this server", { reason: "extension_job_running" });
 
 /** Ensures the scan/lock row exists. */

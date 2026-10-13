@@ -74,7 +74,27 @@ import {
   type ExtensionRow,
   type ExtensionTarget,
 } from "./model.js";
-import { deleteFile, exists, HashFailedError, keepFile, KeptFileChangedError, placeVerified, restoreKept, sha512Of, UnverifiedKeptError, writeHistory, type FileCtx, type Kept } from "./ops.js";
+import {
+  deleteFile,
+  describeUndo,
+  exists,
+  fencedUndo,
+  HashFailedError,
+  keepFile,
+  KeptFileChangedError,
+  memoryUndo,
+  placeVerified,
+  PlacementStuckError,
+  pushUndo,
+  sha512Of,
+  UnverifiedKeptError,
+  upsertEntry,
+  writeHistory,
+  type FileCtx,
+  type Kept,
+  type PendingEntry,
+  type UndoStore,
+} from "./ops.js";
 import { JobError } from "../jobs/types.js";
 import { publishExtensions } from "./scan.js";
 
@@ -137,6 +157,23 @@ export class ExtensionsService {
       { actor: await historyActor(this.d.db, actor), jobId: null, status: "failed", error: err.message },
     );
     await this.d.audit.record({ ...actor, action: `server.extension.${action}`, targetType: "server", targetId: access.server.id, outcome: "failed", details: { path: r.path, keptPath: err.keptPath, reason: err.code } });
+  }
+
+  /**
+   * A synchronous change lost its hold (pre-emption or the stale-hold sweep): the fenced undo puts files back
+   * only under a new cleanup hold (no other operation, server stopped/crashed); otherwise nothing is touched
+   * and a failed history row records every kept file and every file the change wrote. Always 409.
+   */
+  private async preemptedSync(access: ServerAccess, actor: AuditActor, c: FileCtx, store: UndoStore, held: () => Promise<boolean>): Promise<never> {
+    store.log.started = true;
+    store.log.error = { code: "PREEMPTED", message: "A stop, restart or kill of the server interrupted the change" };
+    const outcome = await fencedUndo(this.d, c, store, held);
+    const r = describeUndo(store.log, outcome);
+    if (outcome.skipped || store.log.failed.length || store.log.notes.length) {
+      await writeHistory(this.d, access.server.id, store.log.entries, { actor: await historyActor(this.d.db, actor), jobId: null, status: "failed", error: r.message });
+      await this.d.audit.record({ ...actor, action: `server.extension.${store.log.entries[0]?.action ?? "change"}`, targetType: "server", targetId: access.server.id, outcome: "failed", details: { reason: outcome.skipped ? "preempted_undo_skipped" : "preempted", error: r.message } });
+    }
+    throw conflict(r.message, { reason: outcome.skipped ? "preempted_undo_skipped" : "preempted" });
   }
 
   private async audit(actor: AuditActor, access: ServerAccess, action: string, details: Record<string, unknown>): Promise<void> {
@@ -237,21 +274,26 @@ export class ExtensionsService {
       const c = this.ctx(access, actor);
       if (await exists(this.d, c, to).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)))) throw conflict(`${to} already exists`, { reason: "exists" });
       if (!(await held())) throw preempted();
+      // Hashed first so a pre-empted toggle can be undone verifiably.
+      const sha = await sha512Of(this.d, c, r.path).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)));
       try {
         await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: r.path, to }, agentOpts(c));
       } catch (err) {
         if (err instanceof AgentCommandError && err.code === "NOT_FOUND") throw notFound("Extension file");
         throw commandErrorToHttp(err);
       }
+      const from = snapshotOf(r);
+      const entry: PendingEntry = { id: randomUUID(), action: enabled ? "enable" : "disable", extensionId: r.id, extensionName: displayName(r), path: to, from, to: { ...from, path: to }, keptPath: null, keptSha512: null };
+      if (!(await held())) {
+        const store = memoryUndo();
+        await upsertEntry(store, entry);
+        if (sha) await pushUndo(store, { kind: "restore", kept: to, sha512: sha, path: r.path });
+        else store.log.notes.push(`${to} could not be hashed, so it is not renamed back`);
+        return this.preemptedSync(access, actor, c, store, held);
+      }
       const filename = to.slice(to.indexOf("/") + 1);
       const [u] = await this.d.db.update(installedExtensions).set({ path: to, filename, enabled }).where(eq(installedExtensions.id, r.id)).returning();
-      const from = snapshotOf(r);
-      await writeHistory(
-        this.d,
-        access.server.id,
-        [{ id: randomUUID(), action: enabled ? "enable" : "disable", extensionId: r.id, extensionName: displayName(r), path: to, from, to: { ...from, path: to }, keptPath: null, keptSha512: null }],
-        { actor: await historyActor(this.d.db, actor), jobId: null, status: "succeeded" },
-      );
+      await writeHistory(this.d, access.server.id, [entry], { actor: await historyActor(this.d.db, actor), jobId: null, status: "succeeded" });
       return u!;
     });
     await this.audit(actor, access, enabled ? "enable" : "disable", { extensionId: r.id, from: r.path, to });
@@ -279,11 +321,10 @@ export class ExtensionsService {
         }
       }
       if (kept && !(await held())) {
-        const k = kept;
-        await restoreKept(this.d, c, k.path, k.sha512, r.path).catch(async (e: unknown) => {
-          await this.recordUnverified(access, actor, historyId, "remove", { name: displayName(r), path: r.path, from: snapshotOf(r) }, new UnverifiedKeptError(k.path, `could not be put back after the removal was interrupted (${(e as Error).message})`), k.sha512);
-        });
-        throw preempted();
+        const store = memoryUndo();
+        await upsertEntry(store, { id: historyId, action: "remove", extensionId: r.id, extensionName: displayName(r), path: r.path, from: snapshotOf(r), to: null, keptPath: kept.path, keptSha512: kept.sha512 });
+        await pushUndo(store, { kind: "restore", kept: kept.path, sha512: kept.sha512, path: r.path, entryId: historyId });
+        return this.preemptedSync(access, actor, c, store, held);
       }
       await this.d.db.delete(installedExtensions).where(eq(installedExtensions.id, r.id));
       await writeHistory(
@@ -547,6 +588,10 @@ export class ExtensionsService {
       path: dest,
       from: existingRow ? snapshotOf(existingRow) : ({ source: "unknown", path: dest, projectId: null, versionId: null, versionNumber: null, sha512: null, sizeBytes: null } as const),
     };
+    // The undo record of this completion (kept file back to `dest`, placed upload back to staging).
+    const store = memoryUndo();
+    const entry: PendingEntry = { id: historyId, action: "upload", extensionId: existingRow?.id ?? null, extensionName: existingSnapshot.name, path: dest, from: onDisk ? existingSnapshot.from : null, to: null, keptPath: null, keptSha512: null };
+    await upsertEntry(store, entry);
     if (!(await held())) throw preempted();
     if (onDisk) {
       try {
@@ -558,47 +603,54 @@ export class ExtensionsService {
           throw fileError(err);
         }
       }
+      if (kept) {
+        Object.assign(entry, { keptPath: kept.path, keptSha512: kept.sha512 });
+        await upsertEntry(store, entry);
+        await pushUndo(store, { kind: "restore", kept: kept.path, sha512: kept.sha512, path: dest, entryId: historyId });
+      }
       warnings.push({ code: "REPLACED_EXISTING", level: "info", message: `Replaced ${dest} (kept for rollback)` });
     }
-    const failUpload = async (status: 409 | 422, reason: string, message: string, err: unknown): Promise<never> => {
-      // Undo: the kept jar goes back only while it is exactly what was kept (#1).
-      let undo: string | null = null;
-      if (kept) {
-        const k = kept;
-        try {
-          await restoreKept(this.d, c, k.path, k.sha512, dest);
-        } catch (e) {
-          undo = e instanceof KeptFileChangedError ? "kept_file_changed" : "failed";
-          await this.recordUnverified(access, actor, historyId, "upload", existingSnapshot, new UnverifiedKeptError(k.path, `could not be put back (${(e as Error).message})`), e instanceof KeptFileChangedError ? null : k.sha512);
-        }
-      }
+    /** Refuses the completion after running the fenced undo (and records whatever could not be put back). */
+    const failUpload = async (reason: string, message: string, err: unknown): Promise<never> => {
+      store.log.started = true;
+      store.log.error = { code: reason.toUpperCase(), message };
+      const outcome = await fencedUndo(this.d, c, store, held);
+      const r = describeUndo(store.log, outcome);
+      const leftOver = outcome.skipped || store.log.entries.some((e) => e.leftInKeep);
+      if (leftOver) await writeHistory(this.d, access.server.id, store.log.entries, { actor: await historyActor(this.d.db, actor), jobId: null, status: "failed", error: r.message });
       await this.d.audit.record({
         ...actor,
         action: "server.extension.upload.complete",
         targetType: "server",
         targetId: access.server.id,
         outcome: "failed",
-        details: { uploadId: u.id, path: dest, reason, undo, keptPath: undo ? kept?.path : null, error: (err as Error | null)?.message ?? null },
+        details: { uploadId: u.id, path: dest, reason, undoSkipped: outcome.skipped, keptPath: leftOver ? (kept?.path ?? null) : null, error: (err as Error | null)?.message ?? null },
       });
-      throw new AppError(status, status === 409 ? "CONFLICT" : "PRECONDITION_FAILED", undo ? `${message}; the replaced file ${kept?.path} could not be restored and is left in the keep area` : message, {
-        reason: undo ? (undo === "kept_file_changed" ? "kept_file_changed" : "undo_failed") : reason,
-        keptPath: undo ? (kept?.path ?? null) : null,
+      throw new AppError(409, "CONFLICT", r.message, {
+        reason: outcome.skipped ? "preempted_undo_skipped" : store.log.failed.length ? "undo_failed" : reason,
+        keptPath: leftOver ? (kept?.path ?? null) : null,
       });
     };
-    if (kept && !(await held())) return failUpload(409, "preempted", "The upload was interrupted by a stop/restart/kill of the server; nothing was changed", null);
+    if (kept && !(await held())) return failUpload("preempted", "The upload was interrupted by a stop/restart/kill of the server", null);
     try {
       // Verified after the move: staged bytes that changed after they were checked are moved back and refused.
       await placeVerified(this.d, c, u.stagingPath, dest, hashed.sha512);
     } catch (err) {
-      if (err instanceof JobError && err.code === "FILE_CHANGED") return failUpload(409, "upload_changed", "The staged file changed after it was checked; upload it again", err);
-      if (err instanceof JobError && err.code === "CONFLICT") return failUpload(409, "exists", `${dest} appeared meanwhile; nothing was replaced`, err);
-      if (kept) return failUpload(409, "install_failed", `Installing the upload failed: ${(err as Error).message}`, err);
+      if (err instanceof PlacementStuckError) {
+        // The destination holds bytes nobody vouches for: never restore onto it; record the state for the operator.
+        entry.leftInKeep = true;
+        await upsertEntry(store, entry);
+        await writeHistory(this.d, access.server.id, store.log.entries, { actor: await historyActor(this.d.db, actor), jobId: null, status: "failed", error: err.message });
+        await this.d.audit.record({ ...actor, action: "server.extension.upload.complete", targetType: "server", targetId: access.server.id, outcome: "failed", details: { uploadId: u.id, path: dest, reason: "placement_stuck", keptPath: kept?.path ?? null } });
+        throw new AppError(409, "CONFLICT", kept ? `${err.message}; the replaced file stays at ${kept.path}` : err.message, { reason: "placement_stuck", path: dest, keptPath: kept?.path ?? null });
+      }
+      if (err instanceof JobError && err.code === "FILE_CHANGED") return failUpload("upload_changed", "The staged file changed after it was checked; upload it again", err);
+      if (err instanceof JobError && err.code === "CONFLICT") return failUpload("exists", `${dest} appeared meanwhile; nothing was replaced`, err);
+      if (kept) return failUpload("install_failed", `Installing the upload failed: ${(err as Error).message}`, err);
       throw commandErrorToHttp(err);
     }
-    if (!(await held())) {
-      await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: u.serverId, from: dest, to: u.stagingPath }, agentOpts(c)).catch(() => undefined);
-      return failUpload(409, "preempted", "The upload was interrupted by a stop/restart/kill of the server; nothing was changed", null);
-    }
+    await pushUndo(store, { kind: "restore", kept: dest, sha512: hashed.sha512, path: u.stagingPath });
+    if (!(await held())) return failUpload("preempted", "The upload was interrupted by a stop/restart/kill of the server", null);
     if (!info.compatibility.loadable) warnings.push({ code: "INCOMPATIBLE_ALLOWED", level: "warning", message: "Installed although the server software cannot load it" });
     if (info.metadata.length === 0) warnings.push({ code: "NO_METADATA", level: "warning", message: "No plugin/mod metadata found in the jar" });
     const selected = info.compatibility.metadataIndex !== null ? info.metadata[info.compatibility.metadataIndex] : undefined;

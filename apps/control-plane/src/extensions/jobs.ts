@@ -5,11 +5,9 @@ import { z } from "zod";
 import { extensionHistory, installedExtensions, servers } from "../db/schema/index.js";
 import { JobError, type JobDefinition, type StepContext } from "../jobs/types.js";
 import {
-  assertHoldsLock,
   ensureDir,
   EXTENSION_JOBS,
   FETCH_DIR,
-  jobAgentError,
   releaseExtensionLock,
   restartRequired,
   refetchable,
@@ -21,12 +19,14 @@ import {
 } from "./model.js";
 import {
   applyPlannedFiles,
-  deleteCreated,
   exists,
   fetchModrinthFile,
+  emptyUndoLog,
+  failWithUndo,
   keepJournaled,
   KeptFileChangedError,
   placeVerified,
+  pushUndo,
   restoreKept,
   sha512Of,
   stableId,
@@ -39,7 +39,10 @@ import {
   type KeepRecord,
   type Kept,
   type PendingEntry,
+  type UndoLog,
+  type UndoStore,
   UnverifiedKeptError,
+  upsertEntry,
 } from "./ops.js";
 import { publishExtensions, runScan, setScanStatus } from "./scan.js";
 
@@ -62,6 +65,14 @@ async function serverOf(d: ExtensionDeps, serverId: string) {
 
 function fileCtx<I>(ctx: StepContext<I>, serverId: string, nodeId: string): FileCtx {
   return { serverId, nodeId, jobId: ctx.jobId, signal: ctx.signal, log: (l, m) => ctx.log(l, m) };
+}
+
+/** Undo record `key` in `ctx.state.undo`, checkpointed on every change (an interrupted undo is resumed). */
+function undoStoreOf<I>(ctx: StepContext<I>, key: string): UndoStore {
+  const all = ((ctx.state.undo as Record<string, UndoLog> | undefined) ?? {}) as Record<string, UndoLog>;
+  ctx.state.undo = all;
+  const log = (all[key] ??= emptyUndoLog());
+  return { log, save: () => ctx.checkpoint() };
 }
 
 /** Apply progress in `ctx.state.journal`, checkpointed before/after every file operation (resumable). */
@@ -111,7 +122,6 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
       }
     }
   };
-  const holdsLock = <I extends { serverId: string }>(ctx: StepContext<I>) => assertHoldsLock(d, ctx.input.serverId, ctx.jobId);
   /** Rescans only while the job still holds the lock (the files were changed and recorded already). */
   const holdsLockForRescan = async <I extends { serverId: string }>(ctx: StepContext<I>) => {
     if (await d.state.holds(ctx.input.serverId, "extensions", ctx.jobId)) return;
@@ -156,11 +166,18 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         label: "Download and verify the files",
         run: async (ctx) => {
           const s = await serverOf(d, ctx.input.serverId);
-          await holdsLock(ctx);
           const actor = ctx.input.actor as HistoryActorFields;
-          const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), ctx.input.plan.files, { actor, jobId: ctx.jobId, journal: journalOf(ctx), assertLock: () => holdsLock(ctx) });
+          // The lock is checked inside: a resumed job that lost it must still finish (or skip) its undo.
+          const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), ctx.input.plan.files, {
+            actor,
+            jobId: ctx.jobId,
+            journal: journalOf(ctx),
+            undo: undoStoreOf(ctx, "install"),
+            holdsLock: () => d.state.holds(s.id, "extensions", ctx.jobId),
+          });
           ctx.state.entries = r.entries;
           delete ctx.state.journal;
+          delete ctx.state.undo;
           await ctx.log("info", `Installed ${ctx.input.plan.files.length} file(s)${restartRequired(s.state) ? "; they take effect at the next restart" : ""}`);
           // History, state and step success in one transaction (nothing fallible after it): a resumed job never applies twice.
           await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx), { completeStep: true });
@@ -240,7 +257,6 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         label: "Install the updates",
         run: async (ctx) => {
           const s = await serverOf(d, ctx.input.serverId);
-          await holdsLock(ctx);
           const actor = ctx.input.actor as HistoryActorFields;
           const plans = (ctx.state.plans as Array<{ extensionId: string; files: ModrinthPlannedFile[] }>) ?? [];
           // Resumable: results/applied/done are checkpointed after every plan.
@@ -252,13 +268,21 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           for (const [k, p] of plans.entries()) {
             if (done.includes(k)) continue;
             try {
-              const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), p.files, { actor, jobId: ctx.jobId, key: `update:${k}`, journal, assertLock: () => holdsLock(ctx) });
+              const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), p.files, {
+                actor,
+                jobId: ctx.jobId,
+                key: `update:${k}`,
+                journal,
+                undo: undoStoreOf(ctx, `update:${k}`),
+                holdsLock: () => d.state.holds(s.id, "extensions", ctx.jobId),
+              });
               applied.push({ files: p.files, entries: r.entries });
               results.push({ extensionId: p.extensionId, status: "updated", versionId: p.files.find((f) => f.reason === "requested")?.versionId ?? null, error: null });
               done.push(k);
               await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx));
             } catch (err) {
-              if (err instanceof JobError && err.code === "LOCK_LOST") throw err;
+              // A pre-emption ends the whole job (the remaining plans are not started).
+              if (err instanceof JobError && (err.code === "LOCK_LOST" || err.code === "PREEMPTED_UNDO_SKIPPED")) throw err;
               results.push({ extensionId: p.extensionId, status: "failed", versionId: null, error: (err as Error).message.slice(0, 1024) });
               done.push(k);
               await ctx.checkpoint();
@@ -301,18 +325,20 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         label: "Restore the previous state",
         run: async (ctx) => {
           const s = await serverOf(d, ctx.input.serverId);
-          await holdsLock(ctx);
           const c = fileCtx(ctx, s.id, s.nodeId);
           const [entry] = await d.db.select().from(extensionHistory).where(and(eq(extensionHistory.id, ctx.input.entryId), eq(extensionHistory.serverId, s.id)));
           if (!entry) throw new JobError("NOT_FOUND", "the history entry no longer exists");
           const id = stableId(ctx.jobId, "rollback");
           const actor = ctx.input.actor as HistoryActorFields;
           const fromKeep = !!entry.from && !refetchable(entry.from);
+          const stillHeld = () => d.state.holds(s.id, "extensions", ctx.jobId);
+          const store = undoStoreOf(ctx, "rollback");
           const finish = async (p: PendingEntry | null) => {
             ctx.state.restoredPath = entry.from?.path ?? null;
             ctx.state.restored = entry.from ?? null;
             ctx.state.entryId = id;
             delete ctx.state.rb;
+            delete (ctx.state.undo as Record<string, unknown> | undefined)?.rollback;
             await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
             // History, the consumed kept file and step success in one transaction (never applied twice; nothing fallible after it).
             await ctx.checkpoint(
@@ -326,9 +352,12 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           // Idempotency (#5): an interrupted attempt that already recorded its history is not re-run.
           const [prior] = await d.db.select().from(extensionHistory).where(eq(extensionHistory.id, id));
           if (prior) {
-            if (prior.status === "failed") throw new JobError("ROLLBACK_FAILED", `rollback: ${prior.error ?? "failed"}`);
+            if (prior.status === "failed") throw new JobError(store.log.error?.code ?? "ROLLBACK_FAILED", `rollback: ${prior.error ?? "failed"}`);
             return finish(null);
           }
+          const fail = (err?: unknown) => failWithUndo(d, c, store, { err, what: "rollback", stillHeld, actor, jobId: ctx.jobId });
+          // A crash interrupted the undo: finish it (fenced), never resume the rollback.
+          if (store.log.started) return fail();
           const newer = await d.db.select().from(extensionHistory).where(and(eq(extensionHistory.serverId, s.id), eq(extensionHistory.status, "succeeded")));
           const avail = rollbackOf(entry, newer.filter((n) => n.at > entry.at), d.clock.now());
           if (!avail.available) throw new JobError("ROLLBACK_UNAVAILABLE", `the change can no longer be rolled back (${avail.reason})`);
@@ -340,7 +369,6 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           const resumed = rb.started === true;
           rb.started = true;
           ctx.state.rb = rb;
-          await ctx.checkpoint();
           const pending: PendingEntry = {
             id,
             action: "rollback",
@@ -349,11 +377,16 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             path: entry.from?.path ?? entry.path,
             from: current ? snapshotOf(current) : (entry.to ?? null),
             to: entry.from ?? null,
-            keptPath: null,
-            keptSha512: null,
+            keptPath: rb.kept?.path ?? null,
+            keptSha512: rb.kept?.sha512 ?? null,
+          };
+          await upsertEntry(store, pending);
+          const assertLock = async () => {
+            if (!(await stillHeld())) throw new JobError("LOCK_LOST", "the server's operation lock was taken over (e.g. by a stop/restart/kill); the rollback stopped");
           };
           const fetchTemp = `${FETCH_DIR}/${id}.jar`;
           try {
+            await assertLock();
             // The current file (the change being undone) goes to the keep area: digest journaled before the move.
             if (entry.to && rb.kept === undefined) {
               try {
@@ -371,12 +404,13 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
               }
               await ctx.checkpoint();
             }
-            if (rb.kept) {
+            if (rb.kept && entry.to) {
               pending.keptPath = rb.kept.path;
               pending.keptSha512 = rb.kept.sha512;
+              await pushUndo(store, { kind: "restore", kept: rb.kept.path, sha512: rb.kept.sha512, path: entry.to.path, entryId: id });
             }
             if (entry.from && !rb.restored) {
-              await holdsLock(ctx);
+              await assertLock();
               const from = entry.from;
               if (!fromKeep) {
                 // Downloaded to a temporary name first, then moved into place without overwriting (verified after
@@ -385,6 +419,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
                 if (!placed) {
                   const downloaded = resumed && (await sha512Of(d, c, fetchTemp)) === from.sha512;
                   if (await exists(d, c, from.path)) throw new JobError("CONFLICT", `${from.path} exists; remove or rename it first`);
+                  await pushUndo(store, { kind: "delete", path: fetchTemp, sha512: from.sha512! });
                   if (!downloaded) {
                     let version;
                     try {
@@ -399,9 +434,10 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
                     await ensureDir(d.gateway, c.nodeId, s.id, FETCH_DIR, c);
                     await fetchModrinthFile(d, c, { url: picked.url, destPath: fetchTemp, sha512: from.sha512!, sizeBytes: picked.file.size });
                   }
-                  await holdsLock(ctx);
+                  await assertLock();
                   await placeVerified(d, c, fetchTemp, from.path, from.sha512!);
                 }
+                await pushUndo(store, { kind: "delete", path: from.path, sha512: from.sha512! });
               } else {
                 if (!entry.keptPath || !entry.keptSha512) throw new JobError("ROLLBACK_UNAVAILABLE", "the previous file is no longer kept (file_unavailable)");
                 const placed = resumed && !(await exists(d, c, entry.keptPath)) && (await sha512Of(d, c, from.path)) === entry.keptSha512;
@@ -414,48 +450,15 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
                     throw err;
                   }
                 }
+                // Undo = back into the keep area (verified: it must still be exactly the restored file).
+                await pushUndo(store, { kind: "restore", kept: from.path, sha512: entry.keptSha512, path: entry.keptPath });
               }
               rb.restored = true;
               await ctx.checkpoint();
             }
-            await holdsLock(ctx);
+            await assertLock();
           } catch (err) {
-            // Undo (also after a lost lock): only files this job wrote are removed, and kept files go back only while unchanged.
-            const notes: string[] = [];
-            const undo = async (what: string, fn: () => Promise<void>): Promise<boolean> => {
-              try {
-                await fn();
-                return true;
-              } catch (e) {
-                notes.push((e as Error).message);
-                await ctx.log("error", `Undo failed (${what}): ${(e as Error).message}`);
-                return false;
-              }
-            };
-            const from = entry.from;
-            if (from && rb.restored) {
-              if (!fromKeep) await undo(from.path, () => deleteCreated(d, c, from.path, from.sha512!));
-              else if (entry.keptPath && entry.keptSha512) {
-                const keptPath = entry.keptPath;
-                const sha = entry.keptSha512;
-                // Back into the keep area, verified (it must still be exactly the restored file).
-                await undo(from.path, async () => {
-                  if ((await sha512Of(d, c, from.path)) !== sha) throw new JobError("FILE_CHANGED", `${from.path} changed after it was restored; it was not moved back to the keep area`);
-                  await placeVerified(d, c, from.path, keptPath, sha);
-                });
-              }
-            }
-            if (from && !fromKeep) await undo(fetchTemp, () => deleteCreated(d, c, fetchTemp, from.sha512!));
-            if (rb.kept && entry.to) {
-              const k = rb.kept;
-              const to = entry.to.path;
-              if (!(await undo(to, () => restoreKept(d, c, k.path, k.sha512, to)))) pending.leftInKeep = true;
-            }
-            const base = (err as Error).message;
-            await writeHistory(d, s.id, [pending], { actor, jobId: ctx.jobId, status: "failed", error: notes.length ? `${base}; undo: ${notes.join("; ")}` : base });
-            const e = jobAgentError(err, "rollback");
-            if (notes.length) throw new JobError(e instanceof JobError ? e.code : "ROLLBACK_FAILED", `${(e as Error).message}; undo: ${notes.join("; ")}`);
-            throw e;
+            return fail(err);
           }
           await finish(pending);
         },
