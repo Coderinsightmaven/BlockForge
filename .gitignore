@@ -3,6 +3,8 @@ dist/
 .turbo/
 coverage/
 *.log
+# Captured server logs are test fixtures, not runtime logs
+!**/test/fixtures/**/*.log
 .env
 .env.*
 !.env.example

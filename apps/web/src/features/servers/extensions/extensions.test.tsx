@@ -519,7 +519,7 @@ describe("Plugins & mods — updates, history, uploads", () => {
     const user = userEvent.setup();
     wrap(<ExtensionsTab server={owner} me={makeMe()} />);
     await user.click(await screen.findByRole("tab", { name: "Updates" }));
-    await user.click(screen.getByRole("button", { name: "Check for updates" }));
+    await user.click(await screen.findByRole("button", { name: "Check for updates" }));
     expect((await screen.findAllByText("2.21.0 → 2.22.0")).length).toBe(2);
     // Problems use the contract's descriptions; such updates can't be selected.
     expect(

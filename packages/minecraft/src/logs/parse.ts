@@ -214,7 +214,7 @@ export function detectLogEvents(raw: string | ParsedLogLine): LogEvent[] {
   const server = (loggers: readonly (string | null)[]) => consoleMessage(p, { loggers }) ?? "";
   const velocity = isVelocityLogger(p.logger) ? (consoleMessage(p, { loggers: [p.logger] }) ?? "") : "";
 
-  // Readiness: game servers `Done (3.456s)! For help, type "help"`; Velocity `Done (1.55s)!`.
+  // Readiness: game servers `Done (3.456s)! For help, type "help"`; Velocity `Done (0.96s)!`.
   const READY = /^Done \((\d+(?:[.,]\d+)?)s\)!(?: For help, type "help")?/;
   let m = READY.exec(server(EVENT_LOGGERS.ready)) ?? READY.exec(velocity);
   if (m) events.push({ type: "ready", seconds: num(m[1]!) });

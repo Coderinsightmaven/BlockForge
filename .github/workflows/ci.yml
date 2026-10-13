@@ -10,19 +10,6 @@ permissions:
 jobs:
   typescript:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17.11-alpine
-        env:
-          POSTGRES_USER: blockforge
-          POSTGRES_PASSWORD: blockforge-dev-only
-          POSTGRES_DB: blockforge_test
-        ports: ["55432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U blockforge" --health-interval 2s --health-timeout 3s --health-retries 30
-      victoriametrics:
-        image: victoriametrics/victoria-metrics:v1.153.0
-        ports: ["58428:8428"]
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -31,6 +18,9 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Same Postgres (+ blockforge_test), VictoriaMetrics flags and HTTPS MinIO as local development.
+      - name: Test infrastructure (infra/compose)
+        run: pnpm infra:up
       - name: Agent protocol fixtures are up to date
         run: node packages/contracts/scripts/gen-fixtures.mjs && git diff --exit-code packages/contracts/fixtures
       - run: pnpm typecheck

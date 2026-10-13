@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ConsoleLinesEvent, EnrollResponse, Job, Node, OverviewSummary } from "@blockforge/contracts";
+import { ConsoleLinesEvent, ENROLLMENT_TOKEN_PATTERN, EnrollResponse, Job, Node, OverviewSummary } from "@blockforge/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentCommandError } from "../../src/agents/gateway.js";
 import type { ApiClient} from "../support/app.js";
@@ -54,7 +54,8 @@ describe("enrollment", () => {
     const body = created.json();
     expect(body.secretToken).toMatch(/^bfe_[0-9a-f]{16}_[A-Za-z0-9_-]{43}$/);
     expect(body.installCommand).toBe(`blockforge-agent enroll --url http://127.0.0.1:5173 --token ${body.secretToken} --insecure-allow-http`);
-    const secret = body.secretToken.split("_")[2];
+    // The secret part is base64url and may itself contain "_": parse it like production does.
+    const secret = ENROLLMENT_TOKEN_PATTERN.exec(body.secretToken)![2]!;
     const { rows } = await testPool().query("SELECT secret_hash FROM enrollment_tokens");
     expect(rows[0].secret_hash).not.toContain(secret);
     const listed = await owner.get("/nodes/enrollment-tokens");

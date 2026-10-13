@@ -1,0 +1,20 @@
+[32m[23:58:35.436] [main/INFO] [Launcher/MODLAUNCHER]: ModLauncher running: args [--launchTarget, forgeserver, --fml.neoForgeVersion, 21.1.259, --fml.fmlVersion, 4.0.45, --fml.mcVersion, 1.21.1, --fml.neoFormVersion, 20240808.144430, nogui] 
+[m[32m[23:58:35.437] [main/INFO] [Launcher/MODLAUNCHER]: JVM identified as Eclipse Adoptium OpenJDK 64-Bit Server VM 21.0.12.1+1-LTS 
+[m[32m[23:58:35.438] [main/INFO] [Launcher/MODLAUNCHER]: ModLauncher 11.0.5+main.901c6ea8 starting: java version 21.0.12.1 by Eclipse Adoptium; OS Linux arch aarch64 version 6.8.0-117-generic 
+[m[32m[23:58:35.495] [main/INFO] [loading.ImmediateWindowHandler/]: ImmediateWindowProvider not loading because launch target is forgeserver 
+[m[32m[23:58:35.533] [main/INFO] [mixin/]: SpongePowered MIXIN Subsystem Version=0.8.7 Source=union:/data/libraries/net/fabricmc/sponge-mixin/0.16.4+mixin.0.8.7/sponge-mixin-0.16.4+mixin.0.8.7.jar%2373!/ Service=ModLauncher Env=SERVER 
+[m[32m[23:58:35.753] [main/INFO] [loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "server-1.21.1-20240808.144430-srg.jar" [locator: production server provider +net.neoforged:neoforge:21.1.259:server] 
+[m[32m[23:58:35.788] [main/INFO] [loading.moddiscovery.ModDiscoverer/SCAN]: Found mod file "neoforge-21.1.259-universal.jar" [locator: PathBasedLocator[name=neoforge, paths=[libraries/net/neoforged/neoforge/21.1.259/neoforge-21.1.259-universal.jar]], reader: mod manifest] 
+[m[32m[23:58:35.864] [main/INFO] [loading.moddiscovery.locators.JarInJarDependencyLocator/]: Found 2 dependencies adding them to mods collection 
+[m[32m[23:58:35.865] [main/INFO] [loading.moddiscovery.ModDiscoverer/SCAN]: Found gamelibrary file "mixinextras-neoforge-0.5.5.jar" [parent: neoforge-21.1.259-universal.jar, locator: jarinjar, reader: mod manifest] 
+[m[32m[23:58:35.865] [main/INFO] [loading.moddiscovery.ModDiscoverer/SCAN]: Found library file "net.neoforged.neoforge-coremods-21.1.259.jar" [parent: neoforge-21.1.259-universal.jar, locator: jarinjar, reader: mod manifest] 
+[m[32m[23:58:35.866] [main/INFO] [loading.moddiscovery.ModDiscoverer/]: 
+     Mod List:
+		Name Version (Mod Id)
+
+		Minecraft 1.21.1 (minecraft)
+		NeoForge 21.1.259 (neoforge) 
+[m[32m[23:58:36.266] [main/INFO] [LaunchServiceHandler/MODLAUNCHER]: Launching target 'forgeserver' with arguments [nogui] 
+[m[33m[23:58:36] [main/WARN] [minecraft/Eula]: Failed to load eula.txt
+[m[32m[23:58:36] [main/INFO] [minecraft/Main]: You need to agree to the EULA in order to run the server. Go to eula.txt for more info.
+[m
