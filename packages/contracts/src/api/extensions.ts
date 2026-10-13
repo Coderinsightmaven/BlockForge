@@ -31,7 +31,12 @@ export {
 
 export const ExtensionKind = z.enum(["plugin", "mod"]);
 export type ExtensionKind = z.infer<typeof ExtensionKind>;
-/** `unknown` = found on disk (file manager, SFTP, a plugin's own updater) and not identified on Modrinth. */
+/**
+ * Provenance of the file on disk: `modrinth` = BlockForge installed it from Modrinth (install, update or
+ * rollback), `upload` = uploaded through BlockForge, `unknown` = found on disk (file manager, SFTP, a plugin's
+ * own updater) or changed there after BlockForge placed it. A file found on disk that a SHA-512 lookup
+ * identified stays `unknown` and carries the identification in `InstalledExtension.modrinth`.
+ */
 export const ExtensionSource = z.enum(["modrinth", "upload", "unknown"]);
 export type ExtensionSource = z.infer<typeof ExtensionSource>;
 export const ExtensionInstallDir = z.enum(["plugins", "mods"]);
@@ -154,7 +159,10 @@ export type ExtensionMetadataView = z.infer<typeof ExtensionMetadataView>;
  * `FOLIA_UNSUPPORTED` Folia needs `folia-supported: true` · `CLIENT_ONLY` declares a client-only environment ·
  * `LEGACY_MODS_TOML` NeoForge reads `mods.toml` only before 1.20.5 · `METADATA_INVALID` a metadata file
  * could not be parsed · `METADATA_WARNING` parser warning of the selected metadata · `NO_EXTENSION_DIR` the
- * server software loads no plugins/mods.
+ * server software loads no plugins/mods · `DUPLICATE_ID` another enabled jar in the same folder declares the
+ * same plugin name / mod id (case-insensitive; Bukkit names with spaces as `_`): a warning for plugins
+ * (Paper/Velocity load only one copy), an error for mods (Fabric/Forge/NeoForge refuse to start).
+ * `DUPLICATE_ID` depends on the other files and is computed when the list is read.
  */
 export const ExtensionProblemCode = z.enum([
   "NO_METADATA",
@@ -165,6 +173,7 @@ export const ExtensionProblemCode = z.enum([
   "METADATA_INVALID",
   "METADATA_WARNING",
   "NO_EXTENSION_DIR",
+  "DUPLICATE_ID",
 ]);
 export type ExtensionProblemCode = z.infer<typeof ExtensionProblemCode>;
 
