@@ -224,13 +224,14 @@ export type CommandFeedback =
       message: string;
     }
   | {
-      action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "player";
+      action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "kick" | "player";
       ok: false;
       /**
        * The player the failure names (1.12.2 `Could not op %s` …), or null when the message names
        * nobody (26.3 `Nothing changed. The player is already an operator`, `No player was found`, …).
        * A target-less failure cannot be attributed to one command: callers must only accept it when
-       * no other command can be answering on that console at the same time.
+       * no other command can be answering on that console at the same time, and never in preference
+       * to a later line that names the target (a batch of commands may print both).
        */
       target: string | null;
       message: string;
@@ -284,10 +285,18 @@ const FEEDBACK: Rule[] = [
   [/^(?:Nothing changed\. That IP isn't banned|Invalid IP address|You have entered an invalid IP address)$/, fail("pardon-ip")],
   [/^Kicked (\S+): (.*)$/, (m) => ok("kick", m[1]!, m[2]!)],
   [/^Kicked (\S+) from the game(?:: '(.*)')?$/, (m) => ok("kick", m[1]!, m[2] ?? null)],
+  // 26.3 `commands.kick.owner.failed` / `.singleplayer.failed` (integrated server only; target-less).
+  [/^(?:Cannot kick the server owner in a LAN game|Cannot kick in an offline singleplayer game)$/, fail("kick")],
   [/^(?:That player does not exist|No player was found)$/, fail("player")],
 ];
 
 /**
+ * Only feedback of commands typed into the server console is logged as such. A command a player
+ * (or an RCON client) runs is answered to that source only; on success the server additionally
+ * logs the op broadcast `chat.type.admin` "[%s: %s]" (e.g. `[Steve: Made Alex a server operator]`,
+ * 26.3: `System chat: [Steve: …]`), which does not match any rule here, and failures of such
+ * commands are not logged at all. Console feedback therefore always comes from a console command.
+ *
  * Interprets one console line printed in response to a player command; null if unrelated, not
  * attributable to the server (see `commandFeedbackMessage`), or when the captured target is not a
  * valid player name / IPv4 address (e.g. a forged `Made @a a server operator`).

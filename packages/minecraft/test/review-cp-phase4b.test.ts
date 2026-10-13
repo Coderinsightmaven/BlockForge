@@ -17,6 +17,24 @@ const legacy = Object.fromEntries(
 const fmt = (s: string, ...args: string[]) => args.reduce((acc, a) => acc.replace("%s", a), s);
 const info = (msg: string) => `[19:30:01 INFO]: ${msg}`;
 
+describe("#4 round 2: kick refusals and in-game command output", () => {
+  it("26.3 kick refusals are target-less kick failures", () => {
+    for (const key of ["commands.kick.owner.failed", "commands.kick.singleplayer.failed"]) {
+      expect(parseCommandFeedback(info(lang[key]!))).toEqual({ action: "kick", ok: false, target: null, message: lang[key] });
+    }
+  });
+
+  it("the op broadcast of a command a player or RCON client ran (chat.type.admin `[%s: %s]`) is not feedback", () => {
+    for (const line of [
+      "[19:35:40] [Server thread/INFO]: System chat: [Steve: Made Alex a server operator]",
+      "[19:35:40 INFO]: System chat: [Rcon: Made Alex a server operator]",
+      "[12:00:00 INFO]: [Steve: Opped Alex]",
+      `[12:00:00 INFO]: [Steve: ${lang["commands.op.failed"]}]`,
+      "[12:00:00 INFO]: [Steve: No player was found]",
+    ]) expect(parseCommandFeedback(line), line).toBeNull();
+  });
+});
+
 describe("#4 command feedback failures carry their target", () => {
   it("1.12.2 failures name the player; 26.3 failures and argument errors name nobody", () => {
     const named: Array<[string, string]> = [
@@ -63,7 +81,17 @@ describe("#8 Retry-After parsing", () => {
     expect(parseRetryAfter("Mon, 12 Oct 2026 12:02:30 GMT", now)).toBe(150_000);
     expect(parseRetryAfter("Mon, 12 Oct 2026 11:00:00 GMT", now)).toBe(1_000); // in the past
     expect(parseRetryAfter("Tue, 12 Oct 2027 12:00:00 GMT", now)).toBe(15 * 60_000);
-    for (const bad of [null, undefined, "", "-5", "1.5", "soon", "12 Oct 2026", "Mon, 99 Foo 2026 12:00:00 GMT", "1e3"]) expect(parseRetryAfter(bad, now), String(bad)).toBeNull();
+    for (const bad of [null, undefined, "", "-5", "soon", "12 Oct 2026", "Mon, 99 Foo 2026 12:00:00 GMT", "1e3", ".5", "Mon, 31 Feb 2026 12:00:00 GMT"]) expect(parseRetryAfter(bad, now), String(bad)).toBeNull();
+  });
+
+  it("round 2: decimal seconds round up; RFC 850 and asctime dates are UTC", () => {
+    expect(parseRetryAfter("1.5", now)).toBe(2_000);
+    expect(parseRetryAfter("0.2", now)).toBe(1_000);
+    expect(parseRetryAfter("Monday, 12-Oct-26 12:02:00 GMT", now)).toBe(120_000);
+    // asctime has no zone and means UTC (Date.parse would read it as local time).
+    expect(parseRetryAfter("Mon Oct 12 12:03:00 2026", now)).toBe(180_000);
+    expect(parseRetryAfter("Mon Oct  5 12:00:00 2026", now)).toBe(1_000); // single-digit day, in the past
+    expect(parseRetryAfter("Mon Oct 12 12:03:00 2026 GMT", now)).toBeNull();
   });
 });
 
@@ -120,6 +148,51 @@ describe("#8 Mojang 429 honours Retry-After; one shared limiter", () => {
     expect(await lookupMojangProfile(b, "Notch", { limiter })).toMatchObject({ name: "Notch", source: "mojang" });
     expect(c.slept).toEqual([1_500]);
     expect(up.calls).toHaveLength(2);
+  });
+
+  it("round 2: a Retry-After recorded while a caller sleeps extends its wait; rateLimited returns the effective block", async () => {
+    const { c, opts } = clock();
+    const t0 = c.now;
+    let first = true;
+    const limiter: MojangRateLimiter = new MojangRateLimiter({
+      ...opts,
+      maxWaitMs: 5_000,
+      sleep: async (ms) => {
+        if (first) {
+          first = false;
+          c.now += 1_000;
+          // Another caller's response: 429 with Retry-After 4 s, recorded mid-sleep.
+          expect(limiter.rateLimited("4")).toBe(4_000);
+          c.now += ms - 1_000;
+        } else c.now += ms;
+        c.slept.push(ms);
+      },
+    });
+    expect(limiter.rateLimited("2")).toBe(2_000);
+    expect(limiter.rateLimited("1")).toBe(2_000); // the longer block stays
+    await limiter.acquire("u");
+    expect(c.slept).toEqual([2_000, 3_000]);
+    expect(c.now).toBe(t0 + 5_000);
+    expect(limiter.blockedForMs).toBe(0);
+  });
+
+  it("round 2: a window sleep that ends early is re-checked before the permit is taken", async () => {
+    const { c } = clock();
+    let calls = 0;
+    const limiter = new MojangRateLimiter({
+      now: () => c.now,
+      maxRequests: 1,
+      windowMs: 1_000,
+      sleep: async (ms) => {
+        c.slept.push(ms);
+        c.now += calls++ === 0 ? ms / 2 : ms; // the first wake-up comes too early
+      },
+    });
+    await limiter.acquire("u");
+    const t1 = c.now;
+    await limiter.acquire("u");
+    expect(c.slept).toEqual([1_000, 500]);
+    expect(c.now).toBe(t1 + 1_000);
   });
 
   it("serialises callers in a sliding window and never refuses while quota remains; cache hits take no permit", async () => {

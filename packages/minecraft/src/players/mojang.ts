@@ -22,9 +22,39 @@ export const MOJANG_DEFAULT_RETRY_AFTER_MS = 60_000;
 /** Longest back-off a `Retry-After` may impose (larger values are clamped). */
 export const MOJANG_MAX_RETRY_AFTER_MS = 15 * 60_000;
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const IMF_FIXDATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\d{2}) ([A-Z][a-z]{2}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$/;
+const RFC850_DATE = /^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\d{2})-([A-Z][a-z]{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT$/;
+const ASCTIME_DATE = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) ([ \d]\d) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/;
+
 /**
- * Parses a `Retry-After` header (RFC 9110: delay-seconds or an HTTP-date) into milliseconds from
- * `nowMs`, clamped to `[1 s, maxMs]`. Absent or malformed values → null (callers fall back to
+ * An RFC 9110 HTTP-date (IMF-fixdate, obsolete RFC 850 or asctime form, all UTC) as epoch ms, or
+ * null. Parsed by hand: `Date.parse` reads the asctime form as local time. A two-digit RFC 850
+ * year more than 50 years in the future means the previous century (RFC 9110 §5.6.7).
+ */
+export function parseHttpDate(value: string, nowMs: number): number | null {
+  let day: string, mon: string, year: number, hh: string, mm: string, ss: string;
+  let m = IMF_FIXDATE.exec(value);
+  if (m) [day, mon, year, hh, mm, ss] = [m[1]!, m[2]!, Number(m[3]), m[4]!, m[5]!, m[6]!];
+  else if ((m = RFC850_DATE.exec(value))) {
+    [day, mon, hh, mm, ss] = [m[1]!, m[2]!, m[4]!, m[5]!, m[6]!];
+    const thisYear = new Date(nowMs).getUTCFullYear();
+    year = 2000 + Number(m[3]);
+    while (year > thisYear + 50) year -= 100;
+  } else if ((m = ASCTIME_DATE.exec(value))) [mon, day, hh, mm, ss, year] = [m[1]!, m[2]!.trim(), m[3]!, m[4]!, m[5]!, Number(m[6])];
+  else return null;
+  const month = MONTHS.indexOf(mon);
+  const [d, h, mi, s] = [Number(day), Number(hh), Number(mm), Number(ss)];
+  if (month < 0 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 60) return null;
+  const at = Date.UTC(year, month, d, h, mi, Math.min(s, 59));
+  // Reject dates that roll over (31 Feb → 3 Mar).
+  return new Date(at).getUTCDate() === d ? at : null;
+}
+
+/**
+ * Parses a `Retry-After` header (RFC 9110 §10.2.3: delay-seconds or an HTTP-date) into milliseconds
+ * from `nowMs`, clamped to `[1 s, maxMs]`. Non-negative decimal seconds are accepted leniently and
+ * rounded up to whole seconds. Absent or malformed values → null (callers fall back to
  * `MOJANG_DEFAULT_RETRY_AFTER_MS`); a date in the past → 1 s.
  */
 export function parseRetryAfter(value: string | null | undefined, nowMs: number, maxMs = MOJANG_MAX_RETRY_AFTER_MS): number | null {
@@ -32,12 +62,10 @@ export function parseRetryAfter(value: string | null | undefined, nowMs: number,
   const v = value.trim();
   if (v === "") return null;
   let ms: number;
-  if (/^\d{1,10}$/.test(v)) ms = Number(v) * 1000;
+  if (/^\d{1,10}(?:\.\d{1,9})?$/.test(v)) ms = Math.ceil(Number(v)) * 1000;
   else {
-    // HTTP-date: IMF-fixdate ("Sun, 06 Nov 1994 08:49:37 GMT") or the obsolete RFC 850 form, both GMT.
-    if (!/^[A-Za-z]{3,9}, .* GMT$/.test(v)) return null;
-    const at = Date.parse(v);
-    if (!Number.isFinite(at)) return null;
+    const at = parseHttpDate(v, nowMs);
+    if (at === null) return null;
     ms = at - nowMs;
   }
   return Math.min(Math.max(ms, 1000), maxMs);
@@ -101,21 +129,26 @@ export class MojangRateLimiter {
     this.gate = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-      const blocked = this.blockedUntil - this.now();
-      if (blocked > 0) {
-        if (blocked > this.maxWaitMs) throw new CatalogError("RATE_LIMITED", "Mojang profile API rate limit reached", { url, status: 429, retryAfterMs: blocked });
-        await this.sleep(blocked);
-      }
-      let t = this.now();
-      this.prune(t);
-      if (this.sent.length >= this.maxRequests) {
-        const wait = this.sent[0]! + this.windowMs - t;
-        if (wait > this.maxWaitMs) throw new CatalogError("RATE_LIMITED", "Mojang profile API request budget used up", { url, retryAfterMs: wait });
-        await this.sleep(wait);
-        t = this.now();
+      // Re-check after every sleep: a 429 recorded meanwhile (another caller's response, `rateLimited`)
+      // extends the block, and the window may not have advanced as far as planned.
+      for (;;) {
+        const t = this.now();
+        const blocked = this.blockedUntil - t;
+        if (blocked > 0) {
+          if (blocked > this.maxWaitMs) throw new CatalogError("RATE_LIMITED", "Mojang profile API rate limit reached", { url, status: 429, retryAfterMs: blocked });
+          await this.sleep(blocked);
+          continue;
+        }
         this.prune(t);
+        if (this.sent.length >= this.maxRequests) {
+          const wait = this.sent[0]! + this.windowMs - t;
+          if (wait > this.maxWaitMs) throw new CatalogError("RATE_LIMITED", "Mojang profile API request budget used up", { url, retryAfterMs: wait });
+          await this.sleep(wait);
+          continue;
+        }
+        this.sent.push(t);
+        return;
       }
-      this.sent.push(t);
     } finally {
       release();
     }
@@ -123,13 +156,14 @@ export class MojangRateLimiter {
 
   /**
    * Records a 429: no request is sent until `Retry-After` (seconds or HTTP-date, clamped to
-   * `maxRetryAfterMs`; 60 s when absent or invalid) has passed. Returns the back-off in ms.
+   * `maxRetryAfterMs`; 60 s when absent or invalid) has passed. Returns the effective remaining
+   * block in ms (an earlier, longer block is kept).
    */
   rateLimited(retryAfter: string | null): number {
     const now = this.now();
     const ms = parseRetryAfter(retryAfter, now, this.maxRetryAfterMs) ?? MOJANG_DEFAULT_RETRY_AFTER_MS;
     this.blockedUntil = Math.max(this.blockedUntil, now + ms);
-    return ms;
+    return this.blockedUntil - now;
   }
 }
 
