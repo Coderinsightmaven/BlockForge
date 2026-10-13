@@ -16,7 +16,7 @@ import { extensionScans, installedExtensions, servers } from "../db/schema/index
 import { withTransaction } from "../db/tx.js";
 import type { JobLogLevel } from "../jobs/types.js";
 import { JobError } from "../jobs/types.js";
-import { agentOpts, ensureScanRow, jobAgentError, missingCapabilities, scanStatusOf, targetOf, type ExtensionDeps, type ExtensionRow, type SendOpts } from "./model.js";
+import { agentOpts, ensureScanRow, withDuplicatePeers, jobAgentError, missingCapabilities, scanStatusOf, targetOf, type ExtensionDeps, type ExtensionRow, type SendOpts } from "./model.js";
 
 const HASH_BATCH = 512;
 const READ_BATCH = 256;
@@ -181,33 +181,41 @@ export async function runScan(d: ExtensionDeps, serverId: string, o: ScanOptions
 
   const changedIds = new Set<string>();
   const keptIds = new Set<string>();
+  const hashFailures: string[] = [];
   await withTransaction(d.db, async (tx) => {
     for (const f of selected.files) {
       const row = byPath.get(f.path) ?? renamedFrom.get(f.path);
       const h = hashes.get(f.path);
-      const hashOk = h && !("error" in h) ? h : null;
+      const hashOk = h && !("error" in h) && h.sha512 ? h : null;
       const isChanged = changedPaths.includes(f.path);
+      // A changed file that could not be hashed (vanished meanwhile, unreadable, budget): an existing row keeps
+      // everything it knew — digest, metadata, provenance and the old size/mtime, so the next scan retries it.
+      const hashFailed = isChanged && !hashOk && !!row;
       const set: Partial<typeof installedExtensions.$inferInsert> = {
         path: f.path,
         filename: f.name,
         enabled: f.enabled,
-        sizeBytes: hashOk?.sizeBytes ?? f.sizeBytes,
-        mtime: new Date(hashOk?.mtime ?? listedMtime.get(f.path) ?? now.getTime()),
         lastSeenAt: now,
       };
-      if (isChanged) {
+      if (!hashFailed) {
+        set.sizeBytes = hashOk?.sizeBytes ?? f.sizeBytes;
+        set.mtime = new Date(hashOk?.mtime ?? listedMtime.get(f.path) ?? now.getTime());
+      }
+      if (isChanged && !hashFailed) {
         set.sha512 = hashOk?.sha512 ?? null;
         set.sha1 = hashOk?.sha1 ?? null;
         const info = jars.get(f.path);
         set.metadata = info?.metadata ?? [];
         set.compatibility = info?.compatibility ?? null;
       }
+      if (hashFailed) hashFailures.push(f.path);
       // `source` is provenance (contracts `ExtensionSource`): a scan never labels a file `modrinth`/`upload`. A
       // file found on disk stays `unknown` even when a SHA-512 lookup identifies it (that goes into `modrinth`),
       // and a BlockForge-installed/uploaded file whose content changed outside BlockForge (file manager, SFTP,
-      // a plugin's own updater) becomes `unknown` with no install facts. Install/update/rollback jobs stamp
-      // their files after the rescan (`stampInstalled`, rollback's rescan step).
-      const contentChanged = !!row && isChanged && set.sha512 !== row.sha512;
+      // a plugin's own updater) becomes `unknown` with no install facts — only when a successful hash differs
+      // from the stored digest. Install/update/rollback jobs stamp their files after the rescan
+      // (`stampInstalled`, rollback's rescan step).
+      const contentChanged = !!row && isChanged && !!hashOk && hashOk.sha512 !== row.sha512;
       if (contentChanged && row.source !== "unknown") {
         set.source = "unknown";
         set.installedAt = null;
@@ -267,7 +275,12 @@ export async function runScan(d: ExtensionDeps, serverId: string, o: ScanOptions
       })
       .where(eq(extensionScans.serverId, serverId));
   });
-  const ids = [...changedIds];
+  if (hashFailures.length) await o.log?.("warn", `Could not hash ${hashFailures.length} changed file(s); they keep their previous state and are retried on the next scan`);
+  if (changedIds.size === 0) return [];
+  // Jars sharing a plugin name / mod id with a changed one (before or after) may gain or lose DUPLICATE_ID.
+  const after = await d.db.select().from(installedExtensions).where(eq(installedExtensions.serverId, serverId));
+  const touched = [...existing, ...after].filter((r) => changedIds.has(r.id));
+  const ids = withDuplicatePeers([...changedIds], touched, after);
   return ids.length > 256 ? null : ids;
 }
 

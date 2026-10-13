@@ -17,6 +17,7 @@ import {
   checkModrinthUpdates,
   EXTENSION_METADATA_ENTRIES,
   fromContractPlanRequest,
+  flagDuplicateExtensions,
   fromContractSearchQuery,
   getModrinthProject,
   listCompatibleVersions,
@@ -68,6 +69,7 @@ import {
   snapshotOf,
   targetOf,
   toDtos,
+  withDuplicatePeers,
   UPLOAD_DIR,
   UPLOAD_TTL_MS,
   type ExtensionDeps,
@@ -302,8 +304,9 @@ export class ExtensionsService {
       return u!;
     });
     await this.audit(actor, access, enabled ? "enable" : "disable", { extensionId: r.id, from: r.path, to });
-    void publishExtensions(this.d, access.server.id, [r.id]);
-    return { extension: (await toDtos(this.d.db, [updated], await this.rows(access.server.id)))[0]!, restartRequired: restartRequired(access.server.state) };
+    const all = await this.rows(access.server.id);
+    void publishExtensions(this.d, access.server.id, withDuplicatePeers([r.id], [r, updated], all));
+    return { extension: (await toDtos(this.d.db, [updated], all))[0]!, restartRequired: restartRequired(access.server.state) };
   }
 
   async remove(access: ServerAccess, id: string, actor: AuditActor): Promise<{ restartRequired: boolean; historyEntryId: string; rollbackAvailable: boolean }> {
@@ -342,7 +345,7 @@ export class ExtensionsService {
     });
     const from = snapshotOf(r);
     await this.audit(actor, access, "remove", { extensionId: r.id, path: r.path, kept: kept !== null });
-    void publishExtensions(this.d, access.server.id, [r.id]);
+    void publishExtensions(this.d, access.server.id, withDuplicatePeers([r.id], [r], await this.rows(access.server.id)));
     return { restartRequired: restartRequired(access.server.state), historyEntryId: historyId, rollbackAvailable: refetchable(from) || (kept !== null && !!kept.sha512) };
   }
 
@@ -658,11 +661,9 @@ export class ExtensionsService {
     if (!(await held())) return failUpload("preempted", "The upload was interrupted by a stop/restart/kill of the server", null);
     if (!info.compatibility.loadable) warnings.push({ code: "INCOMPATIBLE_ALLOWED", level: "warning", message: "Installed although the server software cannot load it" });
     if (info.metadata.length === 0) warnings.push({ code: "NO_METADATA", level: "warning", message: "No plugin/mod metadata found in the jar" });
-    const selected = info.compatibility.metadataIndex !== null ? info.metadata[info.compatibility.metadataIndex] : undefined;
-    if (selected) {
-      const dup = rows.find((r) => r.path !== dest && r.metadata.some((m) => m.id.toLowerCase() === selected.id.toLowerCase() && m.format === selected.format));
-      if (dup) warnings.push({ code: "DUPLICATE_ID", level: "warning", message: `${dup.path} declares the same ${t.kind === "plugin" ? "plugin name" : "mod id"} (${selected.id}); the server loads only one of them` });
-    }
+    // Same rule as the listed DUPLICATE_ID problem (enabled, loadable copies; case-insensitive names).
+    const dupes = flagDuplicateExtensions([...rows.filter((r) => r.path !== dest), { path: dest, enabled: true, metadata: info.metadata, compatibility: info.compatibility }]).get(dest);
+    for (const p of dupes?.problems.filter((x) => x.code === "DUPLICATE_ID") ?? []) warnings.push({ code: "DUPLICATE_ID", level: "warning", message: p.message });
     const now = new Date(this.d.clock.now());
     const values = {
       kind: t.kind,
@@ -706,8 +707,9 @@ export class ExtensionsService {
     );
     await this.d.db.update(extensionUploads).set({ completedAt: now, result: { extensionId: row.id, warnings, compatibility: info.compatibility } }).where(eq(extensionUploads.id, u.id));
     await this.audit(actor, access, "upload.complete", { uploadId: u.id, path: dest, extensionId: row.id, sha512: row.sha512, replaced: onDisk, allowIncompatible: req.allowIncompatible, loadable: info.compatibility.loadable });
-    void publishExtensions(this.d, access.server.id, [row.id]);
-    return { extension: (await toDtos(this.d.db, [row], await this.rows(access.server.id)))[0]!, compatibility: info.compatibility, warnings, restartRequired: restartRequired(access.server.state) };
+    const all = await this.rows(access.server.id);
+    void publishExtensions(this.d, access.server.id, withDuplicatePeers([row.id], existingRow ? [existingRow, row] : [row], all));
+    return { extension: (await toDtos(this.d.db, [row], all))[0]!, compatibility: info.compatibility, warnings, restartRequired: restartRequired(access.server.state) };
   }
 
   // --- History and rollback -----------------------------------------------------------------------

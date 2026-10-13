@@ -11,6 +11,7 @@ import {
   FETCH_DIR,
   releaseExtensionLock,
   restartRequired,
+  keptUsable,
   refetchable,
   rollbackOf,
   snapshotOf,
@@ -378,10 +379,15 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           if (!entry) throw new JobError("NOT_FOUND", "the history entry no longer exists");
           const id = stableId(ctx.jobId, "rollback");
           const actor = ctx.input.actor as HistoryActorFields;
-          const fromKeep = !!entry.from && !refetchable(entry.from);
+          // Where `from` comes back from: the keep area whenever a kept file exists (no network; verified against
+          // its digest before it is used) — re-fetched from Modrinth by version id + SHA-512 when there is none or
+          // it no longer matches. Decided once and checkpointed (`rb.mode`).
+          const savedMode = (ctx.state.rb as { mode?: "keep" | "modrinth" } | undefined)?.mode;
+          let fromKeep = !!entry.from && (savedMode ? savedMode === "keep" : !refetchable(entry.from) || keptUsable(entry, d.clock.now()));
           // What ends up on disk: a file re-fetched from Modrinth was installed from Modrinth by BlockForge (`source`
-          // is provenance); a file restored from the keep area keeps its recorded source.
-          const restoredSnap = entry.from ? (fromKeep ? entry.from : { ...entry.from, source: "modrinth" as const }) : null;
+          // is provenance); a file restored from the keep area keeps its recorded source (and the kept digest).
+          const restoredSnapOf = () =>
+            entry.from ? (fromKeep ? { ...entry.from, sha512: entry.keptSha512 ?? entry.from.sha512 } : { ...entry.from, source: "modrinth" as const }) : null;
           const stillHeld = () => d.state.holds(s.id, "extensions", ctx.jobId);
           const store = undoStoreOf(ctx, "rollback");
           const finish = async (p: PendingEntry | null) => {
@@ -389,7 +395,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
             // History, the consumed kept file and step success in one transaction (never applied twice; nothing
             // fallible after it); the progress and undo records are cleared in that same commit.
-            await completeStep(ctx, ["rb", "undo"], { restored: restoredSnap, entryId: id }, async (tx) => {
+            await completeStep(ctx, ["rb", "undo"], { restored: restoredSnapOf(), entryId: id }, async (tx) => {
               if (p) await writeHistory(d, s.id, [p], { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
               if (fromKeep) await tx.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, entry.id));
             });
@@ -409,9 +415,15 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           const rows = await d.db.select().from(installedExtensions).where(eq(installedExtensions.serverId, s.id));
           const current = entry.to ? (rows.find((r) => r.path === entry.to!.path) ?? null) : null;
           // Progress of an interrupted attempt (checkpointed around every file operation).
-          type Progress = { started?: boolean; keep?: KeepRecord; kept?: Kept | null; restored?: boolean };
+          type Progress = { started?: boolean; keep?: KeepRecord; kept?: Kept | null; restored?: boolean; mode?: "keep" | "modrinth" };
           const rb = ((ctx.state.rb as Progress | undefined) ?? {}) as Progress;
           const resumed = rb.started === true;
+          if (!rb.mode && entry.from && fromKeep && refetchable(entry.from)) {
+            // A kept file that changed since it was kept falls back to the Modrinth re-fetch.
+            const sha = await sha512Of(d, c, entry.keptPath!).catch(() => null);
+            if (sha !== entry.keptSha512) fromKeep = false;
+          }
+          if (entry.from) rb.mode = fromKeep ? "keep" : "modrinth";
           rb.started = true;
           ctx.state.rb = rb;
           const pending: PendingEntry = {
@@ -421,7 +433,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             extensionName: entry.extensionName,
             path: entry.from?.path ?? entry.path,
             from: current ? snapshotOf(current) : (entry.to ?? null),
-            to: restoredSnap,
+            to: restoredSnapOf(),
             keptPath: rb.kept?.path ?? null,
             keptSha512: rb.kept?.sha512 ?? null,
           };
@@ -515,11 +527,15 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           await holdsLockForRescan(ctx);
           const changed = await rescan(d, ctx, ctx.input.serverId);
           const restored = ctx.state.restored as { source: string; path: string; projectId: string | null; versionId: string | null; versionNumber: string | null; sha512: string | null } | null;
-          if (restored) {
+          if (restored?.sha512) {
+            // Only the row that holds exactly the restored bytes (same predicate as `stampInstalled`). `installed_at`
+            // keeps meaning "BlockForge placed it from Modrinth / an upload": an `unknown` file restored from the keep
+            // area gets none.
+            const placed = restored.source !== "unknown";
             const [row] = await d.db
               .update(installedExtensions)
-              .set({ source: restored.source, installedAt: new Date(d.clock.now()), installedBy: ctx.input.userId })
-              .where(and(eq(installedExtensions.serverId, ctx.input.serverId), eq(installedExtensions.path, restored.path)))
+              .set({ source: restored.source, installedAt: placed ? new Date(d.clock.now()) : null, installedBy: placed ? ctx.input.userId : null })
+              .where(and(eq(installedExtensions.serverId, ctx.input.serverId), eq(installedExtensions.path, restored.path), eq(installedExtensions.sha512, restored.sha512)))
               .returning({ id: installedExtensions.id });
             if (row) await d.db.update(extensionHistory).set({ extensionId: row.id }).where(inArray(extensionHistory.id, [ctx.state.entryId as string]));
           }

@@ -119,6 +119,8 @@ describe("Phase 4b review: kept files, rollback targets and recovery", () => {
     expect((await waitJob(owner, apply.json().jobId)).status).toBe("succeeded");
     const upd = (await history(owner, id)).items[0]!;
     expect(upd).toMatchObject({ action: "update", from: { path: "plugins/AlphaLib-1.0.0.jar" } });
+    // The kept v1 would be preferred (no download): without it the rollback re-fetches from Modrinth.
+    node.sim.files(id).delete(`.blockforge/extensions/kept/${upd.id}.jar`);
 
     // Something unrelated now has the old name.
     node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", "UNRELATED");
