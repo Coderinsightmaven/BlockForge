@@ -5,7 +5,7 @@ import { createUserClient, startWithOwner, type ApiClient, type TestApp } from "
 import { testPool } from "../support/db.js";
 import type { FakeAgent } from "../support/fake-agent.js";
 import { FakeUpstreams } from "../support/modrinth.js";
-import { catalogOptions, connectSimNode, paperRequest, publicLookup, templateIdByKey, waitJob, type SimNodeHandle } from "../support/panel.js";
+import { catalogOptions, connectSimNode, paperRequest, poll, publicLookup, templateIdByKey, waitJob, type SimNodeHandle } from "../support/panel.js";
 import { UiSocket } from "../support/realtime-client.js";
 
 /**
@@ -32,7 +32,7 @@ const FEEDBACK_TIMEOUT_MS = 1000;
 const LINGER_MS = 400;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function boot() {
+async function boot(opts: { lingerMs?: number; feedbackTimeoutMs?: number } = {}) {
   const up = new FakeUpstreams();
   const cat = catalogOptions();
   // Limiter clock: fixed unless a limiter sleeps (deterministic Retry-After windows).
@@ -43,7 +43,7 @@ async function boot() {
     env: { SCHEDULER_INTERVAL_MS: "300000" },
     serverJobs: { readyTimeoutMs: 10_000, slpWaitMs: 0 },
     upstream: { fetchImpl: up.fetch, lookup: publicLookup, limiter: { now: () => clock.now, sleep: async (ms) => void ((clock.now += ms), clock.slept.push(ms)) } },
-    players: { feedbackTimeoutMs: FEEDBACK_TIMEOUT_MS, commandLingerMs: LINGER_MS },
+    players: { feedbackTimeoutMs: opts.feedbackTimeoutMs ?? FEEDBACK_TIMEOUT_MS, commandLingerMs: opts.lingerMs ?? LINGER_MS },
   });
   t = r.t;
   const node = await connectSimNode(r.t, r.owner, { agents });
@@ -160,23 +160,23 @@ describe("#4 round 2: target-less lines never end the wait; decided at the end o
     expect(feedback(await act(owner, id, { action: "kick", name: "Owner" }))).toEqual({ ok: false, message: "Cannot kick the server owner in a LAN game" });
   });
 
-  it("a foreign command sent while we wait (after our target-less line) → 504; so does a second feedback line", async () => {
+  it("a foreign console command overlapping the wait → 504 (target-less failure and whitelist toggle)", async () => {
+    // Long linger: the foreign command is certainly still "possibly answering" when ours is sent, however
+    // slow the runner (contention at any time during the wait is unit-tested in console-tracker.test.ts).
+    const { owner, node } = await boot({ lingerMs: 60_000 });
+    const id = await paperServer(owner, node);
+    node.sim.options = { consoleReplies: { "op Notch": [info(ALREADY)], "whitelist on": [info("Whitelist is now turned on")] } };
+    expect((await owner.post(`/servers/${id}/console`, { command: "say hi" })).statusCode).toBe(204);
+    noFeedback(await act(owner, id, { action: "op", name: "Notch" }));
+    noFeedback(await act(owner, id, { action: "whitelist-set", enabled: true }));
+  });
+
+  it("another command's named answer in the window makes a target-less line nobody's; an uncontended toggle is accepted", async () => {
     const { owner, node } = await boot();
     const id = await paperServer(owner, node);
-    node.sim.options = { consoleReplies: { "op Notch": [info(ALREADY)], "op Alex": [info(ALREADY), info("Made Carl a server operator")], "whitelist on": [info("Whitelist is now turned on")] } };
-    const pending = act(owner, id, { action: "op", name: "Notch" });
-    await sleep(FEEDBACK_TIMEOUT_MS / 2);
-    expect((await owner.post(`/servers/${id}/console`, { command: "say hi" })).statusCode).toBe(204);
-    noFeedback(await pending);
-    await sleep(LINGER_MS + 100);
-    // Another command's named answer in the window: the target-less line is nobody's.
+    node.sim.options = { consoleReplies: { "op Alex": [info(ALREADY), info("Made Carl a server operator")], "whitelist on": [info("Whitelist is now turned on")] } };
     noFeedback(await act(owner, id, { action: "op", name: "Alex" }));
-    // Whitelist toggles are target-less by nature: the same rule.
-    const toggle = act(owner, id, { action: "whitelist-set", enabled: true });
-    await sleep(FEEDBACK_TIMEOUT_MS / 2);
-    expect((await owner.post(`/servers/${id}/console`, { command: "say hi" })).statusCode).toBe(204);
-    noFeedback(await toggle);
-    await sleep(LINGER_MS + 100);
+    await sleep(LINGER_MS + 100); // our own unconfirmed op Alex lingers
     expect(feedback(await act(owner, id, { action: "whitelist-set", enabled: true }))).toEqual({ ok: true, message: "Whitelist is now turned on" });
   });
 
@@ -197,6 +197,57 @@ describe("#4 round 2: target-less lines never end the wait; decided at the end o
     const id = await paperServer(owner, node);
     node.sim.options = { consoleReplies: { "op Steve": [info("System chat: [Alex: Made Steve a server operator]"), info("[Alex: Nothing changed. The player is already an operator]")] } };
     noFeedback(await act(owner, id, { action: "op", name: "Steve" }));
+  });
+});
+
+describe("#4 round 3: a named line is not attributed when the same command overlapped", () => {
+  const MADE = info("Made Steve a server operator");
+  const sent = (node: SimNodeHandle, id: string, line: string, n: number) => poll(async () => node.sim.consoleLines.filter((l) => l.workloadId === id && l.line === line).length >= n);
+  const opAudits = async () => (await testPool().query("SELECT count(*)::int AS n FROM audit_events WHERE action = 'server.players.op'")).rows[0].n as number;
+
+  it("two overlapping `op Steve` and one success line → neither is confident (504, nothing audited)", async () => {
+    const { owner, node } = await boot({ feedbackTimeoutMs: 3_000, lingerMs: 60_000 });
+    const id = await paperServer(owner, node);
+    const a = act(owner, id, { action: "op", name: "Steve" });
+    const b = act(owner, id, { action: "op", name: "Steve" });
+    await sent(node, id, "op Steve", 2);
+    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: MADE }]);
+    noFeedback(await a);
+    noFeedback(await b);
+    expect(await opAudits()).toBe(0);
+  });
+
+  it("a console `op Steve` during ours → 504", async () => {
+    const { owner, node } = await boot({ feedbackTimeoutMs: 3_000, lingerMs: 60_000 });
+    const id = await paperServer(owner, node);
+    const ours = act(owner, id, { action: "op", name: "Steve" });
+    await sent(node, id, "op Steve", 1);
+    expect((await owner.post(`/servers/${id}/console`, { command: "op Steve" })).statusCode).toBe(204);
+    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: MADE }]);
+    noFeedback(await ours);
+    expect(await opAudits()).toBe(0);
+  });
+
+  it("a retry while the previous timed-out `op Steve` lingers → 504 when the late line arrives", async () => {
+    const { owner, node } = await boot({ feedbackTimeoutMs: 1_500, lingerMs: 60_000 });
+    const id = await paperServer(owner, node);
+    noFeedback(await act(owner, id, { action: "op", name: "Steve" })); // no answer within the window
+    const retry = act(owner, id, { action: "op", name: "Steve" });
+    await sent(node, id, "op Steve", 2);
+    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: MADE }]); // the first one's late answer
+    noFeedback(await retry);
+  });
+
+  it("1.12.2: the first line naming the target decides (\"Could not op Steve\" before \"Opped Steve\" → ok:false); op Steve and op Alex together both resolve", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner, node);
+    node.sim.options = {
+      consoleReplies: { "op Steve": [info("Could not op Steve"), info("Opped Steve")], "op Alex": [info("Opped Alex")] },
+      consoleReplyDelayMs: 200,
+    };
+    const [steve, alex] = await Promise.all([act(owner, id, { action: "op", name: "Steve" }), act(owner, id, { action: "op", name: "Alex" })]);
+    expect(feedback(steve)).toEqual({ ok: false, message: "Could not op Steve" });
+    expect(feedback(alex)).toEqual({ ok: true, message: "Opped Alex" });
   });
 });
 

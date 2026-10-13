@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isSaveConfirmation, isSaveFailure } from "@blockforge/minecraft";
+import { isSaveConfirmation, isSaveFailure, isSaveProgress, parsePlayerCommand } from "@blockforge/minecraft";
 import type { ConsoleBuffers, ConsoleLine } from "../agents/console-buffer.js";
 import type { AgentGateway } from "../agents/gateway.js";
 
@@ -13,11 +13,14 @@ export const DEFAULT_COMMAND_LINGER_MS = 60_000;
 /**
  * A `save-all` (backups, schedules, console) blocks the server thread until the world is written;
  * commands queued behind it answer afterwards. It counts as possibly answering until the server
- * reports the save finished ("Saved the game"/"Saved the world", or a save failure) plus the linger
- * time, and at most this long when no such line comes.
+ * reports that save finished plus the linger time, and at most this long when no such line comes.
+ * As in `createSaveTracker`, a confirmation ("Saved the game"/"Saved the world") counts only after a
+ * progress line ("Saving the game …") seen after that `save-all` was sent; progress lines and
+ * confirmations are matched to pending saves oldest first, one each. A save failure ends the oldest
+ * pending save at any time.
  */
 export const SAVE_HOLD_MAX_MS = 15 * 60_000;
-/** Upper bound of tracked commands per server (beyond it the oldest settled ones are dropped). */
+/** Upper bound of tracked commands per server (beyond it the oldest expirable ones are dropped; held ones never). */
 const MAX_ENTRIES_PER_SERVER = 1_000;
 
 interface Entry {
@@ -29,9 +32,23 @@ interface Entry {
   until: number | null;
   /** `save-all` held until the save finished; never beyond this time. */
   saveDeadline?: number;
+  /** The pending `save-all` has seen its progress line. */
+  saveProgress?: boolean;
   /** Own commands: another non-quiet command was possibly answering at some point while this one waited. */
   contended: boolean;
+  /** `action:target` of a recognised player command (`parsePlayerCommand`), else null. */
+  key: string | null;
+  /**
+   * Own commands: another command with the same `key` was possibly answering at some point while this
+   * one waited, so even a feedback line naming our target may be the other command's.
+   */
+  ambiguous: boolean;
 }
+
+const keyOf = (line: string): string | null => {
+  const c = parsePlayerCommand(line);
+  return c ? `${c.action}:${c.target}` : null;
+};
 
 /**
  * Commands that may currently be answering on each server console. Every `workload.console` send
@@ -56,17 +73,26 @@ export class ConsoleCommandTracker {
       if (this.own.has(commandId)) return;
       const t = this.now();
       const save = /^save-all(?:\s|$)/i.test(line.trim());
-      this.insert(serverId, commandId, save ? { quiet: false, own: false, until: null, saveDeadline: t + SAVE_HOLD_MAX_MS, contended: false } : { quiet: false, own: false, until: t + this.lingerMs, contended: false });
+      const base = { quiet: false, own: false, contended: false, key: keyOf(line), ambiguous: false };
+      this.insert(serverId, commandId, save ? { ...base, until: null, saveDeadline: t + SAVE_HOLD_MAX_MS, saveProgress: false } : { ...base, until: t + this.lingerMs });
     });
     gateway.on("consoleLines", (serverId, lines) => {
       const m = this.servers.get(serverId);
-      if (!m || !lines.some((l) => l.stream !== "system" && (isSaveConfirmation(l.line) || isSaveFailure(l.line)))) return;
-      const until = this.now() + this.lingerMs;
-      for (const e of m.values()) {
-        if (e.saveDeadline !== undefined) {
-          delete e.saveDeadline;
-          e.until = until;
-        }
+      if (!m) return;
+      const pending = () => [...m.values()].filter((e) => e.saveDeadline !== undefined);
+      const release = (e: Entry | undefined) => {
+        if (!e) return;
+        delete e.saveDeadline;
+        delete e.saveProgress;
+        e.until = this.now() + this.lingerMs;
+      };
+      for (const l of lines) {
+        if (l.stream === "system") continue;
+        if (isSaveFailure(l.line)) release(pending()[0]);
+        else if (isSaveProgress(l.line)) {
+          const e = pending().find((x) => !x.saveProgress);
+          if (e) e.saveProgress = true;
+        } else if (isSaveConfirmation(l.line)) release(pending().find((x) => x.saveProgress));
       }
     });
   }
@@ -99,22 +125,37 @@ export class ConsoleCommandTracker {
       for (const e of m.values()) {
         if (e.own && e.until === null) e.contended = true;
         if (!e.quiet) entry.contended = true;
+        // The same player command (same action and target) prints the very same feedback line.
+        if (entry.key !== null && e.key === entry.key) {
+          if (e.own && e.until === null) e.ambiguous = true;
+          entry.ambiguous = true;
+        }
       }
     }
     m.set(commandId, entry);
     if (m.size > MAX_ENTRIES_PER_SERVER) {
-      // Drop the oldest entries that nobody waits on (Map keeps insertion order); waiting own commands stay.
+      // Drop the oldest expirable entries (Map keeps insertion order); waiting own commands and
+      // pending save-alls are never dropped.
       for (const [id, e] of m) {
         if (m.size <= MAX_ENTRIES_PER_SERVER) break;
-        if (!(e.own && e.until === null)) m.delete(id);
+        if (e.until !== null && e.saveDeadline === undefined) m.delete(id);
       }
     }
   }
 
   /** Registers one of our commands before it is sent. */
-  begin(serverId: string, commandId: string, quiet: boolean): void {
+  begin(serverId: string, commandId: string, quiet: boolean, line: string): void {
     this.own.add(commandId);
-    this.insert(serverId, commandId, { quiet, own: true, until: null, contended: false });
+    this.insert(serverId, commandId, { quiet, own: true, until: null, contended: false, key: quiet ? null : keyOf(line), ambiguous: false });
+  }
+
+  /**
+   * True when another command with the same action and target (own — including an earlier one still
+   * lingering after its timeout — or another sender's) was possibly answering at some time since
+   * `commandId` was registered: a feedback line naming the target cannot be attributed. Unknown → true.
+   */
+  ambiguous(serverId: string, commandId: string): boolean {
+    return this.servers.get(serverId)?.get(commandId)?.ambiguous ?? true;
   }
 
   /** Our command finished: `answered` drops it; otherwise it may still answer for `lingerMs`. */
@@ -156,8 +197,9 @@ export interface AwaitOptions<T> {
 /**
  * Types `line` into a running server's console and collects the server's output that follows (by
  * console sequence number, never by timestamp: agent and control-plane clocks differ). `decide`
- * sees every non-system line since the command, in order, each time output arrives, and ends the
- * wait with a non-null value. Otherwise the wait lasts `timeoutMs` and `opts.atDeadline` decides
+ * sees every non-system line since the command, in order, each time output arrives, plus whether a
+ * command with the same action and target overlapped this one (`ConsoleCommandTracker.ambiguous`),
+ * and ends the wait with a non-null value. Otherwise the wait lasts `timeoutMs` and `opts.atDeadline` decides
  * (null when absent). Throws only when the command could not be delivered.
  */
 export async function sendAndAwait<T>(
@@ -165,13 +207,13 @@ export async function sendAndAwait<T>(
   nodeId: string,
   serverId: string,
   line: string,
-  decide: (lines: readonly string[]) => T | null,
+  decide: (lines: readonly string[], ambiguous: boolean) => T | null,
   timeoutMs: number,
   opts: AwaitOptions<T> = {},
 ): Promise<T | null> {
   const commandId = randomUUID();
   // Registered before the cursor is taken: a concurrent command sees this one for every line it could share.
-  d.commands.begin(serverId, commandId, opts.quiet ?? false);
+  d.commands.begin(serverId, commandId, opts.quiet ?? false, line);
   const after = d.consoles.tail(serverId, 1).lines.at(-1)?.seq ?? 0;
   const seen: string[] = [];
   let cursor = after;
@@ -196,7 +238,7 @@ export async function sendAndAwait<T>(
       grew = true;
     }
     if (!grew || settled) return;
-    const v = decide(seen);
+    const v = decide(seen, d.commands.ambiguous(serverId, commandId));
     if (v !== null) finish(v);
   };
   const onLines = (id: string, lines: ConsoleLine[]) => {

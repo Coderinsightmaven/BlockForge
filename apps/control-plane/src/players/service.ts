@@ -319,11 +319,14 @@ export class PlayersService {
     type Feedback = { ok: boolean; message: string };
     const toggle = req.action === "whitelist-set" || req.action === "whitelist-reload";
     const relevant = (fb: CommandFeedback) => fb.action === expected || (fb.action === "player" && !fb.ok && "name" in req);
-    // Decides at once only on a line naming our target (success or 1.12.2 failure) for this action.
-    // Lines about another player, and target-less lines, never end the wait: a batch of commands or
-    // another operator's command may print them before our own named answer.
-    const decide = (lines: readonly string[]): Feedback | null => {
-      if (toggle) return null;
+    // Decides at once only on a line naming our target (success or 1.12.2 failure) for this action, and
+    // only if no other command with the same action and target (another player action, a console
+    // `op Steve`, our own earlier timed-out attempt) overlapped ours: that line could be its answer, so
+    // one line never satisfies two waiters. The first such line decides (1.12.2 "Could not op Steve"
+    // before "Made Steve …" → ok:false). Lines about another player, and target-less lines, never end
+    // the wait: a batch of commands or another operator's command may print them before our answer.
+    const decide = (lines: readonly string[], ambiguous: boolean): Feedback | null => {
+      if (toggle || ambiguous) return null;
       for (const l of lines) {
         const fb = parseCommandFeedback(l);
         if (fb && relevant(fb) && fb.target !== null && fb.target.toLowerCase() === target) return toContractPlayerFeedback(fb);
