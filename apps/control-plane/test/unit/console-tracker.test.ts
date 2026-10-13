@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import type { AgentGateway } from "../../src/agents/gateway.js";
-import { ConsoleCommandTracker, SAVE_HOLD_MAX_MS } from "../../src/players/console.js";
+import { ConsoleBuffers } from "../../src/agents/console-buffer.js";
+import { AgentCommandError, type AgentGateway } from "../../src/agents/gateway.js";
+import { ConsoleCommandTracker, SAVE_HOLD_MAX_MS, sendAndAwait } from "../../src/players/console.js";
 
 /** #4 (control-plane Phase 4b review, rounds 1–2): which console commands may be answering. */
 
@@ -146,6 +147,58 @@ describe("ConsoleCommandTracker", () => {
     s.tracker.end(S, "retry", true);
     s.tracker.begin(S, "later", false, "op Alex");
     expect(s.tracker.ambiguous(S, "later")).toBe(false);
+  });
+
+  it("round 4: wildcard targets (selectors, UUIDs, ban-ip <name>) are ambiguous with every command of the same action", () => {
+    const s = setup();
+    s.tracker.begin(S, "kick", false, "kick Steve");
+    s.tracker.begin(S, "banip", false, "ban-ip 203.0.113.7");
+    s.tracker.begin(S, "op", false, "op Steve");
+    s.foreign("sel", "kick @a[name=Steve]");
+    s.foreign("name", "ban-ip Steve");
+    s.foreign("quoted", 'deop "Steve"');
+    expect([s.tracker.ambiguous(S, "kick"), s.tracker.ambiguous(S, "banip"), s.tracker.ambiguous(S, "op")]).toEqual([true, true, false]);
+    s.foreign("q2", 'op "steve"');
+    expect(s.tracker.ambiguous(S, "op")).toBe(true);
+  });
+
+  it("round 4: the cap keeps lingering player-command entries; minecraft:save-all is held", () => {
+    const s = setup();
+    s.tracker.begin(S, "first", false, "op Steve");
+    s.tracker.end(S, "first", false); // timed out, lingers
+    for (let i = 0; i < 1_200; i++) s.foreign(`f${i}`);
+    s.tracker.begin(S, "retry", false, "op Steve");
+    expect(s.tracker.ambiguous(S, "retry")).toBe(true);
+    s.tracker.end(S, "retry", true);
+    s.clock.now += LINGER;
+    s.foreign("ns", "minecraft:save-all flush");
+    s.clock.now += 10 * LINGER;
+    s.tracker.begin(S, "a", false, "list");
+    expect(s.tracker.contended(S, "a")).toBe(true);
+    s.tracker.end(S, "a", true);
+    s.output("[12:00:00 INFO]: Saving the game (this may take a moment!)");
+    s.output("[12:00:00 INFO]: Saved the game");
+    s.clock.now += LINGER;
+    s.tracker.begin(S, "b", false, "list");
+    expect(s.tracker.contended(S, "b")).toBe(false);
+  });
+
+  it("round 4: a send the node refused is forgotten at once; a timed-out one lingers", async () => {
+    const emitter = new EventEmitter();
+    const clock = { now: 0 };
+    let error: Error = new AgentCommandError("NODE_UNAVAILABLE", "node is not connected", true);
+    const gateway = Object.assign(emitter, { send: async () => Promise.reject(error) }) as unknown as AgentGateway;
+    const commands = new ConsoleCommandTracker(gateway, () => clock.now, LINGER);
+    const d = { gateway, consoles: new ConsoleBuffers(), commands };
+    const send = () => sendAndAwait(d, "node", S, "op Steve", () => null, 1_000);
+    await expect(send()).rejects.toBe(error);
+    commands.begin(S, "retry", false, "op Steve");
+    expect(commands.ambiguous(S, "retry")).toBe(false);
+    commands.end(S, "retry", true);
+    error = new AgentCommandError("TIMEOUT", "agent did not answer", true);
+    await expect(send()).rejects.toBe(error);
+    commands.begin(S, "retry2", false, "op Steve");
+    expect(commands.ambiguous(S, "retry2")).toBe(true);
   });
 
   it("prunes on insert and bounds the per-server map", () => {

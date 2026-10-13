@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { isSaveConfirmation, isSaveFailure, isSaveProgress, parsePlayerCommand } from "@blockforge/minecraft";
+import { PLAYER_COMMAND_ANY_TARGET, isSaveConfirmation, isSaveFailure, isSaveProgress, parsePlayerCommand } from "@blockforge/minecraft";
 import type { ConsoleBuffers, ConsoleLine } from "../agents/console-buffer.js";
-import type { AgentGateway } from "../agents/gateway.js";
+import { AgentCommandError, type AgentGateway } from "../agents/gateway.js";
 
 /**
  * How long a console command may still be answering: commands from other senders (console route,
@@ -17,10 +17,17 @@ export const DEFAULT_COMMAND_LINGER_MS = 60_000;
  * As in `createSaveTracker`, a confirmation ("Saved the game"/"Saved the world") counts only after a
  * progress line ("Saving the game …") seen after that `save-all` was sent; progress lines and
  * confirmations are matched to pending saves oldest first, one each. A save failure ends the oldest
- * pending save at any time.
+ * pending save at any time. Recognised forms: `save-all`, `minecraft:save-all`, with or without a
+ * leading `/`. Same limit as `createSaveTracker`: on ≤ 1.12 an autosave logs the same "Saving..." /
+ * "Saved the world" lines, so an autosave that runs while a `save-all` is pending can release it early.
  */
 export const SAVE_HOLD_MAX_MS = 15 * 60_000;
-/** Upper bound of tracked commands per server (beyond it the oldest expirable ones are dropped; held ones never). */
+/**
+ * Upper bound of tracked commands per server: beyond it the oldest expired-or-ordinary entries without a
+ * player-command key are dropped. Held entries (waiting own commands, pending `save-all`s) and entries
+ * of recognised player commands are never dropped while they count (the map may then exceed the bound
+ * until they expire).
+ */
 const MAX_ENTRIES_PER_SERVER = 1_000;
 
 interface Entry {
@@ -36,8 +43,8 @@ interface Entry {
   saveProgress?: boolean;
   /** Own commands: another non-quiet command was possibly answering at some point while this one waited. */
   contended: boolean;
-  /** `action:target` of a recognised player command (`parsePlayerCommand`), else null. */
-  key: string | null;
+  /** Action and target of a recognised player command (`parsePlayerCommand`; target may be `*`), else null. */
+  key: { action: string; target: string } | null;
   /**
    * Own commands: another command with the same `key` was possibly answering at some point while this
    * one waited, so even a feedback line naming our target may be the other command's.
@@ -45,10 +52,11 @@ interface Entry {
   ambiguous: boolean;
 }
 
-const keyOf = (line: string): string | null => {
-  const c = parsePlayerCommand(line);
-  return c ? `${c.action}:${c.target}` : null;
-};
+const keyOf = (line: string): Entry["key"] => parsePlayerCommand(line);
+
+/** Two commands could print the same feedback line: same action, and the same target or a wildcard. */
+const sameFeedback = (a: Entry["key"], b: Entry["key"]): boolean =>
+  a !== null && b !== null && a.action === b.action && (a.target === b.target || a.target === PLAYER_COMMAND_ANY_TARGET || b.target === PLAYER_COMMAND_ANY_TARGET);
 
 /**
  * Commands that may currently be answering on each server console. Every `workload.console` send
@@ -72,7 +80,7 @@ export class ConsoleCommandTracker {
     gateway.on("consoleCommand", (serverId, commandId, line) => {
       if (this.own.has(commandId)) return;
       const t = this.now();
-      const save = /^save-all(?:\s|$)/i.test(line.trim());
+      const save = /^\/?(?:minecraft:)?save-all(?:\s|$)/i.test(line.trim());
       const base = { quiet: false, own: false, contended: false, key: keyOf(line), ambiguous: false };
       this.insert(serverId, commandId, save ? { ...base, until: null, saveDeadline: t + SAVE_HOLD_MAX_MS, saveProgress: false } : { ...base, until: t + this.lingerMs });
     });
@@ -125,8 +133,8 @@ export class ConsoleCommandTracker {
       for (const e of m.values()) {
         if (e.own && e.until === null) e.contended = true;
         if (!e.quiet) entry.contended = true;
-        // The same player command (same action and target) prints the very same feedback line.
-        if (entry.key !== null && e.key === entry.key) {
+        // The same player command (same action; same target or a wildcard) prints the very same feedback line.
+        if (sameFeedback(entry.key, e.key)) {
           if (e.own && e.until === null) e.ambiguous = true;
           entry.ambiguous = true;
         }
@@ -138,7 +146,7 @@ export class ConsoleCommandTracker {
       // pending save-alls are never dropped.
       for (const [id, e] of m) {
         if (m.size <= MAX_ENTRIES_PER_SERVER) break;
-        if (e.until !== null && e.saveDeadline === undefined) m.delete(id);
+        if (e.until !== null && e.saveDeadline === undefined && e.key === null) m.delete(id);
       }
     }
   }
@@ -158,7 +166,7 @@ export class ConsoleCommandTracker {
     return this.servers.get(serverId)?.get(commandId)?.ambiguous ?? true;
   }
 
-  /** Our command finished: `answered` drops it; otherwise it may still answer for `lingerMs`. */
+  /** Our command finished: `answered` (or never delivered) drops it; otherwise it may still answer for `lingerMs`. */
   end(serverId: string, commandId: string, answered: boolean): void {
     this.own.delete(commandId);
     const m = this.servers.get(serverId);
@@ -181,6 +189,17 @@ export class ConsoleCommandTracker {
     for (const [id, o] of m) if (id !== commandId && !o.quiet) return true;
     return false;
   }
+}
+
+/**
+ * Whether a failed `workload.console` send may still have reached the server: no answer in time, or the
+ * node dropped while the command was in flight. Refusals (node not connected, validation, agent error)
+ * mean the line was never typed, so the command is forgotten at once instead of lingering.
+ */
+function mayHaveRun(err: unknown): boolean {
+  if (!(err instanceof AgentCommandError)) return true;
+  if (err.code === "TIMEOUT") return true;
+  return err.code === "NODE_UNAVAILABLE" && err.retryable && err.message !== "node is not connected";
 }
 
 export interface AwaitOptions<T> {
@@ -220,12 +239,12 @@ export async function sendAndAwait<T>(
   let resolveFn: (v: T | null) => void = () => undefined;
   const result = new Promise<T | null>((resolve) => (resolveFn = resolve));
   let settled = false;
-  const finish = (v: T | null) => {
+  const finish = (v: T | null, delivered = true) => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
     d.gateway.off("consoleLines", onLines);
-    d.commands.end(serverId, commandId, v !== null);
+    d.commands.end(serverId, commandId, v !== null || !delivered);
     resolveFn(v);
   };
   const consume = (lines: readonly ConsoleLine[]) => {
@@ -256,7 +275,7 @@ export async function sendAndAwait<T>(
   try {
     await d.gateway.send(nodeId, "workload.console", { workloadId: serverId, line }, { timeoutMs: 15_000, commandId, ...(opts.userId ? { userId: opts.userId } : {}) });
   } catch (err) {
-    finish(null);
+    finish(null, mayHaveRun(err));
     throw err;
   }
   consume(d.consoles.tail(serverId, 2000).lines);

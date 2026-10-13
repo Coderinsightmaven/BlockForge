@@ -32,7 +32,7 @@ const FEEDBACK_TIMEOUT_MS = 1000;
 const LINGER_MS = 400;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function boot(opts: { lingerMs?: number; feedbackTimeoutMs?: number } = {}) {
+async function boot(opts: { lingerMs?: number; feedbackTimeoutMs?: number; ports?: string } = {}) {
   const up = new FakeUpstreams();
   const cat = catalogOptions();
   // Limiter clock: fixed unless a limiter sleeps (deterministic Retry-After windows).
@@ -46,7 +46,7 @@ async function boot(opts: { lingerMs?: number; feedbackTimeoutMs?: number } = {}
     players: { feedbackTimeoutMs: opts.feedbackTimeoutMs ?? FEEDBACK_TIMEOUT_MS, commandLingerMs: opts.lingerMs ?? LINGER_MS },
   });
   t = r.t;
-  const node = await connectSimNode(r.t, r.owner, { agents });
+  const node = await connectSimNode(r.t, r.owner, { agents, ...(opts.ports ? { ports: opts.ports } : {}) });
   return { ...r, node, up, clock };
 }
 
@@ -200,42 +200,84 @@ describe("#4 round 2: target-less lines never end the wait; decided at the end o
   });
 });
 
-describe("#4 round 3: a named line is not attributed when the same command overlapped", () => {
+describe("#4 round 3/4: a named line is not attributed when the same command overlapped", () => {
+  // The waiters' window (5 s) is longer than the poll for the sent command (≤ 3 s), and every test asserts
+  // that the waiter was still open when the line was injected and that it ran to its deadline.
+  const WINDOW = 5_000;
   const MADE = info("Made Steve a server operator");
-  const sent = (node: SimNodeHandle, id: string, line: string, n: number) => poll(async () => node.sim.consoleLines.filter((l) => l.workloadId === id && l.line === line).length >= n);
-  const opAudits = async () => (await testPool().query("SELECT count(*)::int AS n FROM audit_events WHERE action = 'server.players.op'")).rows[0].n as number;
+  const sent = (node: SimNodeHandle, id: string, line: string, n: number) =>
+    poll(async () => node.sim.consoleLines.filter((l) => l.workloadId === id && l.line === line).length >= n, 3_000, 20);
+  const successAudits = async () => (await testPool().query("SELECT count(*)::int AS n FROM audit_events WHERE action LIKE 'server.players.%'")).rows[0].n as number;
+  /** Starts a player action and tracks whether its response has arrived. */
+  const start = (owner: ApiClient, id: string, body: Record<string, unknown>) => {
+    const t0 = Date.now();
+    const st = { done: false, elapsed: 0 };
+    const res = act(owner, id, body).then((r) => {
+      st.done = true;
+      st.elapsed = Date.now() - t0;
+      return r;
+    });
+    return { st, res };
+  };
+  const inject = (node: SimNodeHandle, id: string, line: string) => node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line }]);
+  const unconfirmed = async (w: ReturnType<typeof start>) => {
+    noFeedback(await w.res);
+    expect(w.st.elapsed).toBeGreaterThanOrEqual(WINDOW - 100);
+  };
 
   it("two overlapping `op Steve` and one success line → neither is confident (504, nothing audited)", async () => {
-    const { owner, node } = await boot({ feedbackTimeoutMs: 3_000, lingerMs: 60_000 });
+    const { owner, node } = await boot({ feedbackTimeoutMs: WINDOW, lingerMs: 60_000 });
     const id = await paperServer(owner, node);
-    const a = act(owner, id, { action: "op", name: "Steve" });
-    const b = act(owner, id, { action: "op", name: "Steve" });
+    const a = start(owner, id, { action: "op", name: "Steve" });
+    const b = start(owner, id, { action: "op", name: "Steve" });
     await sent(node, id, "op Steve", 2);
-    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: MADE }]);
-    noFeedback(await a);
-    noFeedback(await b);
-    expect(await opAudits()).toBe(0);
-  });
-
-  it("a console `op Steve` during ours → 504", async () => {
-    const { owner, node } = await boot({ feedbackTimeoutMs: 3_000, lingerMs: 60_000 });
-    const id = await paperServer(owner, node);
-    const ours = act(owner, id, { action: "op", name: "Steve" });
-    await sent(node, id, "op Steve", 1);
-    expect((await owner.post(`/servers/${id}/console`, { command: "op Steve" })).statusCode).toBe(204);
-    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: MADE }]);
-    noFeedback(await ours);
-    expect(await opAudits()).toBe(0);
+    expect([a.st.done, b.st.done]).toEqual([false, false]);
+    inject(node, id, MADE);
+    await unconfirmed(a);
+    await unconfirmed(b);
+    expect(await successAudits()).toBe(0);
   });
 
   it("a retry while the previous timed-out `op Steve` lingers → 504 when the late line arrives", async () => {
-    const { owner, node } = await boot({ feedbackTimeoutMs: 1_500, lingerMs: 60_000 });
+    const { owner, node } = await boot({ feedbackTimeoutMs: WINDOW, lingerMs: 60_000 });
     const id = await paperServer(owner, node);
     noFeedback(await act(owner, id, { action: "op", name: "Steve" })); // no answer within the window
-    const retry = act(owner, id, { action: "op", name: "Steve" });
+    const retry = start(owner, id, { action: "op", name: "Steve" });
     await sent(node, id, "op Steve", 2);
-    node.agent.logs(id, [{ ts: Date.now(), stream: "stdout", line: MADE }]); // the first one's late answer
-    noFeedback(await retry);
+    expect(retry.st.done).toBe(false);
+    inject(node, id, MADE); // the first one's late answer
+    await unconfirmed(retry);
+  });
+
+  it("another spelling of the same command in the console during ours → 504 for success and 1.12.2 named failure, nothing audited", async () => {
+    const { owner, node } = await boot({ feedbackTimeoutMs: WINDOW, lingerMs: 60_000, ports: "25565-25600" });
+    const cases: Array<{ ours: Record<string, unknown>; ourLine: string; foreign: string; lines: string[] }> = [
+      { ours: { action: "op", name: "Steve" }, ourLine: "op Steve", foreign: "op Steve", lines: [MADE, info("Could not op Steve")] },
+      { ours: { action: "op", name: "Steve" }, ourLine: "op Steve", foreign: 'op "Steve"', lines: [MADE, info("Could not op Steve")] },
+      { ours: { action: "ban", name: "Steve" }, ourLine: "ban Steve", foreign: 'ban "Steve" griefing', lines: [info("Banned Steve: griefing"), info("Could not ban player Steve")] },
+      { ours: { action: "ban-ip", ip: "203.0.113.7" }, ourLine: "ban-ip 203.0.113.7", foreign: "ban-ip Steve", lines: [info("Banned IP 203.0.113.7: Banned by an operator."), info("Banned IP address 203.0.113.7")] },
+      ...["kick @a", "kick @a[name=Steve]", "kick 8667ba71-b85a-4004-af54-457a9734eed7"].map((foreign) => ({
+        ours: { action: "kick", name: "Steve" },
+        ourLine: "kick Steve",
+        foreign,
+        lines: [info("Kicked Steve: bye"), info("Kicked Steve from the game")],
+      })),
+    ];
+    const runs = cases.flatMap((c) => c.lines.map((line) => ({ ...c, line })));
+    const ids: string[] = [];
+    for (const _ of runs) ids.push(await paperServer(owner, node));
+    await Promise.all(
+      runs.map(async (r, i) => {
+        const id = ids[i]!;
+        const w = start(owner, id, r.ours);
+        await sent(node, id, r.ourLine, 1);
+        expect((await owner.post(`/servers/${id}/console`, { command: r.foreign })).statusCode).toBe(204);
+        expect(w.st.done, `${r.foreign} / ${r.line}`).toBe(false);
+        inject(node, id, r.line);
+        await unconfirmed(w);
+      }),
+    );
+    expect(await successAudits()).toBe(0);
   });
 
   it("1.12.2: the first line naming the target decides (\"Could not op Steve\" before \"Opped Steve\" → ok:false); op Steve and op Alex together both resolve", async () => {
