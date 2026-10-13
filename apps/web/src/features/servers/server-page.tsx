@@ -73,7 +73,7 @@ function TabFallback() {
   );
 }
 
-/** Job shown above the tabs: provisioning / reinstall (power jobs are quick and show as state). */
+/** Job shown above the tabs: provisioning / reinstall / plugin-mod changes (power jobs are quick and show as state). */
 function activeInstallJob(server: Server): { jobId: string; title: string } | null {
   if (!server.activeJobId) return null;
   if (server.activeOperation === "provision" || server.state === "provisioning")
@@ -84,6 +84,8 @@ function activeInstallJob(server: Server): { jobId: string; title: string } | nu
     return { jobId: server.activeJobId, title: "Deleting server" };
   if (server.activeOperation === "restore" || server.state === "restoring")
     return { jobId: server.activeJobId, title: "Restoring backup" };
+  if (server.activeOperation === "extensions")
+    return { jobId: server.activeJobId, title: "Changing plugins/mods" };
   return null;
 }
 
