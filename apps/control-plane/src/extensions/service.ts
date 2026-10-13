@@ -247,13 +247,14 @@ export class ExtensionsService {
         if ((err.details as { reason?: unknown } | undefined)?.reason === "agent_outdated") scan = { ...scan, error: err.message.slice(0, 1024) };
       }
     }
-    const items = await toDtos(this.d.db, (await this.rows(access.server.id)).slice(0, 4096));
+    const all = await this.rows(access.server.id);
+    const items = await toDtos(this.d.db, all.slice(0, 4096), all);
     return { installDir: target.installDir, kind: target.kind, items, skipped: scanRow?.skipped ?? [], scan, truncated: scanRow?.truncated ?? false, uploads };
   }
 
   async get(access: ServerAccess, id: string): Promise<InstalledExtension> {
     requireTarget(access.server);
-    return (await toDtos(this.d.db, [await this.row(access.server.id, id)]))[0]!;
+    return (await toDtos(this.d.db, [await this.row(access.server.id, id)], await this.rows(access.server.id)))[0]!;
   }
 
   async scan(access: ServerAccess, full: boolean, actor: AuditActor): Promise<{ jobId: string }> {
@@ -267,7 +268,7 @@ export class ExtensionsService {
     requireTarget(access.server);
     const r = await this.row(access.server.id, id);
     const to = toggledExtensionPath(r.path, enabled);
-    if (to === null) return { extension: (await toDtos(this.d.db, [r]))[0]!, restartRequired: false };
+    if (to === null) return { extension: (await toDtos(this.d.db, [r], await this.rows(access.server.id)))[0]!, restartRequired: false };
     const updated = await this.syncChange(access, async (held) => {
       const cur = await this.row(access.server.id, id);
       if (cur.path !== r.path) throw conflict("The extension changed meanwhile; reload it", { reason: "exists" });
@@ -302,7 +303,7 @@ export class ExtensionsService {
     });
     await this.audit(actor, access, enabled ? "enable" : "disable", { extensionId: r.id, from: r.path, to });
     void publishExtensions(this.d, access.server.id, [r.id]);
-    return { extension: (await toDtos(this.d.db, [updated]))[0]!, restartRequired: restartRequired(access.server.state) };
+    return { extension: (await toDtos(this.d.db, [updated], await this.rows(access.server.id)))[0]!, restartRequired: restartRequired(access.server.state) };
   }
 
   async remove(access: ServerAccess, id: string, actor: AuditActor): Promise<{ restartRequired: boolean; historyEntryId: string; rollbackAvailable: boolean }> {
@@ -519,7 +520,7 @@ export class ExtensionsService {
       // Idempotent per upload id: the original outcome (with the extension's current state).
       const [r] = await this.d.db.select().from(installedExtensions).where(eq(installedExtensions.id, u.result.extensionId));
       if (!r) throw notFound("Extension");
-      return { extension: (await toDtos(this.d.db, [r]))[0]!, compatibility: u.result.compatibility, warnings: u.result.warnings as UploadWarning[], restartRequired: restartRequired(access.server.state) };
+      return { extension: (await toDtos(this.d.db, [r], await this.rows(access.server.id)))[0]!, compatibility: u.result.compatibility, warnings: u.result.warnings as UploadWarning[], restartRequired: restartRequired(access.server.state) };
     }
     if (u.expiresAt.getTime() <= this.d.clock.now()) throw notFound("Upload");
     const policy = await this.uploadPolicy();
@@ -706,7 +707,7 @@ export class ExtensionsService {
     await this.d.db.update(extensionUploads).set({ completedAt: now, result: { extensionId: row.id, warnings, compatibility: info.compatibility } }).where(eq(extensionUploads.id, u.id));
     await this.audit(actor, access, "upload.complete", { uploadId: u.id, path: dest, extensionId: row.id, sha512: row.sha512, replaced: onDisk, allowIncompatible: req.allowIncompatible, loadable: info.compatibility.loadable });
     void publishExtensions(this.d, access.server.id, [row.id]);
-    return { extension: (await toDtos(this.d.db, [row]))[0]!, compatibility: info.compatibility, warnings, restartRequired: restartRequired(access.server.state) };
+    return { extension: (await toDtos(this.d.db, [row], await this.rows(access.server.id)))[0]!, compatibility: info.compatibility, warnings, restartRequired: restartRequired(access.server.state) };
   }
 
   // --- History and rollback -----------------------------------------------------------------------

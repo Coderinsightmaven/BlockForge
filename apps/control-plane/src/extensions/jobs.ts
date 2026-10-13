@@ -379,6 +379,9 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           const id = stableId(ctx.jobId, "rollback");
           const actor = ctx.input.actor as HistoryActorFields;
           const fromKeep = !!entry.from && !refetchable(entry.from);
+          // What ends up on disk: a file re-fetched from Modrinth was installed from Modrinth by BlockForge (`source`
+          // is provenance); a file restored from the keep area keeps its recorded source.
+          const restoredSnap = entry.from ? (fromKeep ? entry.from : { ...entry.from, source: "modrinth" as const }) : null;
           const stillHeld = () => d.state.holds(s.id, "extensions", ctx.jobId);
           const store = undoStoreOf(ctx, "rollback");
           const finish = async (p: PendingEntry | null) => {
@@ -386,7 +389,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
             // History, the consumed kept file and step success in one transaction (never applied twice; nothing
             // fallible after it); the progress and undo records are cleared in that same commit.
-            await completeStep(ctx, ["rb", "undo"], { restored: entry.from ?? null, entryId: id }, async (tx) => {
+            await completeStep(ctx, ["rb", "undo"], { restored: restoredSnap, entryId: id }, async (tx) => {
               if (p) await writeHistory(d, s.id, [p], { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
               if (fromKeep) await tx.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, entry.id));
             });
@@ -418,7 +421,7 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             extensionName: entry.extensionName,
             path: entry.from?.path ?? entry.path,
             from: current ? snapshotOf(current) : (entry.to ?? null),
-            to: entry.from ?? null,
+            to: restoredSnap,
             keptPath: rb.kept?.path ?? null,
             keptSha512: rb.kept?.sha512 ?? null,
           };

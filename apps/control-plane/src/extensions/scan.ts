@@ -202,19 +202,27 @@ export async function runScan(d: ExtensionDeps, serverId: string, o: ScanOptions
         set.metadata = info?.metadata ?? [];
         set.compatibility = info?.compatibility ?? null;
       }
-      const source = row?.source ?? "unknown";
+      // `source` is provenance (contracts `ExtensionSource`): a scan never labels a file `modrinth`/`upload`. A
+      // file found on disk stays `unknown` even when a SHA-512 lookup identifies it (that goes into `modrinth`),
+      // and a BlockForge-installed/uploaded file whose content changed outside BlockForge (file manager, SFTP,
+      // a plugin's own updater) becomes `unknown` with no install facts. Install/update/rollback jobs stamp
+      // their files after the rescan (`stampInstalled`, rollback's rescan step).
+      const contentChanged = !!row && isChanged && set.sha512 !== row.sha512;
+      if (contentChanged && row.source !== "unknown") {
+        set.source = "unknown";
+        set.installedAt = null;
+        set.installedBy = null;
+      }
       if (identified.has(f.path)) {
         const ref = identified.get(f.path) ?? null;
         set.modrinth = ref;
         set.modrinthProjectId = ref?.projectId ?? null;
         set.identifiedSha512 = (set.sha512 ?? row?.sha512) || null;
-        set.source = ref && source === "unknown" ? "modrinth" : !ref && source === "modrinth" ? "unknown" : source;
-      } else if (row && isChanged && set.sha512 !== row.sha512) {
+      } else if (contentChanged) {
         // New content, not identified (Modrinth unavailable): the old identity no longer applies.
         set.modrinth = null;
         set.modrinthProjectId = null;
         set.identifiedSha512 = null;
-        if (source === "modrinth") set.source = "unknown";
       }
       if (row) {
         await tx.update(installedExtensions).set(set).where(eq(installedExtensions.id, row.id));
@@ -226,7 +234,7 @@ export async function runScan(d: ExtensionDeps, serverId: string, o: ScanOptions
           id,
           serverId,
           kind: target.kind,
-          source: set.source ?? "unknown",
+          source: "unknown",
           path: f.path,
           filename: f.name,
           enabled: f.enabled,

@@ -7,7 +7,7 @@ import type {
   ServerSoftware,
   ServerState,
 } from "@blockforge/contracts";
-import { extensionDirFor } from "@blockforge/minecraft";
+import { extensionDirFor, flagDuplicateExtensions } from "@blockforge/minecraft";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Logger } from "pino";
 import { AgentCommandError, type AgentGateway } from "../agents/gateway.js";
@@ -220,7 +220,7 @@ export function snapshotOf(row: Pick<ExtensionRow, "source" | "path" | "modrinth
   };
 }
 
-export function toDto(row: ExtensionRow, installedByName: string | null): InstalledExtension {
+export function toDto(row: ExtensionRow, installedByName: string | null, compatibility: InstalledExtension["compatibility"] = row.compatibility ?? null): InstalledExtension {
   return {
     id: row.id,
     serverId: row.serverId,
@@ -233,7 +233,7 @@ export function toDto(row: ExtensionRow, installedByName: string | null): Instal
     mtime: row.mtime.getTime(),
     source: row.source as InstalledExtension["source"],
     metadata: row.metadata,
-    compatibility: row.compatibility ?? null,
+    compatibility,
     modrinth: row.modrinth ?? null,
     installedAt: row.installedAt?.getTime() ?? null,
     installedBy: row.installedBy ? { id: row.installedBy, name: (installedByName ?? "unknown").slice(0, 128) } : null,
@@ -241,10 +241,15 @@ export function toDto(row: ExtensionRow, installedByName: string | null): Instal
   };
 }
 
-export async function toDtos(db: DbOrTx, rows: readonly ExtensionRow[]): Promise<InstalledExtension[]> {
+/**
+ * DTOs of `rows`. `siblings` = every row of the server (defaults to `rows`): `DUPLICATE_ID` problems depend on
+ * the other jars of the install dir, so they are added here, at read time, and never stored.
+ */
+export async function toDtos(db: DbOrTx, rows: readonly ExtensionRow[], siblings: readonly ExtensionRow[] = rows): Promise<InstalledExtension[]> {
   const ids = [...new Set(rows.map((r) => r.installedBy).filter((x): x is string => !!x))];
   const names = new Map(ids.length ? (await db.select({ id: users.id, name: users.username }).from(users).where(inArray(users.id, ids))).map((u) => [u.id, u.name]) : []);
-  return rows.map((r) => toDto(r, r.installedBy ? (names.get(r.installedBy) ?? null) : null));
+  const duplicates = flagDuplicateExtensions(siblings);
+  return rows.map((r) => toDto(r, r.installedBy ? (names.get(r.installedBy) ?? null) : null, duplicates.get(r.path) ?? r.compatibility ?? null));
 }
 
 /**
@@ -274,8 +279,12 @@ export function rollbackOf(e: HistoryRow, newer: readonly HistoryRow[], now: num
   return { available: true, reason: null };
 }
 
-/** A snapshot that can be re-fetched from Modrinth (version id + SHA-512). */
-export const refetchable = (s: ExtensionFileSnapshot) => s.source === "modrinth" && !!s.projectId && !!s.versionId && !!s.sha512;
+/**
+ * A snapshot that can be re-fetched from Modrinth (version id + SHA-512): installed from Modrinth, or a file
+ * found on disk / uploaded that a SHA-512 lookup identified (`source` is provenance only). The rollback job
+ * re-downloads only a file whose SHA-512 equals the snapshot's.
+ */
+export const refetchable = (s: ExtensionFileSnapshot) => !!s.projectId && !!s.versionId && !!s.sha512;
 
 export function historyDto(e: HistoryRow, newer: readonly HistoryRow[], now: number): ExtensionHistoryEntry {
   return {
