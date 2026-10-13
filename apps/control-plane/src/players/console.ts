@@ -198,7 +198,6 @@ export class ConsoleCommandTracker {
     return this.servers.get(serverId)?.get(commandId)?.ambiguous ?? true;
   }
 
-  /** Our command finished: `answered` (or never delivered) drops it; otherwise it may still answer for `lingerMs`. */
   /** Drops a command that provably never reached the server (also after its waiter settled). */
   forget(serverId: string, commandId: string): void {
     this.own.delete(commandId);
@@ -206,6 +205,7 @@ export class ConsoleCommandTracker {
     this.prune(serverId);
   }
 
+  /** Our command finished: `answered` (or never delivered) drops it; otherwise it may still answer for `lingerMs`. */
   end(serverId: string, commandId: string, answered: boolean): void {
     this.own.delete(commandId);
     const m = this.servers.get(serverId);
@@ -272,8 +272,9 @@ export interface AwaitOptions<T> {
  * command with the same action and target overlapped this one (`ConsoleCommandTracker.ambiguous`),
  * and ends the wait with a non-null value. Otherwise the wait lasts `timeoutMs` and `opts.atDeadline` decides
  * (null when absent). When the send fails it throws, except that an answer already decided is returned
- * if the error leaves open whether the line reached the server (`mayHaveRun`: timeouts, disconnects,
- * RUNTIME_ERROR, …); errors proving it was never written always throw.
+ * if the agent's error leaves open whether the line reached the server (an `AgentCommandError` for which
+ * `mayHaveRun` holds: timeouts, disconnects, RUNTIME_ERROR, …). Errors proving it was never written, and
+ * errors raised before dispatch that are not agent errors, always throw.
  */
 export async function sendAndAwait<T>(
   d: { gateway: AgentGateway; consoles: ConsoleBuffers; commands: ConsoleCommandTracker },

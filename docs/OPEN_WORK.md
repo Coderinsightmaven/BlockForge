@@ -58,6 +58,10 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - ~~Control-plane test "searches and shows projects … maps rate limits to 429" failed once in a full parallel run after
   the rate-limiter change (7486da7).~~ Fixed: the test injects the limiter clock/sleep (fixed clock, no real waits) and
   now also asserts the exact 60 s window and that nothing slept; two full parallel runs green.
+- Control-plane test `schedules.int.test.ts` is flaky at a `*/5` minute boundary: `scheduler.tick` claims every due
+  row in the shared test database, so when the suite reaches that test on a 5-minute mark `tick()` sees schedules
+  from other cases (4 due rows instead of 1). Seen once in a full run (Grok review, 2026-10-13); passes on re-run.
+  Fix: inject the scheduler clock or scope `tick()` to the test's schedules.
 
 ### 1.3 Not yet verified live
 - Player sessions and live join/leave with a real Minecraft client (no client on the LAN test so far).
