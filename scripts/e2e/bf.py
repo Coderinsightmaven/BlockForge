@@ -8,6 +8,9 @@ import http.cookiejar
 import json
 import os
 import pathlib
+import stat
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -16,18 +19,48 @@ import uuid
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BASE = os.environ.get("BF_URL", "http://127.0.0.1:8080")
+# Host ports the e2e servers must never use on the test node (ATM11 and two untracked old servers).
+FORBIDDEN_PORTS = frozenset({25565, 25570, 25571})
+
+
+def guard_ports(server):
+    """Fails closed when any allocation of the server is on a forbidden port (never start such a server)."""
+    ports = sorted(a["port"] for a in server.get("allocations") or [])
+    if not ports:
+        raise AssertionError(f"server {server['name']} has no allocation; refusing to start it")
+    bad = [p for p in ports if p in FORBIDDEN_PORTS]
+    if bad:
+        raise AssertionError(f"server {server['name']} is allocated forbidden port(s) {bad}; refusing to start it (reassign its allocation first)")
+    return ports
+
+
+def _main_checkout():
+    """The main checkout of this repository (differs from ROOT inside a git worktree), or None."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    main = pathlib.Path(out).parent
+    return main if (main / "pnpm-workspace.yaml").is_file() else None
 
 
 def _owner_file():
-    """BF_OWNER_FILE, else the first .data/dev-owner.txt in the checkout or a parent directory
-    (git worktrees under .claude/worktrees/ share the main checkout's file)."""
+    """BF_OWNER_FILE, else .data/dev-owner.txt of this checkout, else of the main checkout (git worktrees
+    under .claude/worktrees/ share the main checkout's file). Never looks outside the repository."""
     if os.environ.get("BF_OWNER_FILE"):
-        return pathlib.Path(os.environ["BF_OWNER_FILE"])
-    for d in [ROOT, *ROOT.parents]:
-        f = d / ".data" / "dev-owner.txt"
-        if f.is_file():
-            return f
-    raise FileNotFoundError("no .data/dev-owner.txt found; set BF_EMAIL/BF_PASSWORD or BF_OWNER_FILE")
+        f = pathlib.Path(os.environ["BF_OWNER_FILE"])
+    else:
+        roots = [ROOT] + [m for m in [_main_checkout()] if m is not None and m != ROOT]
+        f = next((r / ".data" / "dev-owner.txt" for r in roots if (r / ".data" / "dev-owner.txt").is_file()), None)
+        if f is None:
+            raise FileNotFoundError("no .data/dev-owner.txt in this checkout or the main checkout; set BF_EMAIL/BF_PASSWORD or BF_OWNER_FILE")
+    mode = f.stat().st_mode
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise PermissionError(f"{f} is accessible by group/others (mode {stat.filemode(mode)}); run: chmod 600 {f}")
+    return f
 
 
 def _owner_creds():
@@ -170,7 +203,9 @@ class Client:
             time.sleep(poll)
 
     def action(self, server_id, action, wait=True, timeout=600):
-        """POST /servers/:id/actions; waits for the job to succeed."""
+        """POST /servers/:id/actions; waits for the job to succeed. start/restart re-check the allocation ports."""
+        if action in ("start", "restart"):
+            guard_ports(self.server(server_id))
         r = self.post(f"/servers/{server_id}/actions", {"action": action}, idempotent=True)
         if wait:
             self.wait_job_ok(r["jobId"], timeout=timeout, what=f"{action} job")
@@ -253,19 +288,50 @@ def check(cond, what):
     print(f"  ok  {what}")
 
 
-def main(fn):
-    """Runs fn(client); prints the failure (with the API error body) and exits non-zero on the first one."""
-    import sys
+def is_no_feedback(e):
+    """504 `no_feedback`: a console-backed player action was delivered but not confirmed in time."""
+    if not isinstance(e, ApiError) or e.status != 504 or not isinstance(e.body, dict):
+        return False
+    return ((e.body.get("error") or {}).get("details") or {}).get("reason") == "no_feedback"
+
+
+def _describe(e):
+    if isinstance(e, ApiError):
+        return f"HTTP {e.status}: {json.dumps(e.body) if not isinstance(e.body, str) else e.body}"
+    return f"{type(e).__name__}: {e}"
+
+
+def main(fn, cleanup=None):
+    """Runs fn(client), then always cleanup(client) (also after a failure or Ctrl-C).
+
+    Prints the first failure (with the API error body) and exits non-zero; a failing cleanup is reported as
+    `CLEANUP FAILED` and also makes the exit status non-zero. `cleanup` must be idempotent and should do as
+    much as it can, raising at the end if something could not be restored.
+    """
     import traceback
 
+    status = 0
+    c = None
     try:
-        fn(Client().login())
-    except ApiError as e:
-        print(f"  FAIL  HTTP {e.status}: {json.dumps(e.body) if not isinstance(e.body, str) else e.body}")
+        c = Client().login()
+        fn(c)
+    except KeyboardInterrupt:
+        print("  FAIL  interrupted")
+        status = 130
+    except (ApiError, AssertionError, TimeoutError) as e:
+        print(f"  FAIL  {_describe(e)}")
         traceback.print_exc(limit=3)
-        sys.exit(1)
-    except (AssertionError, TimeoutError) as e:
-        print(f"  FAIL  {e}")
-        traceback.print_exc(limit=3)
-        sys.exit(1)
+        status = 1
+    finally:
+        if cleanup is not None and c is not None:
+            try:
+                cleanup(c)
+            except KeyboardInterrupt:
+                print("  CLEANUP FAILED  interrupted; the node may still hold e2e state")
+                status = status or 130
+            except Exception as e:  # noqa: BLE001 - report every cleanup problem, never mask the run's failure
+                print(f"  CLEANUP FAILED  {_describe(e)}")
+                status = status or 1
+    if status:
+        sys.exit(status)
     print("PASS")

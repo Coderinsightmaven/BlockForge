@@ -4,16 +4,18 @@ after a start; cleanup through the console path.
 
     python3 scripts/e2e/e2e_players_stopped.py
 
-Leaves e2e-vanilla stopped (memory on the test node is tight) and Notch / 203.0.113.8 off every list.
+Always (also after a failure, a 504 or Ctrl-C) removes Notch / 203.0.113.8 from every list again (console,
+or file edits after stopping) and stops e2e-vanilla if this run started it. Leaves e2e-vanilla stopped
+(memory on the test node is tight).
 """
 
 import json
 import re
-import time
 
 import bf
 from bf import check
-from setup_servers import ensure_vanilla
+from e2e_players import console_action, in_lists, remove_entries
+from setup_servers import VANILLA_NAME, ensure_vanilla
 
 PLAYER = "Notch"
 NOTCH_UUID = "069a79f4-44e9-4726-a5be-fca90e38aaf5"
@@ -21,6 +23,7 @@ IP = "203.0.113.8"
 REASON = "BlockForge e2e stopped"
 EXPIRES_MS = 4102444800000  # 2100-01-01T00:00:00Z
 GSON_DATE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}$")
+STATE = {"started": False}
 
 
 def overview(c, sid):
@@ -32,23 +35,7 @@ def act(c, sid, body):
 
 
 def present(ov):
-    return {
-        "whitelist": any(e["name"] == PLAYER for e in ov["whitelist"]["entries"]),
-        "ops": any(e["name"] == PLAYER for e in ov["ops"]),
-        "bannedPlayers": any(e["name"] == PLAYER for e in ov["bannedPlayers"]),
-        "bannedIps": any(e["ip"] == IP for e in ov["bannedIps"]),
-    }
-
-
-def cleanup(c, sid):
-    steps = [("bannedPlayers", {"action": "pardon", "name": PLAYER}), ("bannedIps", {"action": "pardon-ip", "ip": IP}),
-             ("ops", {"action": "deop", "name": PLAYER}), ("whitelist", {"action": "whitelist-remove", "name": PLAYER})]
-    p = present(overview(c, sid))
-    for key, body in steps:
-        if p[key]:
-            r = act(c, sid, body)
-            print(f"  ..  cleanup: {body['action']} ({r['applied']})")
-    return present(overview(c, sid))
+    return in_lists(ov, IP)
 
 
 def file_action(c, sid, body, key):
@@ -68,10 +55,11 @@ def run(c):
     print("e2e_players_stopped (stopped Vanilla egg)")
     s = ensure_vanilla(c, running=False)
     sid = s["id"]
-    check(not any(cleanup(c, sid).values()), "e2e entries absent before the run")
+    remove_entries(c, sid, IP)
+    check(not any(present(overview(c, sid)).values()), "e2e entries absent before the run")
 
     ov = overview(c, sid)
-    check(ov["online"]["count"] is None or ov["online"]["source"] != "list", "overview of a stopped server: no live `list` data")
+    check(ov["online"]["count"] is None and ov["online"]["source"] != "list", f"overview of a stopped server: online count unknown (source {ov['online']['source']})")
     check("kick" not in ov["availableActions"], "kick not offered while stopped")
 
     file_action(c, sid, {"action": "whitelist-add", "name": PLAYER}, "whitelist")
@@ -106,14 +94,15 @@ def run(c):
     check((err.get("details") or {}).get("reason") == "not_running", "whitelist-reload while stopped -> 409 not_running")
 
     # Start: the server must load every entry.
-    c.ensure_running(sid)
-    check(True, "started e2e-vanilla")
+    STATE["started"] = True
+    s = c.ensure_running(sid)
+    check(s["state"] == "running", "started e2e-vanilla")
     line = c.console(sid, "whitelist list", expect="whitelisted player")
     check(PLAYER in line, f"server loaded the whitelist: {line.split(']: ')[-1]!r}")
     line = c.console(sid, "banlist players", expect=f"{PLAYER} was banned by")
     check(REASON in line, f"server loaded the timed ban: {line.split(']: ')[-1]!r}")
     line = c.console(sid, "banlist ips", expect=f"{IP} was banned by")
-    check(True, f"server loaded the IP ban: {line.split(']: ')[-1]!r}")
+    check(REASON in line, f"server loaded the IP ban: {line.split(']: ')[-1]!r}")
     line = c.console(sid, f"op {PLAYER}", expect=lambda l: "Nothing changed" in l or "Made " in l)
     check("Nothing changed" in line, f"server loaded the op entry: {line.split(']: ')[-1]!r}")
     o = next(e for e in read_json(c, sid, "ops.json") if e.get("name") == PLAYER)
@@ -123,21 +112,31 @@ def run(c):
     ban = next(e for e in ov["bannedPlayers"] if e["name"] == PLAYER)
     check(ban["expiresAt"] == EXPIRES_MS, "running overview: ban still expires 2100-01-01")
 
-    # Cleanup through the console (running server -> console path).
-    for body, words in (
-        ({"action": "pardon", "name": PLAYER}, "Unbanned"),
-        ({"action": "pardon-ip", "ip": IP}, "Unbanned IP"),
-        ({"action": "deop", "name": PLAYER}, "no longer"),
-        ({"action": "whitelist-remove", "name": PLAYER}, "Removed"),
-    ):
-        r = act(c, sid, body)
-        fb = r["feedback"]
-        check(r["applied"] == "console" and fb and fb["ok"] and words in fb["message"], f"cleanup {body['action']} via console: {fb and fb['message']!r}")
-    time.sleep(1)
+    # Cleanup through the console (running server -> console path), each confirmed by feedback + lists.
+    console_action(c, sid, {"action": "pardon", "name": PLAYER}, ["Unbanned", PLAYER], "bannedPlayers", False, ip=IP)
+    console_action(c, sid, {"action": "pardon-ip", "ip": IP}, ["Unbanned IP", IP], "bannedIps", False, ip=IP)
+    console_action(c, sid, {"action": "deop", "name": PLAYER}, ["no longer", "operator"], "ops", False, ip=IP)
+    console_action(c, sid, {"action": "whitelist-remove", "name": PLAYER}, ["Removed", PLAYER], "whitelist", False, ip=IP)
     check(not any(present(overview(c, sid)).values()), "final lists: no e2e entries left")
-    c.ensure_stopped(sid)
-    check(True, "stopped e2e-vanilla again")
+    s = c.ensure_stopped(sid)
+    STATE["started"] = False
+    check(s["state"] == "stopped", "stopped e2e-vanilla again")
+
+
+def cleanup(c):
+    """Runs after every run (bf.main): removes leftover e2e entries, stops e2e-vanilla if this run started it."""
+    s = c.find_server(VANILLA_NAME)
+    if s is None:
+        return
+    sid = s["id"]
+    c.wait_state(sid, ("running", "stopped", "crashed"), timeout=180)
+    try:
+        remove_entries(c, sid, IP, stop_fallback=True)
+    finally:
+        if STATE["started"] and c.server(sid)["state"] != "stopped":
+            c.ensure_stopped(sid)
+            print("  ..  cleanup: stopped e2e-vanilla (started by this run)")
 
 
 if __name__ == "__main__":
-    bf.main(run)
+    bf.main(run, cleanup)

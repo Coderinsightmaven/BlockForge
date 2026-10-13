@@ -6,7 +6,8 @@ offered, apply it through `POST …/extensions/updates/apply`, verify the new ve
     python3 scripts/e2e/e2e_ext_updates.py
 
 The older jar for the file-manager copy is downloaded from the Modrinth CDN (in memory) and
-checked against Modrinth's SHA-512 before it is uploaded. Leaves no Chunky* jar in plugins/.
+checked against Modrinth's SHA-512 before it is uploaded. Always (also after a failure or Ctrl-C) removes every
+Chunky* jar from plugins/ again. Leaves e2e-paper running.
 """
 
 import hashlib
@@ -16,11 +17,12 @@ import urllib.request
 
 import bf
 from bf import check
-from e2e_extensions import cleanup, ext_list, find, ours, scan
+from e2e_extensions import cleanup, ext_list, find, ours, remove_ours, scan
 from setup_servers import ensure_paper
 
 PROJECT = "chunky"
-OLD_VERSION = "1.4.40"  # Chunky for 1.21.11–26.1.2 (does not list 26.3)
+OLD_VERSION = "1.4.40"  # Chunky for 1.21.11–26.1.2 (does not list 26.3); must stay older than the latest
+PRERELEASE_PROJECT = "viaversion"
 UA = "BlockForge-e2e/1.0 (scripts/e2e)"
 
 
@@ -46,17 +48,20 @@ def run(c):
     print("e2e_ext_updates (running Paper)")
     s = ensure_paper(c, running=True)
     sid = s["id"]
-    cleanup(c, sid)
+    remove_ours(c, sid)
 
     up = c.get(f"/servers/{sid}/extensions/updates")
     check(isinstance(up["checkedAt"], int) and isinstance(up["items"], list), f"GET extensions/updates 200 ({len(up['items'])} item(s))")
 
-    # Project route: releases only unless allowPrerelease.
-    pr = c.get(f"/servers/{sid}/extensions/modrinth/projects/luckperms")
+    # Project route: releases only unless allowPrerelease. PRERELEASE_PROJECT must publish beta/alpha builds
+    # for the server's Minecraft version (ViaVersion does; swap it if that ever stops being true).
+    pr = c.get(f"/servers/{sid}/extensions/modrinth/projects/{PRERELEASE_PROJECT}")
     check(pr["versions"] and all(v["versionType"] == "release" for v in pr["versions"]),
-          f"project luckperms: {len(pr['versions'])} version(s), all releases (newest {pr['versions'][0]['versionNumber']})")
-    pre = c.get(f"/servers/{sid}/extensions/modrinth/projects/luckperms?allowPrerelease=true")
-    check(len(pre["versions"]) >= len(pr["versions"]), f"allowPrerelease=true lists {len(pre['versions'])} version(s) ({sorted({v['versionType'] for v in pre['versions']})})")
+          f"project {PRERELEASE_PROJECT}: {len(pr['versions'])} version(s), all releases (newest {pr['versions'][0]['versionNumber']})")
+    pre = c.get(f"/servers/{sid}/extensions/modrinth/projects/{PRERELEASE_PROJECT}?allowPrerelease=true")
+    kinds = sorted({v["versionType"] for v in pre["versions"]})
+    check(any(k != "release" for k in kinds) and len(pre["versions"]) > len(pr["versions"]),
+          f"allowPrerelease=true adds prereleases: {len(pre['versions'])} version(s), types {kinds}")
 
     # Hash identification of a jar copied in through the file manager (as over SFTP).
     v_old, f_old = modrinth_version(OLD_VERSION)
@@ -117,9 +122,9 @@ def run(c):
     it = next((i for i in up["items"] if i["extensionId"] == chunky[0]["id"]), None)
     check(it is not None and not it["updateAvailable"], "update check afterwards: current, no update")
 
-    cleanup(c, sid)
+    remove_ours(c, sid)
     check(not ours(ext_list(c, sid)), "cleanup: no Chunky extension left")
 
 
 if __name__ == "__main__":
-    bf.main(run)
+    bf.main(run, cleanup)

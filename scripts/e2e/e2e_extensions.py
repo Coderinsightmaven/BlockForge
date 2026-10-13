@@ -4,7 +4,8 @@ loads Chunky), cleanup.
 
     python3 scripts/e2e/e2e_extensions.py
 
-Leaves no Chunky*/BfE2E* jar in plugins/ (also cleans up after an interrupted earlier run).
+Always (also after a failure or Ctrl-C) removes every Chunky*/BfE2E* jar from plugins/ (moved to the keep
+area), also after an interrupted earlier run. Leaves e2e-paper running (restarted once).
 """
 
 import io
@@ -41,16 +42,41 @@ def ours(lst):
     return [e for e in lst["items"] if e["filename"].lower().startswith(OURS)]
 
 
+def _retry_busy(fn, timeout=120):
+    """Retries fn() while the server is busy with another extension job (409) — e.g. after an interrupted run."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            return fn()
+        except bf.ApiError as e:
+            if e.status != 409 or time.time() > deadline:
+                raise
+            time.sleep(3)
+
+
 def scan(c, sid, full=False):
-    r = c.post(f"/servers/{sid}/extensions/scan", {"full": full}, idempotent=True)
+    r = _retry_busy(lambda: c.post(f"/servers/{sid}/extensions/scan", {"full": full}, idempotent=True))
     return c.wait_job_ok(r["jobId"], timeout=300, what="scan")
 
 
-def cleanup(c, sid):
+def remove_ours(c, sid):
+    """Removes every Chunky*/BfE2E* extension (moved to the keep area); idempotent, verifies the result."""
     scan(c, sid)
     for e in ours(ext_list(c, sid)):
-        c.delete(f"/servers/{sid}/extensions/{e['id']}")
+        _retry_busy(lambda: c.delete(f"/servers/{sid}/extensions/{e['id']}"))
         print(f"  ..  cleanup: removed {e['path']}")
+    left = [e["path"] for e in ours(ext_list(c, sid))]
+    if left:
+        raise AssertionError(f"cleanup could not remove {left} from server {sid}")
+
+
+def cleanup(c):
+    """Runs after every run (bf.main), also after a failure or Ctrl-C."""
+    from setup_servers import PAPER_NAME
+
+    s = c.find_server(PAPER_NAME)
+    if s is not None:
+        remove_ours(c, s["id"])
 
 
 def find(lst, pred):
@@ -61,7 +87,7 @@ def run(c):
     print("e2e_extensions (running Paper)")
     s = ensure_paper(c, running=True)
     sid = s["id"]
-    cleanup(c, sid)
+    remove_ours(c, sid)
 
     lst = ext_list(c, sid)
     check(lst["installDir"] == "plugins" and lst["kind"] == "plugin", "extension list: plugins/ on Paper")
@@ -140,9 +166,9 @@ def run(c):
     line = c.wait_console(sid, seq, "[Chunky] Enabling Chunky", timeout=180)
     check(True, f"after restart Paper says {line.split(']: ')[-1]!r}")
 
-    cleanup(c, sid)
+    remove_ours(c, sid)
     check(not ours(ext_list(c, sid)), "cleanup: no Chunky/BfE2E extension left")
 
 
 if __name__ == "__main__":
-    bf.main(run)
+    bf.main(run, cleanup)
