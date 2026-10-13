@@ -1,14 +1,14 @@
 # Open work
 
-Everything still to finish, as of 2026-10-12. The per-requirement status lives in `docs/CHECKLIST.md`, review records
+Everything still to finish, as of 2026-10-13. The per-requirement status lives in `docs/CHECKLIST.md`, review records
 in `docs/reviews/`, live evidence in `docs/development/test-node.md`. Update this file whenever an item closes or appears.
 
-**Where things stand:** Phases 0–3 and 4a are signed off. Phase 4b is implemented and verified live on the test node
-(Players on running Paper and stopped Vanilla; Plugins & mods: Modrinth search/plan/install, toggle, upload, remove,
-rollback, identification, update checks; Paper loads the installed plugin). It is not signed off yet: one cross-model
-review's findings are still open (section 1).
+**Where things stand:** Phases 0–3, 4a and **4b are signed off** (Phase 4b on 2026-10-13, main 03a0dd7: every
+control-plane review finding fixed and cross-reviewed, live-run follow-ups closed, sign-off e2e suite green against the
+test node — see `docs/development/test-node.md`). Current focus: Phase 5 (databases) and the remaining Phase 3–4
+features in section 2. Section 1 keeps the Phase 4b record and the items deliberately left for later.
 
-## 1. Finish Phase 4b (Plugins & mods, Players) — before sign-off
+## 1. Phase 4b (Plugins & mods, Players) — signed off 2026-10-13
 
 ### 1.1 Control-plane review findings (Grok) — `docs/reviews/2026-10-12-control-plane-phase4b.md`
 All reproduced by the reviewer; fixed items are marked (tests in `extensions-review.int.test.ts`), the rest are open:
@@ -77,17 +77,18 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
   (`scripts/e2e/e2e_ext_updates.py`); see "Phase 4b sign-off re-run" in `docs/development/test-node.md`.
 
 ### 1.4 Cross-model re-review rounds (policy: fixes of high/major findings get a second look)
-- Control-plane fixes for 1.1 → Grok round 2.
+- ~~Control-plane fixes for 1.1 → Grok round 2.~~ Done: PR #2 (5 Grok rounds) and PR #3 (6 rounds), both approved.
 - Optional confirmation rounds:
   - web Phase 4b fixes (375e19d) → Codex;
   - agent jar-reader fixes (61669b0) → Codex;
   - library round-2 fixes (7486da7) → Grok round 3.
 - Reviews are launched with T3 `delegate_task`, which only works on user-initiated turns. Queue them otherwise.
 
-### 1.5 Sign-off
-After 1.1–1.4: re-run `scripts/e2e/e2e_extensions.py`, `scripts/e2e/e2e_ext_updates.py`, `scripts/e2e/e2e_players.py` and
-`scripts/e2e/e2e_players_stopped.py` against the test node. Record the evidence, mark the Plugins/mods and Players checklist
-lines `[x]`, and move "Current focus" to Phase 5.
+### 1.5 Sign-off — done 2026-10-13
+Re-ran `scripts/e2e/*` against the test node on main 03a0dd7: 173 checks, all PASS (evidence in
+`docs/development/test-node.md`, "Phase 4b sign-off"). Plugins/mods and Players checklist lines marked `[x]`; current
+focus moved to Phase 5. Not blocking and still open: the live-only gaps in 1.3 and the optional confirmation rounds in
+1.4.
 
 ## 2. Remaining Phase 3–4 features
 - **Config editing with revisions, diff, rollback** (Phase 3, not started).
