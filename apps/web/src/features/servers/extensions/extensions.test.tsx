@@ -310,6 +310,77 @@ describe("Plugins & mods — installed", () => {
     await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/extensions")).length).toBe(before + 1));
   });
 
+  it("enabling a second copy: the event lists both ids and both rows show the duplicate", async () => {
+    const dup = (other: string) => ({
+      loadable: true,
+      metadataIndex: 0,
+      problems: [
+        {
+          code: "DUPLICATE_ID" as const,
+          level: "warning" as const,
+          message: `${other} declares the same plugin name "EssentialsX"; the server loads only one of them`,
+        },
+      ],
+    });
+    const copy = { id: EXT_ID_2, path: "plugins/copy.jar", filename: "copy.jar" };
+    routeFetch([
+      [
+        "GET",
+        /\/extensions$/,
+        ok(
+          makeExtensionList({
+            items: [
+              makeExtension(),
+              makeExtension({ ...copy, enabled: false, path: "plugins/copy.jar.disabled" }),
+            ],
+          }),
+        ),
+      ],
+      [
+        "PATCH",
+        new RegExp(`/extensions/${EXT_ID_2}$`),
+        ok({
+          extension: makeExtension({ ...copy, compatibility: dup("plugins/EssentialsX-2.21.0.jar") }),
+          restartRequired: false,
+        }),
+      ],
+      [
+        "GET",
+        new RegExp(`/extensions/${EXT_ID}$`),
+        ok(makeExtension({ compatibility: dup("plugins/copy.jar") })),
+      ],
+      [
+        "GET",
+        new RegExp(`/extensions/${EXT_ID_2}$`),
+        ok(makeExtension({ ...copy, compatibility: dup("plugins/EssentialsX-2.21.0.jar") })),
+      ],
+    ]);
+    const { client, last } = makeClient();
+    const user = userEvent.setup();
+    wrap(<ExtensionsTab server={owner} me={makeMe()} />, client);
+    act(() => last().open());
+    const switches = await screen.findAllByRole("switch", { name: "Enable EssentialsX" });
+    await user.click(switches[0]!);
+    expect(
+      await screen.findByText(/plugins\/EssentialsX-2\.21\.0\.jar declares the same plugin name/),
+    ).toBeTruthy();
+    act(() =>
+      last().receive({
+        op: "event",
+        topic: `server:${SERVER_ID}`,
+        type: "extensions.updated",
+        ts: 1,
+        data: {
+          serverId: SERVER_ID,
+          scan: { status: "completed", scannedAt: 2, jobId: null, error: null },
+          changed: [EXT_ID_2, EXT_ID],
+        },
+      }),
+    );
+    expect(await screen.findByText(/plugins\/copy\.jar declares the same plugin name/)).toBeTruthy();
+    expect(screen.getByText(/plugins\/EssentialsX-2\.21\.0\.jar declares the same plugin name/)).toBeTruthy();
+  });
+
   it("overlapping detail reads: an older response arriving after a newer 404 does not re-add the row", async () => {
     // First read of EXT_ID_2 (event 1) is held; the second read (event 2) answers 404 at once.
     let releaseFirst!: () => void;
