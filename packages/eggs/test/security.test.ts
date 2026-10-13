@@ -117,13 +117,9 @@ const timed = <T>(fn: () => T): { ms: number; value: T } => {
   return { ms: performance.now() - t0, value };
 };
 // Wall-clock bounds are generous on purpose: shared CI runners are slow and noisy. A backtracking engine on these
-// inputs takes ~2^40 steps (hours), so a 1 s ceiling still tells linear from catastrophic.
+// inputs takes ~2^40 steps (hours), so a 1 s ceiling still tells linear from catastrophic. Growth ratios are not
+// used: on shared runners GC dominates large inputs and skews them.
 const LINEAR_MS = 1000;
-/** Median time of `runs` calls; used to compare growth across input sizes instead of absolute milliseconds. */
-const medianMs = (fn: () => unknown, runs = 5): number => {
-  const ms = Array.from({ length: runs }, () => timed(fn).ms).sort((a, b) => a - b);
-  return ms[Math.floor(runs / 2)]!;
-};
 
 describe("#2 INI injection", () => {
   const openttd = () => ruleOf("pelican-games-standalone-egg-openttd.json");
@@ -220,14 +216,10 @@ describe("#4 linear-time regexes", () => {
   });
 
   it("stripAnsi is linear", () => {
-    // Growth, not absolute time: 16x the input costs ~12-16x when linear and ~256x when quadratic.
-    const line = (n: number) => "\u001b[" + ";".repeat(n);
-    const small = line(12_500);
-    const large = line(200_000);
-    stripAnsi(large); // warm up the JIT before measuring
-    const ratio = medianMs(() => stripAnsi(large)) / Math.max(medianMs(() => stripAnsi(small)), 0.05);
-    expect(ratio).toBeLessThan(40);
-    expect(timed(() => stripAnsi(large)).ms).toBeLessThan(LINEAR_MS);
+    // Unterminated CSI runs are the backtracking trap; 200k characters take milliseconds when linear.
+    for (const line of ["\u001b[" + ";".repeat(200_000), "\u001b[;".repeat(70_000)]) {
+      expect(timed(() => stripAnsi(line)).ms).toBeLessThan(LINEAR_MS);
+    }
     expect(stripAnsi("\u001b[1;31mred\u001b[0m \u009b0mx \u001b]0;title\u0007y \u001b(Bz")).toBe("red x y z");
   });
 });

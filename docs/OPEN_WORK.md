@@ -144,8 +144,9 @@ replace the note with the concrete gap. Affected lines:
   - `packages/minecraft` real-log fixtures (`test/fixtures/logs/*.log`) were never committed: `.gitignore` has `*.log`.
     They were recaptured 2026-10-12 23:55–23:59 UTC from the official jars (see the fixtures README), and
     `!**/test/fixtures/**/*.log` now keeps them tracked.
-  - `packages/eggs` wall-clock assertions (`stripAnsi is linear` < 5 ms) tripped on the slower runner. They now use a
-    growth ratio (16x input, ratio < 40) and generous 1 s ceilings for the RE2 cases.
+  - `packages/eggs` wall-clock assertions (`stripAnsi is linear` < 5 ms) tripped on the slower runner. They now use
+    inputs big enough that a backtracking/quadratic implementation needs seconds, with a 1 s ceiling (a growth-ratio
+    variant measured 12x locally but 141x on GitHub, where GC dominates).
   - The web "checks for updates" test raced the lazy Updates chunk (`getByRole` → `findByRole`).
 - The `typescript` job now starts the same stack as local development (`pnpm infra:up`: Postgres with
   `blockforge_test`, VictoriaMetrics with the test flags, HTTPS MinIO) instead of separate service containers, which
