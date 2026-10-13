@@ -160,6 +160,45 @@ describe("Plugins & mods — installed", () => {
     expect(screen.getByText(/scanned/)).toBeTruthy();
   });
 
+  it("a file found on disk and identified on Modrinth shows Unknown with the identification; duplicates show their problem", async () => {
+    routeFetch([
+      [
+        "GET",
+        /\/extensions$/,
+        ok(
+          makeExtensionList({
+            items: [
+              makeExtension({
+                source: "unknown",
+                installedAt: null,
+                installedBy: null,
+                compatibility: {
+                  loadable: true,
+                  metadataIndex: 0,
+                  problems: [
+                    {
+                      code: "DUPLICATE_ID",
+                      level: "warning",
+                      message:
+                        'plugins/copy.jar declares the same plugin name "EssentialsX"; the server loads only one of them',
+                    },
+                  ],
+                },
+              }),
+            ],
+          }),
+        ),
+      ],
+    ]);
+    wrap(<ExtensionsTab server={owner} me={makeMe()} />);
+    const link = (await screen.findByText("Identified on Modrinth")).closest("a")!;
+    expect(link.getAttribute("href")).toBe("https://modrinth.com/project/essentialsx");
+    const row = link.closest("tr")!;
+    expect(within(row).getByText("Unknown")).toBeTruthy();
+    expect(within(row).queryByText("Modrinth")).toBeNull();
+    expect(within(row).getByText(/declares the same plugin name "EssentialsX"/)).toBeTruthy();
+  });
+
   it("toggling and removing report the restart and whether the removal can be rolled back", async () => {
     const calls = routeFetch([
       ["GET", /\/extensions$/, ok(makeExtensionList())],
