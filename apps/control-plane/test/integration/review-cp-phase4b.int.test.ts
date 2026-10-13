@@ -278,7 +278,8 @@ describe("#4 round 3/4: a named line is not attributed when the same command ove
       }),
     );
     expect(await successAudits()).toBe(0);
-  });
+    // 14 servers are created one after another (concurrent auto placement would race for ports): allow for a slow runner.
+  }, 120_000);
 
   it("1.12.2: the first line naming the target decides (\"Could not op Steve\" before \"Opped Steve\" → ok:false); op Steve and op Alex together both resolve", async () => {
     const { owner, node } = await boot();

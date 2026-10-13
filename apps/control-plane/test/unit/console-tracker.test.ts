@@ -183,22 +183,60 @@ describe("ConsoleCommandTracker", () => {
     expect(s.tracker.contended(S, "b")).toBe(false);
   });
 
-  it("round 4: a send the node refused is forgotten at once; a timed-out one lingers", async () => {
+  /** sendAndAwait against a fake gateway whose send emits `before` console lines and then fails with `error`. */
+  function failing(error: Error, before: string[] = []) {
     const emitter = new EventEmitter();
-    const clock = { now: 0 };
-    let error: Error = new AgentCommandError("NODE_UNAVAILABLE", "node is not connected", true);
-    const gateway = Object.assign(emitter, { send: async () => Promise.reject(error) }) as unknown as AgentGateway;
-    const commands = new ConsoleCommandTracker(gateway, () => clock.now, LINGER);
+    const gateway = Object.assign(emitter, {
+      send: async () => {
+        if (before.length) emitter.emit("consoleLines", S, before.map((line, i) => ({ seq: i + 1, ts: 0, stream: "stdout", line })));
+        throw error;
+      },
+    }) as unknown as AgentGateway;
+    const commands = new ConsoleCommandTracker(gateway, () => 0, LINGER);
     const d = { gateway, consoles: new ConsoleBuffers(), commands };
-    const send = () => sendAndAwait(d, "node", S, "op Steve", () => null, 1_000);
-    await expect(send()).rejects.toBe(error);
-    commands.begin(S, "retry", false, "op Steve");
-    expect(commands.ambiguous(S, "retry")).toBe(false);
-    commands.end(S, "retry", true);
-    error = new AgentCommandError("TIMEOUT", "agent did not answer", true);
-    await expect(send()).rejects.toBe(error);
-    commands.begin(S, "retry2", false, "op Steve");
-    expect(commands.ambiguous(S, "retry2")).toBe(true);
+    const send = (decide: (lines: readonly string[]) => string | null = () => null) => sendAndAwait(d, "node", S, "op Steve", decide, 1_000);
+    const retryAmbiguous = () => {
+      commands.begin(S, "retry", false, "op Steve");
+      return commands.ambiguous(S, "retry");
+    };
+    return { send, retryAmbiguous };
+  }
+  const E = (code: string, message: string, stage?: "not_sent" | "agent_error" | "bad_result", retryable = false) => new AgentCommandError(code, message, retryable, undefined, stage);
+
+  it("round 5: only provably unwritten console sends are forgotten; everything else lingers", async () => {
+    const lingers = [
+      E("RUNTIME_ERROR", "write stdin: broken pipe", "agent_error", true),
+      E("RUNTIME_ERROR", "attach stdin: refused", "agent_error", true),
+      E("INTERNAL", "agent is shutting down", "agent_error", true),
+      E("VALIDATION_FAILED", "agent returned a result that does not match the contract", "bad_result"),
+      E("COMMAND_REJECTED", "duplicate command id (seen before an agent restart)", "agent_error"),
+      E("NODE_UNAVAILABLE", "node disconnected", undefined, true),
+      E("TIMEOUT", "agent did not answer workload.console within 15000 ms", undefined, true),
+      new Error("database unavailable"),
+    ];
+    const forgotten = [
+      E("NODE_UNAVAILABLE", "node is not connected", "not_sent", true),
+      E("VALIDATION_FAILED", "invalid command payload", "not_sent"),
+      E("NODE_UNAVAILABLE", "node disconnected", "not_sent", true),
+      E("CONFLICT", "workload is not running", "agent_error"),
+      E("NOT_FOUND", "workload x does not exist", "agent_error"),
+      E("BUSY", "agent command queue is full", "agent_error", true),
+      E("COMMAND_REJECTED", "command rejected: expired", "agent_error"),
+      E("VALIDATION_FAILED", "console input must be a single line", "agent_error"),
+    ];
+    for (const [errors, ambiguous] of [[lingers, true], [forgotten, false]] as const) {
+      for (const err of errors) {
+        const f = failing(err);
+        await expect(f.send()).rejects.toBe(err);
+        expect(f.retryAmbiguous(), `${err.message} (${(err as AgentCommandError).stage ?? "-"})`).toBe(ambiguous);
+      }
+    }
+  });
+
+  it("round 5: an answer that arrived before the send failed is returned (and the entry dropped)", async () => {
+    const f = failing(E("NODE_UNAVAILABLE", "node disconnected", undefined, true), ["[12:00:00 INFO]: Made Steve a server operator"]);
+    await expect(f.send((lines) => (lines.some((l) => l.includes("Made Steve")) ? "opped" : null))).resolves.toBe("opped");
+    expect(f.retryAmbiguous()).toBe(false);
   });
 
   it("prunes on insert and bounds the per-server map", () => {

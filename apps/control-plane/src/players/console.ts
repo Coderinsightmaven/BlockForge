@@ -85,24 +85,47 @@ export class ConsoleCommandTracker {
       this.insert(serverId, commandId, save ? { ...base, until: null, saveDeadline: t + SAVE_HOLD_MAX_MS, saveProgress: false } : { ...base, until: t + this.lingerMs });
     });
     gateway.on("consoleLines", (serverId, lines) => {
-      const m = this.servers.get(serverId);
-      if (!m) return;
-      const pending = () => [...m.values()].filter((e) => e.saveDeadline !== undefined);
-      const release = (e: Entry | undefined) => {
-        if (!e) return;
-        delete e.saveDeadline;
-        delete e.saveProgress;
-        e.until = this.now() + this.lingerMs;
-      };
-      for (const l of lines) {
-        if (l.stream === "system") continue;
-        if (isSaveFailure(l.line)) release(pending()[0]);
-        else if (isSaveProgress(l.line)) {
-          const e = pending().find((x) => !x.saveProgress);
-          if (e) e.saveProgress = true;
-        } else if (isSaveConfirmation(l.line)) release(pending().find((x) => x.saveProgress));
-      }
+      this.trackSaves(serverId, lines);
+      // One gateway listener for every waiter (no listener per overlapping wait).
+      for (const fn of [...(this.listeners.get(serverId) ?? [])]) fn(lines);
     });
+  }
+
+  private readonly listeners = new Map<string, Set<(lines: ConsoleLine[]) => void>>();
+
+  /** Calls `fn` with every batch of console lines of `serverId` until the returned function is called. */
+  subscribe(serverId: string, fn: (lines: ConsoleLine[]) => void): () => void {
+    let set = this.listeners.get(serverId);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(serverId, set);
+    }
+    set.add(fn);
+    return () => {
+      const cur = this.listeners.get(serverId);
+      cur?.delete(fn);
+      if (cur?.size === 0) this.listeners.delete(serverId);
+    };
+  }
+
+  private trackSaves(serverId: string, lines: readonly ConsoleLine[]): void {
+    const m = this.servers.get(serverId);
+    if (!m) return;
+    const pending = () => [...m.values()].filter((e) => e.saveDeadline !== undefined);
+    const release = (e: Entry | undefined) => {
+      if (!e) return;
+      delete e.saveDeadline;
+      delete e.saveProgress;
+      e.until = this.now() + this.lingerMs;
+    };
+    for (const l of lines) {
+      if (l.stream === "system") continue;
+      if (isSaveFailure(l.line)) release(pending()[0]);
+      else if (isSaveProgress(l.line)) {
+        const e = pending().find((x) => !x.saveProgress);
+        if (e) e.saveProgress = true;
+      } else if (isSaveConfirmation(l.line)) release(pending().find((x) => x.saveProgress));
+    }
   }
 
   private expired(e: Entry, t: number): boolean {
@@ -192,14 +215,27 @@ export class ConsoleCommandTracker {
 }
 
 /**
- * Whether a failed `workload.console` send may still have reached the server: no answer in time, or the
- * node dropped while the command was in flight. Refusals (node not connected, validation, agent error)
- * mean the line was never typed, so the command is forgotten at once instead of lingering.
+ * Agent error codes that `workload.console` returns only before anything is written to the server's
+ * stdin (services/node-agent: executor.run before the handler — BUSY queue full, UNSUPPORTED_COMMAND,
+ * COMMAND_REJECTED signature/expiry/pending approval, VALIDATION_FAILED payload; Driver.Console before
+ * writeConsole — VALIDATION_FAILED "single line", NOT_FOUND, CONFLICT "workload is not running").
+ * RUNTIME_ERROR is not here: attach and stdin write share it, and a failed write may be partial.
+ */
+const NEVER_WRITTEN = new Set(["BUSY", "UNSUPPORTED_COMMAND", "COMMAND_REJECTED", "VALIDATION_FAILED", "NOT_FOUND", "CONFLICT"]);
+
+/**
+ * Allowlist: a failed `workload.console` send is forgotten at once only when the line provably never
+ * reached the server — refused by the control plane before the frame went out (`stage: "not_sent"`),
+ * or an agent error from `NEVER_WRITTEN`. COMMAND_REJECTED "duplicate command id (seen before an agent
+ * restart)" is excluded: that command may have run before the restart. Everything else (RUNTIME_ERROR,
+ * INTERNAL "agent is shutting down", TIMEOUT, disconnects, results violating the contract, other
+ * exceptions) may have typed the line, so the command lingers.
  */
 function mayHaveRun(err: unknown): boolean {
   if (!(err instanceof AgentCommandError)) return true;
-  if (err.code === "TIMEOUT") return true;
-  return err.code === "NODE_UNAVAILABLE" && err.retryable && err.message !== "node is not connected";
+  if (err.stage === "not_sent") return false;
+  if (err.stage !== "agent_error" || !NEVER_WRITTEN.has(err.code)) return true;
+  return err.code === "COMMAND_REJECTED" && err.message.startsWith("duplicate command id");
 }
 
 export interface AwaitOptions<T> {
@@ -239,11 +275,13 @@ export async function sendAndAwait<T>(
   let resolveFn: (v: T | null) => void = () => undefined;
   const result = new Promise<T | null>((resolve) => (resolveFn = resolve));
   let settled = false;
+  let decided: T | null = null;
   const finish = (v: T | null, delivered = true) => {
     if (settled) return;
     settled = true;
+    decided = v;
     clearTimeout(timer);
-    d.gateway.off("consoleLines", onLines);
+    unsubscribe();
     d.commands.end(serverId, commandId, v !== null || !delivered);
     resolveFn(v);
   };
@@ -260,10 +298,7 @@ export async function sendAndAwait<T>(
     const v = decide(seen, d.commands.ambiguous(serverId, commandId));
     if (v !== null) finish(v);
   };
-  const onLines = (id: string, lines: ConsoleLine[]) => {
-    if (id === serverId) consume(lines);
-  };
-  d.gateway.on("consoleLines", onLines);
+  const unsubscribe = d.commands.subscribe(serverId, (lines) => consume(lines));
   const timer = setTimeout(() => {
     if (settled) return;
     // Lines already in the buffer but not yet delivered to the listener are part of the window.
@@ -275,6 +310,9 @@ export async function sendAndAwait<T>(
   try {
     await d.gateway.send(nodeId, "workload.console", { workloadId: serverId, line }, { timeoutMs: 15_000, commandId, ...(opts.userId ? { userId: opts.userId } : {}) });
   } catch (err) {
+    // The server's answer arrived before the error result (e.g. the node dropped after the write): it
+    // was decided on its own merits, so it is the result (the entry was already dropped as answered).
+    if (decided !== null) return decided;
     finish(null, mayHaveRun(err));
     throw err;
   }
