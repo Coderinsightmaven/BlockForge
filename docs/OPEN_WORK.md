@@ -56,8 +56,10 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
   `modrinth` ref (updates/rollback re-fetch keyed on the ref), externally changed BlockForge files become `unknown`;
   migration 0007 relabels scan-labelled rows (`installed_at` null); web shows "Unknown" + "Identified on Modrinth".
 - ~~Two copies of the same plugin or mod are not flagged.~~ Fixed: `flagDuplicateExtensions` (library) adds a
-  `DUPLICATE_ID` problem to every enabled copy at read time (plugins: warning, case-insensitive with spaces as `_`;
-  mods: error); disabled jars do not count. Library, control-plane integration and web tests.
+  `DUPLICATE_ID` problem to every enabled copy of a directory at read time (plugins: warning, case-insensitive with
+  spaces as `_`; mods: error unless a client-only Fabric copy); disabled jars do not count; `extensions.updated`
+  lists every affected copy. Library, control-plane integration and web tests. Grok review round 1 (2 major +
+  minors: stale sibling events, failed hash demoting provenance, rollback stamping/keep preference) fixed.
 - ~~Control-plane test "searches and shows projects … maps rate limits to 429" failed once in a full parallel run after
   the rate-limiter change (7486da7).~~ Fixed: the test injects the limiter clock/sleep (fixed clock, no real waits) and
   now also asserts the exact 60 s window and that nothing slept; two full parallel runs green.
