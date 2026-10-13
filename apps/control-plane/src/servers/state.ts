@@ -136,25 +136,44 @@ export class ServerStateService {
     return token;
   }
 
-  /** Lifecycle states in which a pre-empted plugin/mod change may still touch the files (nothing runs them). */
-  static readonly CLEANUP_STATES: readonly ServerState[] = ["stopped", "crashed"];
+  /**
+   * Lifecycle states in which a pre-empted plugin/mod change may still touch the files: only `stopped`.
+   * Not `crashed`: the agent's on-failure restart policy restarts a crashed container on its own (desired
+   * state stays running) and the reconciler follows it without touching the lock.
+   */
+  static readonly CLEANUP_STATES: readonly ServerState[] = ["stopped"];
 
   /**
-   * A cleanup hold for a plugin/mod change that lost its lock: an `extensions` hold (own token) taken only
-   * when no other operation holds the lock and the server is stopped or crashed. Null otherwise (the
-   * change must then leave the files alone).
+   * A cleanup hold for a plugin/mod change that lost its lock: an `extensions` hold under the caller's
+   * `token` (recorded by the caller before this call, so a crash after the commit can re-adopt it), taken
+   * only when no other operation holds the lock and the server is stopped. A row that already holds this
+   * exact token (an interrupted cleanup) is re-adopted while the server is stopped, else released. Returns
+   * whether the hold is held.
    */
-  async lockForCleanup(serverId: string): Promise<string | null> {
-    return this.db.transaction(async (tx) => {
+  async lockForCleanup(serverId: string, token: string): Promise<boolean> {
+    const taken = await this.db.transaction(async (tx) => {
       const [row] = await tx.select().from(servers).where(eq(servers.id, serverId)).for("update").limit(1);
-      if (!row) return null;
-      if (await this.liveOperation(tx, row)) return null;
-      if (!ServerStateService.CLEANUP_STATES.includes(row.state as ServerState)) return null;
-      const token = randomUUID();
+      if (!row) return false;
+      const stopped = ServerStateService.CLEANUP_STATES.includes(row.state as ServerState);
+      if (row.activeOperation === "extensions" && row.operationToken === token) {
+        if (stopped) return true;
+        await tx.update(servers).set({ activeOperation: null, operationToken: null, operationStartedAt: null, updatedAt: new Date(this.clock.now()) }).where(eq(servers.id, serverId));
+        return false;
+      }
+      if (await this.liveOperation(tx, row)) return false;
+      if (!stopped) return false;
       const now = new Date(this.clock.now());
       await tx.update(servers).set({ activeOperation: "extensions", activeJobId: null, operationToken: token, operationStartedAt: now, updatedAt: now }).where(eq(servers.id, serverId));
-      return token;
+      return true;
     });
+    this.notify(serverId);
+    return taken;
+  }
+
+  /** True while the cleanup hold `token` is held and the server is still stopped (checked before every file operation). */
+  async cleanupHeld(serverId: string, token: string): Promise<boolean> {
+    const [row] = await this.db.select({ token: servers.operationToken, state: servers.state }).from(servers).where(eq(servers.id, serverId));
+    return row?.token === token && ServerStateService.CLEANUP_STATES.includes(row.state as ServerState);
   }
 
   /** Releases a synchronous hold taken by `lock` (only its own: a pre-empting power action keeps its lock). */
