@@ -229,6 +229,12 @@ export function ServerPage({
           </ChunkBoundary>
         ) : null}
         {job ? <LazyJobProgress jobId={job.jobId} title={job.title} /> : null}
+        {!job && server.activeOperation === "extensions" ? (
+          // A synchronous change or the cleanup of an interrupted one: no job to follow, Start waits for it.
+          <div role="status" className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+            Changing plugins/mods… Starting the server waits until this finishes.
+          </div>
+        ) : null}
       </div>
 
       {tab === null ? (
