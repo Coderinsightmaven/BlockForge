@@ -27,6 +27,9 @@ Watchtower runs with `--label-enable`, so it only updates containers labelled
   `network_mode: host`, user `1000:1000` + supplementary group 983 for `/var/run/docker.sock`,
   `/proc:/host/proc:ro`, `/sys:/host/sys:ro`, `/home/game/blockforge` bind-mounted at the identical path.
 * Ports for BlockForge test servers: **25570–25600** (verified free). Never 25565.
+  Since the move to the Mac control plane (2026-10-13) its allocation pool is **25572–25600**: two untracked
+  BlockForge containers from the Windows control plane (`bf-1cacbc31-…` on 25571, `bf-123abf52-…` on 25570) are
+  left running and must not be touched. `scripts/e2e` refuses to start a server on 25565, 25570 or 25571.
 * Capacity: set node allocatable memory to ≈ 6 GiB — the ATM11 server already uses most of the RAM.
 
 ## Deploying a new agent build
@@ -38,20 +41,32 @@ ssh game@10.10.10.240 'cd ~/blockforge-deploy && docker compose up -d agent'  # 
 ssh game@10.10.10.240 'docker logs --since 30s blockforge-agent'               # expect "connected to control plane"
 ```
 `~/blockforge-deploy` holds the compose file (a copy of `infra/compose/docker-compose.agent.yml`) and `.env`
-(`BF_DATA_ROOT=/home/game/blockforge`, `BF_DOCKER_GID=983`, control-plane URL `http://127.0.0.1:18080`). The agent's
-identity and SFTP host key live in the data root, so re-deploying keeps the enrollment. Workload containers keep running
-across an agent restart. Last deployed: 61669b0 (2026-10-12).
+(`BF_DATA_ROOT=/home/game/blockforge`, `BF_DOCKER_GID=983`, control-plane URL `http://127.0.0.1:18081` since the
+Mac move; it was `:18080` for the Windows workstation). The agent's identity and SFTP host key live in the data root,
+so re-deploying keeps the enrollment. Workload containers keep running across an agent restart. Last deployed:
+61669b0 (2026-10-12).
+
+**Re-enrollment for the Mac control plane (2026-10-13):** the agent was enrolled fresh against the Mac control plane.
+The Windows-era identity is backed up on the node in `~/blockforge-agent-identity-windows-20261013` and the old
+`.env` in `~/blockforge-deploy/.env.bak-windows`; the two servers that identity managed (on 25570/25571) are
+untracked by the Mac control plane and left running.
 
 ## Control-plane connectivity (dev)
-The control plane runs on the dev workstation (192.168.10.159). The agent reaches it through an SSH
-reverse tunnel opened from the workstation:
+The control plane runs on the dev Mac (`scripts/dev-up.sh --tunnel`, stop with `scripts/dev-down.sh`; earlier the
+Windows workstation 192.168.10.159 with the `.ps1` helpers). The agent reaches it through an SSH reverse tunnel
+opened from the Mac:
 
 ```
-ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -R 127.0.0.1:18080:127.0.0.1:8080 game@10.10.10.240
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -R 127.0.0.1:18081:127.0.0.1:8080 game@10.10.10.240
 ```
 
-Agent URL: `http://127.0.0.1:18080` with `--insecure-allow-http` (allowed: loopback; transport encrypted by SSH).
-Verified 2026-10-11: tunnel established, remote `127.0.0.1:18080` reached a workstation service.
+Agent URL: `http://127.0.0.1:18081` with `--insecure-allow-http` (allowed: loopback; transport encrypted by SSH).
+Node port 18081 because the Windows workstation may still hold its tunnel on 18080 (`BF_TUNNEL_PORT` overrides the
+port in `dev-up.sh`; the agent's URL must match). Verified 2026-10-11 (18080, Windows) and 2026-10-13 (18081, Mac).
+
+## End-to-end scripts
+`scripts/e2e/*.py` (see `scripts/e2e/README.md`) replace the uncommitted `.data/e2e_*.py` scripts that the
+Phase 4b evidence below refers to; they did not survive the move off Windows and were rewritten.
 
 ## Phase 3 end-to-end evidence (2026-10-12)
 * Allocation pool 25570–25600 (`0.0.0.0`, alias 10.10.10.240); allocating 25565 warned "already in use" (ATM11) and was removed.
@@ -125,3 +140,24 @@ Control plane restarted with migration 0005 (`servers.extensions.view` in the ro
   removed again through the keep area. Follow-ups noted: identified on-disk copies are labelled `source: "modrinth"`
   (contract says found-on-disk = `unknown` + a Modrinth ref), and two copies of the same plugin are not flagged.
 * No error-level lines in the control-plane log.
+
+## Phase 4b sign-off re-run (2026-10-13, main afebd2d)
+Mac control plane on main afebd2d, agent re-enrolled through the 18081 tunnel; `scripts/e2e/*` (commit d11bb86) run in
+order against `e2e-paper` (Paper 26.3, 25572) and `e2e-vanilla` (Pterodactyl Vanilla egg, 26.3, 25573). All PASS:
+`setup_servers.py` 8 checks, `e2e_players.py` 49, `e2e_players_stopped.py` 46, `e2e_extensions.py` 32,
+`e2e_ext_updates.py` 24 (159 in total). No error-level lines in the control-plane log.
+* **Players, running Paper:** overview from `list uuids` (0/20, online-mode, whitelist on), Mojang lookup `Notch` →
+  `069a79f4-…`; all eight console actions confirmed by the server's feedback and re-read lists; kick of an offline
+  player → `ok: false` "No player was found"; `expiresAt` / op level while running → 409 `requires_stopped`; `op @a`,
+  an IPv6 ban and an unknown field → 400.
+* **Players, stopped Vanilla egg:** file edits in the server's Gson format (`expires` "2100-01-01 00:00:00 +0000",
+  IP ban `forever`, ops level 2 + bypass); kick / whitelist-reload → 409 `not_running`; after start the server's own
+  `whitelist list`, `banlist players`, `banlist ips` and `op` show every entry loaded; cleanup through the console.
+* **Plugins & mods:** full scan 1.2 s; install job (fetch + rescan) 1.2 s → Chunky 1.5.3 (`modrinth`, SHA-512 equal
+  to the plan, loadable); disable/enable; upload → remove → rollback; restart → `[Chunky] Enabling Chunky v1.5.3`.
+* **Updates:** `GET …/extensions/updates` 200; Chunky 1.4.40 copied in through the file manager identified by SHA-512
+  (`P3y2MXnd`) and offered 1.5.3; then 1.4.40 installed through the install route and **updated to 1.5.3 through
+  `POST …/extensions/updates/apply`** (job 1.2 s, result `updated`, history `update` 1.4.40 → 1.5.3 with
+  `rollback.available`) — the first live verification of update apply.
+* Still open from this run: identified on-disk copies are labelled `source: "modrinth"` (see above); the project
+  route's prerelease check used `luckperms`, which has no prereleases for 26.3 (the scripts now use `viaversion`).

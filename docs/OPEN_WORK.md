@@ -183,8 +183,9 @@ replace the note with the concrete gap. Affected lines:
   across from the Windows checkout because they were never committed: the gitignored `.data/` directory, including
   the e2e scripts named in 1.5 (`.data/e2e_*.py`), and the minecraft log fixtures (recaptured, see 5.2). The e2e
   scripts were rewritten and committed under `scripts/e2e/` (see its README). `scripts/dev-up.sh --tunnel` /
-  `scripts/dev-down.sh` are the macOS/Linux equivalents of the `.ps1` helpers; set `BF_TUNNEL_PORT=18081` while the
-  Windows workstation still holds node port 18080. The test-node agent was re-enrolled fresh against the Mac control
+  `scripts/dev-down.sh` are the macOS/Linux equivalents of the `.ps1` helpers; `dev-up.sh` uses node port 18081 by
+  default (`BF_TUNNEL_PORT`), since the Windows workstation may still hold 18080; `dev-down.sh` only signals processes
+  it can verify as this checkout's (command line + working directory). The test-node agent was re-enrolled fresh against the Mac control
   plane (old identity backed up on the node in `~/blockforge-agent-identity-windows-20261013`).
 - **Start and stop:** `scripts/dev-up.ps1 -Tunnel` starts the control plane and the reverse tunnel to the test node;
   `scripts/dev-down.ps1` stops them, together with the web dev server. Start the web dev server manually:
