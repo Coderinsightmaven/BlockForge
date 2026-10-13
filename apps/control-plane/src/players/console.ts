@@ -76,6 +76,8 @@ export class ConsoleCommandTracker {
     gateway: AgentGateway,
     private readonly now: () => number,
     private readonly lingerMs = DEFAULT_COMMAND_LINGER_MS,
+    /** Reports a subscriber that threw (the remaining subscribers still get the lines). */
+    private readonly onSubscriberError: (err: unknown) => void = () => undefined,
   ) {
     gateway.on("consoleCommand", (serverId, commandId, line) => {
       if (this.own.has(commandId)) return;
@@ -87,7 +89,14 @@ export class ConsoleCommandTracker {
     gateway.on("consoleLines", (serverId, lines) => {
       this.trackSaves(serverId, lines);
       // One gateway listener for every waiter (no listener per overlapping wait).
-      for (const fn of [...(this.listeners.get(serverId) ?? [])]) fn(lines);
+      // A throwing waiter must not keep the others (or later gateway listeners) from the batch.
+      for (const fn of [...(this.listeners.get(serverId) ?? [])]) {
+        try {
+          fn(lines);
+        } catch (err) {
+          this.onSubscriberError(err);
+        }
+      }
     });
   }
 
@@ -190,6 +199,13 @@ export class ConsoleCommandTracker {
   }
 
   /** Our command finished: `answered` (or never delivered) drops it; otherwise it may still answer for `lingerMs`. */
+  /** Drops a command that provably never reached the server (also after its waiter settled). */
+  forget(serverId: string, commandId: string): void {
+    this.own.delete(commandId);
+    this.servers.get(serverId)?.delete(commandId);
+    this.prune(serverId);
+  }
+
   end(serverId: string, commandId: string, answered: boolean): void {
     this.own.delete(commandId);
     const m = this.servers.get(serverId);
@@ -255,7 +271,9 @@ export interface AwaitOptions<T> {
  * sees every non-system line since the command, in order, each time output arrives, plus whether a
  * command with the same action and target overlapped this one (`ConsoleCommandTracker.ambiguous`),
  * and ends the wait with a non-null value. Otherwise the wait lasts `timeoutMs` and `opts.atDeadline` decides
- * (null when absent). Throws only when the command could not be delivered.
+ * (null when absent). When the send fails it throws, except that an answer already decided is returned
+ * if the error leaves open whether the line reached the server (`mayHaveRun`: timeouts, disconnects,
+ * RUNTIME_ERROR, …); errors proving it was never written always throw.
  */
 export async function sendAndAwait<T>(
   d: { gateway: AgentGateway; consoles: ConsoleBuffers; commands: ConsoleCommandTracker },
@@ -310,10 +328,21 @@ export async function sendAndAwait<T>(
   try {
     await d.gateway.send(nodeId, "workload.console", { workloadId: serverId, line }, { timeoutMs: 15_000, commandId, ...(opts.userId ? { userId: opts.userId } : {}) });
   } catch (err) {
-    // The server's answer arrived before the error result (e.g. the node dropped after the write): it
-    // was decided on its own merits, so it is the result (the entry was already dropped as answered).
-    if (decided !== null) return decided;
-    finish(null, mayHaveRun(err));
+    const ran = mayHaveRun(err);
+    // The server's answer arrived before an error result that leaves open whether the line was written
+    // (e.g. the node dropped after the write): it was decided on its own merits, so it is the result.
+    // Not when the error proves the line was never written (then the "answer" was someone else's), and
+    // not for errors that are not AgentCommandErrors (thrown by the gateway before dispatch, e.g. the
+    // command-row insert; they still linger for ambiguity, the conservative side).
+    if (decided !== null && err instanceof AgentCommandError && ran) return decided;
+    // Provably unwritten: forget the command even if the feedback window already ended.
+    if (!ran) d.commands.forget(serverId, commandId);
+    else if (decided !== null) {
+      // The entry was dropped as answered, but the answer is not ours to keep: the line may still be typed.
+      d.commands.begin(serverId, commandId, opts.quiet ?? false, line);
+      d.commands.end(serverId, commandId, false);
+    }
+    finish(null, ran);
     throw err;
   }
   consume(d.consoles.tail(serverId, 2000).lines);

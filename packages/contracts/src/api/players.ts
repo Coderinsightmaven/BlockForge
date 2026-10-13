@@ -132,9 +132,12 @@ const BanExpiry = EpochMs.max(MAX_BAN_EXPIRY_MS);
  * Errors: `kick` and `whitelist-reload` on a stopped server → 409 `INVALID_STATE` (`details.reason:
  * "not_running"`); `expiresAt`, `op.level` or `op.bypassesPlayerLimit` on a running server (the console
  * commands cannot express them) → 409 `INVALID_STATE` (`"requires_stopped"`); transitional states
- * (starting/stopping/…) → 409 `INVALID_STATE`; no recognised feedback within the timeout → 504
- * `UPSTREAM_ERROR` (`details: {reason: "no_feedback", sent: true}` — the command was delivered, its outcome
- * is unknown); unknown premium name → 404 `NOT_FOUND`; Mojang throttling → 429 `RATE_LIMITED`
+ * (starting/stopping/…) → 409 `INVALID_STATE`; no attributable feedback within the timeout (none, ambiguous
+ * with another command, or only target-less lines while another command could be answering) → 504
+ * `UPSTREAM_ERROR` (`details: {reason: "no_feedback", sent: true}` — the command was sent, its outcome is
+ * unknown); a console command the agent refused or could not deliver → that agent error (503/504/502),
+ * except that feedback already attributed before an error that leaves open whether the line reached the
+ * server (timeout, disconnect, runtime error) is still returned; unknown premium name → 404 `NOT_FOUND`; Mojang throttling → 429 `RATE_LIMITED`
  * (`upstream: "mojang"`); Velocity / non-Minecraft servers → 422 `PRECONDITION_FAILED`
  * (`"unsupported_software"`).
  *

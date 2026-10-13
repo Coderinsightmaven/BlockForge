@@ -184,17 +184,18 @@ describe("ConsoleCommandTracker", () => {
   });
 
   /** sendAndAwait against a fake gateway whose send emits `before` console lines and then fails with `error`. */
-  function failing(error: Error, before: string[] = []) {
+  function failing(error: Error, before: string[] = [], delayMs = 0) {
     const emitter = new EventEmitter();
     const gateway = Object.assign(emitter, {
       send: async () => {
         if (before.length) emitter.emit("consoleLines", S, before.map((line, i) => ({ seq: i + 1, ts: 0, stream: "stdout", line })));
+        if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
         throw error;
       },
     }) as unknown as AgentGateway;
     const commands = new ConsoleCommandTracker(gateway, () => 0, LINGER);
     const d = { gateway, consoles: new ConsoleBuffers(), commands };
-    const send = (decide: (lines: readonly string[]) => string | null = () => null) => sendAndAwait(d, "node", S, "op Steve", decide, 1_000);
+    const send = (decide: (lines: readonly string[]) => string | null = () => null, timeoutMs = 1_000) => sendAndAwait(d, "node", S, "op Steve", decide, timeoutMs);
     const retryAmbiguous = () => {
       commands.begin(S, "retry", false, "op Steve");
       return commands.ambiguous(S, "retry");
@@ -231,6 +232,49 @@ describe("ConsoleCommandTracker", () => {
         expect(f.retryAmbiguous(), `${err.message} (${(err as AgentCommandError).stage ?? "-"})`).toBe(ambiguous);
       }
     }
+  });
+
+  it("round 6: an answer decided before an error proving the line was never written is not returned", async () => {
+    const opped = (lines: readonly string[]) => (lines.some((l) => l.includes("Made Steve")) ? "opped" : null);
+    const line = ["[12:00:00 INFO]: Made Steve a server operator"];
+    for (const err of [E("NODE_UNAVAILABLE", "node is not connected", "not_sent", true), E("NOT_FOUND", "workload x does not exist", "agent_error"), E("CONFLICT", "workload is not running", "agent_error")]) {
+      const f = failing(err, line);
+      await expect(f.send(opped), err.message).rejects.toBe(err);
+      expect(f.retryAmbiguous()).toBe(false);
+    }
+    // Not an AgentCommandError (the gateway's command-row insert): thrown, and kept lingering (conservative).
+    const dbErr = new Error("database unavailable");
+    const f = failing(dbErr, line);
+    await expect(f.send(opped)).rejects.toBe(dbErr);
+    expect(f.retryAmbiguous()).toBe(true);
+  });
+
+  it("round 6: a provably unwritten send is forgotten even after the feedback window ended", async () => {
+    const err = E("CONFLICT", "workload is not running", "agent_error");
+    const f = failing(err, [], 100);
+    await expect(f.send(() => null, 10)).rejects.toBe(err);
+    expect(f.retryAmbiguous()).toBe(false);
+    const t = E("RUNTIME_ERROR", "write stdin: broken pipe", "agent_error", true);
+    const g = failing(t, [], 100);
+    await expect(g.send(() => null, 10)).rejects.toBe(t);
+    expect(g.retryAmbiguous()).toBe(true);
+  });
+
+  it("round 6: a throwing subscriber does not keep the others from the lines", () => {
+    const emitter = new EventEmitter();
+    const errors: unknown[] = [];
+    const tracker = new ConsoleCommandTracker(emitter as unknown as AgentGateway, () => 0, LINGER, (e) => errors.push(e));
+    const got: string[] = [];
+    let later = 0;
+    tracker.subscribe(S, () => {
+      throw new Error("boom");
+    });
+    tracker.subscribe(S, (lines) => got.push(...lines.map((l) => l.line)));
+    emitter.on("consoleLines", () => later++); // e.g. player session tracking, registered after the tracker
+    emitter.emit("consoleLines", S, [{ seq: 1, ts: 0, stream: "stdout", line: "x" }]);
+    expect(got).toEqual(["x"]);
+    expect(later).toBe(1);
+    expect(errors).toHaveLength(1);
   });
 
   it("round 5: an answer that arrived before the send failed is returned (and the entry dropped)", async () => {

@@ -111,7 +111,7 @@ export class PlayersService {
   readonly mojangLimiter: MojangRateLimiter;
 
   constructor(private readonly d: PlayersDeps) {
-    this.commands = new ConsoleCommandTracker(d.gateway, () => d.clock.now(), d.commandLingerMs);
+    this.commands = new ConsoleCommandTracker(d.gateway, () => d.clock.now(), d.commandLingerMs, (err) => d.logger.warn({ err }, "console feedback waiter failed"));
     this.mojangLimiter = d.mojangLimiter ?? new MojangRateLimiter();
   }
 
