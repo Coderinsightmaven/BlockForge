@@ -11,27 +11,38 @@ review's findings are still open (section 1).
 ## 1. Finish Phase 4b (Plugins & mods, Players) — before sign-off
 
 ### 1.1 Control-plane review findings (Grok) — `docs/reviews/2026-10-12-control-plane-phase4b.md`
-All open, all reproduced by the reviewer:
-- **High 1:** failed-install undo restores the kept jar without re-hashing it. Hash right after the move into the keep
-  area, re-hash before every undo/rollback rename, refuse on mismatch.
-- **High 2:** Modrinth rollback fetches onto an occupied old filename, and its undo deletes the occupant.
-- **High 3:** extension jobs don't take `servers.active_operation`. Backup, restore, reinstall and delete can start
-  mid-install; one shared lock is needed, re-checked at each step.
+All reproduced by the reviewer; fixed items are marked (tests in `extensions-review.int.test.ts`), the rest are open:
+- **High 1 — fixed:** kept jars are hashed right after the move; every undo/rollback re-hashes and refuses on mismatch
+  (left in the keep area, job failed with the reason).
+- **High 2 — fixed:** Modrinth rollback downloads to a temporary name and renames without overwriting; undo deletes
+  only files the job wrote (digest checked).
+- **High 3 — fixed:** file-changing extension work holds `servers.active_operation = 'extensions'` (new additive
+  `ServerOperation` value, migration 0006), re-checked at every step; backup/restore/reinstall/delete get the usual 409;
+  stop/restart/kill pre-empt it on a running server (the change undoes itself).
+- **Known gap (from review round 4, not fixed):** an extension job that still holds its own `extensions` lock keeps
+  changing plugin/mod files after the workload crashed, even when the agent's on-failure restart policy restarts it
+  (the reconciler follows crashed → starting → running without touching the lock). Proposed: a job notes the
+  workload state it started under and stops file operations (fenced undo) once the server is neither stopped nor
+  running in the same run it started with.
+- **Round 2 (Grok) on these fixes — fixed:** blocker B1 (failed finalize pinned the lock), majors 2–5 (pre-emption,
+  journaled digests, kept files always recorded, verify-after-move) and minors 6–11; rounds 3–4 (fenced undo on
+  stopped servers only, resumable undo records and cleanup holds); see the review record.
 - **High 4:** player action feedback accepts target-less failure lines from other commands. Require the target, else 504
   `no_feedback`.
-- **Major 5:** job recovery re-runs the non-idempotent apply step (lost original, double fetch).
-- **Major 6:** remove/upload-replace store the scan-time hash as `keptSha512`, so changed jars can't be rolled back.
-- **Medium 7:** extension history shows the session user's e-mail to extension viewers (store the username).
+- **Major 5 — fixed:** apply is idempotent (job-derived history ids and keep names, a checkpointed journal, history
+  written in the step's completing transaction via the new `ctx.checkpoint`).
+- **Major 6 — fixed:** remove/upload-replace store the digest of the file actually kept.
+- **Medium 7 — fixed:** history stores the username; migration 0006 rewrites stored e-mail addresses.
 - **Medium 8:** Mojang 429 ignores `Retry-After`; no shared Mojang limiter. This touches `packages/minecraft` and the
   control plane.
 - **Low L1–L7:**
   - realtime revocation lag (30 s);
-  - `fs.hash` batch length unchecked;
-  - lock check-then-act in synchronous ops;
-  - keep pruning without a prefix check;
+  - `fs.hash` batch length unchecked — fixed;
+  - lock check-then-act in synchronous ops — fixed;
+  - keep pruning without a prefix check — fixed;
   - unaudited op/deop 403;
-  - the first scan hides `agent_outdated`;
-  - `artifact.fetch` missing from the capability check.
+  - the first scan hides `agent_outdated` — fixed;
+  - `artifact.fetch` missing from the capability check — fixed.
 
 ### 1.2 Follow-ups from the live run
 - Jars found on disk and identified by hash are labelled `source: "modrinth"`. The contract says found-on-disk =

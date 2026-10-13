@@ -44,6 +44,25 @@ describe("server lifecycle", () => {
     expect(canStartOperation("start", "running", null)).toBe(false);
     expect(canStartOperation("restart", "running", "backup")).toBe(false);
     expect(canStartOperation("kill", "stopping", "stop")).toBe(true);
+    // Plugin/mod changes: stop/restart/kill pre-empt them on a running server; nothing else does.
+    expect(canStartOperation("kill", "running", "extensions")).toBe(true);
+    expect(canStartOperation("stop", "degraded", "extensions")).toBe(true);
+    expect(canStartOperation("restart", "running", "extensions")).toBe(true);
+    expect(canStartOperation("start", "stopped", "extensions")).toBe(false);
+    expect(canStartOperation("kill", "stopped", "extensions")).toBe(false);
+    // A server that crashed during the change may be started/restarted (pre-empting it), not stopped/killed.
+    expect(canStartOperation("start", "crashed", "extensions")).toBe(true);
+    expect(canStartOperation("restart", "crashed", "extensions")).toBe(true);
+    expect(canStartOperation("kill", "crashed", "extensions")).toBe(false);
+    expect(canStartOperation("stop", "crashed", "extensions")).toBe(false);
+    expect(canStartOperation("backup", "crashed", "extensions")).toBe(false);
+    expect(canStartOperation("start", "crashed", "backup")).toBe(false);
+    expect(canStartOperation("backup", "running", "extensions")).toBe(false);
+    expect(canStartOperation("restore", "running", "extensions")).toBe(false);
+    expect(canStartOperation("delete", "stopped", "extensions")).toBe(false);
+    expect(canStartOperation("extensions", "running", "extensions")).toBe(false);
+    expect(canStartOperation("extensions", "running", "backup")).toBe(false);
+    expect(canStartOperation("extensions", "stopped", null)).toBe(true);
     expect(canStartOperation("delete", "running", null)).toBe(false);
   });
 

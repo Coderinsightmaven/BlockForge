@@ -73,7 +73,7 @@ function TabFallback() {
   );
 }
 
-/** Job shown above the tabs: provisioning / reinstall (power jobs are quick and show as state). */
+/** Job shown above the tabs: provisioning / reinstall / plugin-mod changes (power jobs are quick and show as state). */
 function activeInstallJob(server: Server): { jobId: string; title: string } | null {
   if (!server.activeJobId) return null;
   if (server.activeOperation === "provision" || server.state === "provisioning")
@@ -84,6 +84,8 @@ function activeInstallJob(server: Server): { jobId: string; title: string } | nu
     return { jobId: server.activeJobId, title: "Deleting server" };
   if (server.activeOperation === "restore" || server.state === "restoring")
     return { jobId: server.activeJobId, title: "Restoring backup" };
+  if (server.activeOperation === "extensions")
+    return { jobId: server.activeJobId, title: "Changing plugins/mods" };
   return null;
 }
 
@@ -227,6 +229,12 @@ export function ServerPage({
           </ChunkBoundary>
         ) : null}
         {job ? <LazyJobProgress jobId={job.jobId} title={job.title} /> : null}
+        {!job && server.activeOperation === "extensions" ? (
+          // A synchronous change or the cleanup of an interrupted one: no job to follow, Start waits for it.
+          <div role="status" className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
+            Changing plugins/mods… Starting the server waits until this finishes.
+          </div>
+        ) : null}
       </div>
 
       {tab === null ? (

@@ -11,18 +11,19 @@ import { extensionDirFor } from "@blockforge/minecraft";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Logger } from "pino";
 import { AgentCommandError, type AgentGateway } from "../agents/gateway.js";
-import type { AuditActor, AuditService } from "../audit/service.js";
+import { actorUserId, type AuditActor, type AuditService } from "../audit/service.js";
 import type { BrowserTransfers } from "../files/browser-transfers.js";
 import type { TransferBroker } from "../agents/transfers.js";
 import type { Db, DbOrTx } from "../db/client.js";
 import type { extensionHistory, installedExtensions, servers } from "../db/schema/index.js";
-import { extensionScans, jobs, users } from "../db/schema/index.js";
+import { extensionScans, jobs, servers as serversTable, users } from "../db/schema/index.js";
 import type { JobRunner } from "../jobs/runner.js";
 import { JobError } from "../jobs/types.js";
 import type { Clock } from "../lib/clock.js";
-import { conflict, invalidState, unprocessable } from "../lib/errors.js";
+import { AppError, conflict, invalidState, unprocessable } from "../lib/errors.js";
 import type { ServerEventPublisher } from "../realtime/server-events.js";
 import type { ServerAccessService } from "../servers/access.js";
+import type { ServerStateService } from "../servers/state.js";
 import type { SettingsService } from "../settings/service.js";
 import type { Upstreams } from "./upstream.js";
 
@@ -42,6 +43,25 @@ export const EXTENSION_JOB_TYPES: readonly string[] = Object.values(EXTENSION_JO
 /** Keep area for removed/replaced jars and the upload staging area (data root, outside plugins/mods). */
 export const KEPT_DIR = ".blockforge/extensions/kept";
 export const UPLOAD_DIR = ".blockforge/extensions/uploads";
+/** Rollback downloads land here first and are renamed into place without overwriting anything. */
+export const FETCH_DIR = ".blockforge/extensions/fetch";
+
+export const keptPathOf = (name: string) => `${KEPT_DIR}/${name}.jar`;
+
+/** A normalised path strictly inside the keep area (`.blockforge/extensions/kept/<file>`), else null. */
+export function keptAreaPath(path: string): string | null {
+  if (path.includes("\0") || path.includes("\\") || path.startsWith("/")) return null;
+  const parts: string[] = [];
+  for (const seg of path.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") return null;
+    parts.push(seg);
+  }
+  const norm = parts.join("/");
+  const prefix = `${KEPT_DIR}/`;
+  if (!norm.startsWith(prefix) || norm.length === prefix.length || norm.slice(prefix.length).includes("/")) return null;
+  return norm;
+}
 export const KEPT_RETENTION_MS = 30 * 86_400_000;
 export const KEPT_PER_SERVER = 20;
 export const HISTORY_RETENTION_MS = 365 * 86_400_000;
@@ -60,6 +80,8 @@ export interface ExtensionDeps {
   access: ServerAccessService;
   browser: BrowserTransfers;
   transfers: TransferBroker;
+  /** Server operation locks (`servers.active_operation`): file-changing extension work holds `extensions`. */
+  state: ServerStateService;
 }
 
 /** Where a server keeps its extensions (null: vanilla / non-Minecraft / unknown software). */
@@ -98,10 +120,10 @@ export function assertExtensionsAllowed(server: Pick<ServerRow, "state" | "activ
 }
 
 /** Agent commands the extension features need (advertised in the agent's `hello` capabilities). */
-export const EXTENSION_CAPABILITIES = ["fs.hash", "jar.readEntries"] as const;
+export const EXTENSION_CAPABILITIES = ["fs.hash", "jar.readEntries", "artifact.fetch"] as const;
 
 /**
- * A connected agent that predates `fs.hash` / `jar.readEntries` gets a clear refusal instead of a
+ * A connected agent that predates `fs.hash` / `jar.readEntries` (or lacks `artifact.fetch`) gets a clear refusal instead of a
  * command timeout (a disconnected node fails later with NODE_UNAVAILABLE).
  */
 export function missingCapabilities(gateway: AgentGateway, nodeId: string): string[] {
@@ -126,7 +148,8 @@ export async function ensureScanRow(db: DbOrTx, serverId: string): Promise<void>
 
 /**
  * Takes the per-server extension job lock for `jobId` (inside the enqueue transaction). A lock held
- * by a job that already ended (crash) is taken over.
+ * by a job that already ended (crash) is taken over. Refused while other extension work holds the
+ * server's `extensions` operation lock (a synchronous change, or another job).
  */
 export async function acquireExtensionLock(db: DbOrTx, serverId: string, jobId: string): Promise<void> {
   await ensureScanRow(db, serverId);
@@ -135,15 +158,36 @@ export async function acquireExtensionLock(db: DbOrTx, serverId: string, jobId: 
     const [j] = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, row.activeJobId));
     if (j && (j.status === "queued" || j.status === "running")) throw jobRunning();
   }
+  const [srv] = await db.select({ op: serversTable.activeOperation, job: serversTable.activeJobId }).from(serversTable).where(eq(serversTable.id, serverId));
+  if (srv?.op === "extensions" && srv.job !== jobId) {
+    const [j] = srv.job ? await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, srv.job)) : [];
+    if (!srv.job || (j && (j.status === "queued" || j.status === "running"))) throw jobRunning();
+  }
   await db.update(extensionScans).set({ activeJobId: jobId }).where(eq(extensionScans.serverId, serverId));
 }
 
-/** Refuses synchronous changes while an extension job holds the lock. */
-export async function assertNoExtensionJob(db: DbOrTx, serverId: string): Promise<void> {
-  const [row] = await db.select({ activeJobId: extensionScans.activeJobId }).from(extensionScans).where(eq(extensionScans.serverId, serverId));
+/** Refuses synchronous changes while an extension job holds the lock (`lock`: row-locked, inside a transaction). */
+export async function assertNoExtensionJob(db: DbOrTx, serverId: string, opts: { lock?: boolean } = {}): Promise<void> {
+  const q = db.select({ activeJobId: extensionScans.activeJobId }).from(extensionScans).where(eq(extensionScans.serverId, serverId));
+  const [row] = opts.lock ? await q.for("update") : await q;
   if (!row?.activeJobId) return;
   const [j] = await db.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, row.activeJobId));
   if (j && (j.status === "queued" || j.status === "running")) throw jobRunning();
+}
+
+/**
+ * Takes the server's `extensions` operation lock (`servers.active_operation`, the lock backup, restore,
+ * reinstall and delete take) inside `tx`, before anything else is written, and returns the holder token
+ * (a job then `attachJob`s itself in the same transaction). Another extension change holding it is
+ * reported as `extension_job_running`; any other operation as the usual 409 INVALID_STATE.
+ */
+export async function lockExtensions(d: Pick<ExtensionDeps, "state">, tx: DbOrTx, serverId: string): Promise<string> {
+  try {
+    return await d.state.lock(tx, serverId, "extensions");
+  } catch (err) {
+    if (err instanceof AppError && (err.details as { activeOperation?: unknown } | undefined)?.activeOperation === "extensions") throw jobRunning();
+    throw err;
+  }
 }
 
 export async function releaseExtensionLock(db: DbOrTx, serverId: string, jobId: string): Promise<void> {
@@ -203,10 +247,18 @@ export async function toDtos(db: DbOrTx, rows: readonly ExtensionRow[]): Promise
   return rows.map((r) => toDto(r, r.installedBy ? (names.get(r.installedBy) ?? null) : null));
 }
 
-export function historyActor(actor: AuditActor, opts: { scheduleId?: string | null } = {}): Pick<HistoryRow, "actorType" | "actorId" | "actorName"> {
-  if (opts.scheduleId) return { actorType: "schedule", actorId: opts.scheduleId, actorName: actor.actorName?.slice(0, 128) ?? null };
-  if (actor.actorType === "user") return { actorType: "user", actorId: actor.actorId, actorName: actor.actorName?.slice(0, 128) ?? null };
-  if (actor.actorType === "api_token") return { actorType: "api_token", actorId: actor.userId ?? null, actorName: actor.actorName?.slice(0, 128) ?? null };
+/**
+ * History actor. The name shown to `servers.extensions.view` holders is the username (like ban
+ * sources), never the session's e-mail address (the audit log's actor name for users).
+ */
+export async function historyActor(db: DbOrTx, actor: AuditActor, opts: { scheduleId?: string | null } = {}): Promise<Pick<HistoryRow, "actorType" | "actorId" | "actorName">> {
+  const userId = actorUserId(actor);
+  const [u] = userId ? await db.select({ username: users.username }).from(users).where(eq(users.id, userId)) : [];
+  const username = u ? u.username.slice(0, 128) : null;
+  if (opts.scheduleId) return { actorType: "schedule", actorId: opts.scheduleId, actorName: username };
+  if (actor.actorType === "user") return { actorType: "user", actorId: actor.actorId, actorName: username };
+  // `<key prefix> (<username>)`: no e-mail address either.
+  if (actor.actorType === "api_token") return { actorType: "api_token", actorId: actor.userId ?? null, actorName: actor.actorName?.slice(0, 128) ?? username };
   return { actorType: "system", actorId: null, actorName: actor.actorName?.slice(0, 128) ?? null };
 }
 

@@ -67,6 +67,11 @@ export const ServerOperation = z.enum([
   "restore",
   "migrate",
   "delete",
+  /**
+   * Plugin/mod changes (install, update, rollback, remove, enable/disable, upload) hold the operation lock
+   * while they touch the server's files, without changing the lifecycle state.
+   */
+  "extensions",
 ]);
 export type ServerOperation = z.infer<typeof ServerOperation>;
 
@@ -86,6 +91,8 @@ export const OPERATION_ALLOWED_FROM: Record<ServerOperation, readonly ServerStat
   migrate: ["stopped", "crashed"],
   /** `provisioning` only once its job is no longer active (e.g. an abandoned provision). */
   delete: ["stopped", "crashed", "provision_failed", "provisioning", "unreachable"],
+  /** No state change: the server keeps running (changes take effect at the next start). */
+  extensions: ["stopped", "crashed", "running", "degraded"],
 };
 
 export function canStartOperation(
@@ -93,9 +100,26 @@ export function canStartOperation(
   state: ServerState,
   activeOperation: ServerOperation | null,
 ): boolean {
-  // `kill` is the escape hatch and may pre-empt a stuck stop.
-  if (activeOperation && !(op === "kill" && activeOperation === "stop")) return false;
+  // `kill` is the escape hatch and may pre-empt a stuck stop; stop/restart/kill of a running server and
+  // start/restart of a crashed one may also pre-empt a plugin/mod change (it notices the lost lock and fails).
+  if (activeOperation && !(op === "kill" && activeOperation === "stop") && !preemptsExtensions(op, state, activeOperation)) return false;
   return OPERATION_ALLOWED_FROM[op].includes(state);
+}
+
+/** Power actions that may take the lock from an `extensions` operation: stop/restart/kill while the server runs. */
+export const EXTENSIONS_PREEMPTED_BY: readonly ServerOperation[] = ["kill", "stop", "restart"];
+/** …and start/restart of a server that crashed while the change ran. */
+export const EXTENSIONS_PREEMPTED_WHEN_CRASHED_BY: readonly ServerOperation[] = ["start", "restart"];
+
+/**
+ * Whether `op` may pre-empt a running `extensions` operation (the change then undoes itself only if it can
+ * take a new cleanup hold on a stopped server (never a crashed one); otherwise it records what it left behind).
+ */
+export function preemptsExtensions(op: ServerOperation, state: ServerState, activeOperation: ServerOperation | null): boolean {
+  if (activeOperation !== "extensions") return false;
+  if (state === "running" || state === "degraded") return EXTENSIONS_PREEMPTED_BY.includes(op);
+  if (state === "crashed") return EXTENSIONS_PREEMPTED_WHEN_CRASHED_BY.includes(op);
+  return false;
 }
 
 /** Node connectivity as derived by the control plane from agent sessions and heartbeats. */

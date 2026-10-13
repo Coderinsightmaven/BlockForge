@@ -13,7 +13,7 @@ afterEach(async () => {
   t = null;
 });
 
-const counters = { s1: 0, s2: 0, recover1: 0, recover2: 0 };
+const counters = { s1: 0, s2: 0, recover1: 0, recover2: 0, afterCheckpoint: 0 };
 const Input = z.object({ nodeId: z.uuid().optional(), lines: z.number().int().optional() });
 
 const testJobs: JobDefinition<z.infer<typeof Input>>[] = [
@@ -92,6 +92,24 @@ const testJobs: JobDefinition<z.infer<typeof Input>>[] = [
           for (let i = 0; i < (ctx.input.lines ?? 0); i++) await ctx.log("debug", `line ${i}`);
         },
       },
+    ],
+  },
+  {
+    type: "test.checkpoint-then-throw",
+    input: Input,
+    cancelPermission: "nodes.manage",
+    retryLimit: 0,
+    steps: [
+      {
+        key: "done",
+        label: "Completes, then throws",
+        async run(ctx) {
+          ctx.state.recorded = true;
+          await ctx.checkpoint(undefined, { completeStep: true });
+          throw new JobError("LATE", "failure after the completion was committed");
+        },
+      },
+      { key: "next", label: "Runs afterwards", run: async () => void counters.afterCheckpoint++ },
     ],
   },
   {
@@ -189,6 +207,22 @@ describe("job runner", () => {
     const { rows: last } = await testPool().query("SELECT level, message FROM job_logs WHERE id = $1", [rows[0].last]);
     expect(last[0]).toMatchObject({ level: "warn", message: expect.stringContaining("Log limit") });
   }, 90_000);
+
+  it("a step whose completing checkpoint committed stays succeeded when it throws afterwards", async () => {
+    await start();
+    const before = counters.afterCheckpoint;
+    const jobId = await t!.ctx.jobs.enqueue("test.checkpoint-then-throw", {});
+    const row = await t!.ctx.jobs.waitForCompletion(jobId);
+    expect(row.status).toBe("succeeded");
+    expect(row.state).toMatchObject({ recorded: true });
+    expect(counters.afterCheckpoint - before).toBe(1);
+    const { rows } = await testPool().query("SELECT key, status FROM job_steps WHERE job_id = $1 ORDER BY ordinal", [jobId]);
+    expect(rows).toEqual([
+      { key: "done", status: "succeeded" },
+      { key: "next", status: "succeeded" },
+    ]);
+    expect((await t!.ctx.jobs.logs(jobId, 0)).map((l) => l.message)).toContainEqual(expect.stringContaining("a later error was ignored"));
+  });
 
   it("resumes jobs that were running when the control plane stopped", async () => {
     await start();

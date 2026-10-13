@@ -1,5 +1,5 @@
 import type { NodeConnection, ServerState, WorkloadStatus } from "@blockforge/contracts";
-import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray, or } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { AgentGateway } from "../agents/gateway.js";
 import type { ConnectionChange, NodeStateTracker } from "../agents/node-state.js";
@@ -20,6 +20,9 @@ const LIVE: readonly ServerState[] = ["running", "degraded", "starting"];
  * → `starting`; servers on unreachable nodes become `unreachable` and are resynchronised when the
  * agent reconnects. Servers with an active operation are left to that operation's job.
  */
+/** No operation that owns the lifecycle state is running (plugin/mod changes leave it alone). */
+const noStateOperation = () => or(isNull(servers.activeOperation), eq(servers.activeOperation, "extensions"));
+
 export class ServerReconciler {
   private readonly oomKilled = new Set<string>();
 
@@ -44,7 +47,8 @@ export class ServerReconciler {
       .from(servers)
       .where(and(eq(servers.id, st.workloadId), eq(servers.nodeId, nodeId)))
       .limit(1);
-    if (!row || row.activeOperation || UNMANAGED.includes(row.state as ServerState)) return;
+    // `extensions` (plugin/mod changes) does not own the lifecycle state: the reconciler keeps following the workload.
+    if (!row || (row.activeOperation && row.activeOperation !== "extensions") || UNMANAGED.includes(row.state as ServerState)) return;
     const from = row.state as ServerState;
     const oom = Boolean(st.oomKilled) || this.oomKilled.delete(st.workloadId);
     switch (st.state) {
@@ -91,7 +95,7 @@ export class ServerReconciler {
     const others = await this.db
       .select({ id: servers.id })
       .from(servers)
-      .where(and(eq(servers.nodeId, nodeId), isNull(servers.activeOperation), inArray(servers.state, ["unreachable", "running", "degraded", "starting"]), reported.length ? notInArray(servers.id, reported) : undefined));
+      .where(and(eq(servers.nodeId, nodeId), noStateOperation(), inArray(servers.state, ["unreachable", "running", "degraded", "starting"]), reported.length ? notInArray(servers.id, reported) : undefined));
     for (const o of others) await this.onWorkloadState(nodeId, { workloadId: o.id, exists: false, state: "missing", restartCount: 0 });
   }
 
@@ -101,7 +105,7 @@ export class ServerReconciler {
     const rows = await this.db
       .select({ id: servers.id })
       .from(servers)
-      .where(and(eq(servers.nodeId, change.nodeId), isNull(servers.activeOperation), inArray(servers.state, ["running", "degraded", "starting", "stopping", "stopped", "crashed"])));
+      .where(and(eq(servers.nodeId, change.nodeId), noStateOperation(), inArray(servers.state, ["running", "degraded", "starting", "stopping", "stopped", "crashed"])));
     for (const r of rows) await this.state.transition(r.id, "unreachable", {}, { reason: `node ${change.to}` });
   }
 }

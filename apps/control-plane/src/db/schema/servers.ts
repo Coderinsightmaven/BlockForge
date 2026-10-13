@@ -43,6 +43,10 @@ export const servers = pgTable(
     desiredState: text("desired_state").notNull(),
     activeOperation: text("active_operation"),
     activeJobId: uuid("active_job_id").references(() => jobs.id, { onDelete: "set null" }),
+    /** Holder token of a synchronous (job-less) operation lock; null for job-held locks. */
+    operationToken: uuid("operation_token"),
+    /** When the current operation lock was taken (stale synchronous holds are released after 30 min). */
+    operationStartedAt: tsz("operation_started_at"),
     memoryLimitBytes: bigint("memory_limit_bytes", { mode: "number" }).notNull(),
     heapMaxBytes: bigint("heap_max_bytes", { mode: "number" }),
     cpuLimitMillicores: integer("cpu_limit_millicores"),

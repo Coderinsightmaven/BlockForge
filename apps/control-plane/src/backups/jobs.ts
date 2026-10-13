@@ -398,6 +398,7 @@ function finalizeCtx(f: FinalizeContext<{ serverId: string }>, timeoutMs: number
     state: {},
     log: f.log,
     setMessage: async () => undefined,
+    checkpoint: async () => undefined,
   };
 }
 

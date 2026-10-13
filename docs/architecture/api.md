@@ -270,7 +270,27 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   routes (same 24 h replay, 409 `CONFLICT` with `details.reason` `in_progress` / `key_reused`). Upload
   completion is idempotent per `uploadId` once it has succeeded (refusals may be retried with other flags). One extension job per server at a time (409 `CONFLICT`,
   `details.reason: "extension_job_running"`); none while the server is provisioning, reinstalling, restoring,
-  migrating or deleting (409 `INVALID_STATE`).
+  migrating or deleting (409 `INVALID_STATE`). Everything that changes the server's files (install, apply updates,
+  rollback jobs; enable/disable, remove, upload completion) holds the server operation lock as
+  `activeOperation: "extensions"` (no state change) for its whole duration: start, backup, restore, reinstall and
+  delete answer the usual 409 `INVALID_STATE` meanwhile, and no extension change starts while another operation
+  runs. On a `running`/`degraded` server **stop, restart and kill pre-empt** the change, and so do start
+  and restart of a server that crashed meanwhile (contracts `canStartOperation`). The pre-empted change notices the
+  lost lock at its next re-check and may then touch plugin/mod files only under a new **cleanup hold** (an
+  `extensions` hold taken only when no other operation holds the server and it is `stopped` — never `crashed`, which the
+  agent's restart policy may restart on its own; re-checked before every rename/delete): with it
+  the undo runs and the job fails with `LOCK_LOST` (a synchronous change answers 409 `preempted`); without it no
+  file is touched, the failed history row records every kept file (`keptPath` + digest) and every file the change
+  wrote (path + SHA-512), and the job fails with `PREEMPTED_UNDO_SKIPPED` (409 `preempted_undo_skipped`). An undo
+  interrupted by a control-plane restart is resumed the same way (never the apply). Every move of
+  a jar is hashed before and verified after (`fs.rename` takes no expected digest, so a swap in between is
+  detected and undone/refused, not prevented; likewise the lock/fence is checked right before each agent command,
+  so a pre-emption can still land within that one RPC — forward changes re-check afterwards and the fenced undo
+  repairs or records what happened): kept jars go back only while they have the digest taken when they
+  were kept, downloads land in `.blockforge/extensions/fetch/` and are renamed into place without overwriting,
+  undo deletes only files the job wrote, and a changed staged upload is refused (409 `upload_changed`). A kept
+  file that cannot be vouched for is never restored; its failed history row points at it (no digest) for
+  inspection and pruning. Locks of jobs that ended without releasing them are taken over / swept by maintenance.
 * **`restartRequired`** is true whenever the server is not `stopped`/`crashed`: plugins and mods load only at
   start; BlockForge never hot-reloads (`/reload`) and never restarts the server on its own.
 * **Uploads.** `POST …/uploads` (refused with 422 `uploads_disabled` when `extensions.uploads.allowed` is false)

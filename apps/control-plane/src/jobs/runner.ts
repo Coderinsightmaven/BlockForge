@@ -186,6 +186,8 @@ export class JobRunner {
         if (ctrl.signal.aborted) throw ctrl.signal.reason;
         await this.updateStep(row.id, { status: "running", message: null, startedAt: new Date(this.clock.now()), finishedAt: null });
         await this.publishJob(jobId);
+        /** Set once a `checkpoint(…, { completeStep: true })` committed: the step's work is durable. */
+        let completed = false;
         const ctx: StepContext<unknown> = {
           jobId,
           input,
@@ -200,13 +202,27 @@ export class JobRunner {
             await this.updateStep(row.id, { message: redactString(message).slice(0, 1000) });
             await this.publishJob(jobId);
           },
+          checkpoint: async (fn, o = {}) => {
+            await withTransaction(this.db, async (tx) => {
+              if (fn) await fn(tx);
+              await tx.update(jobs).set({ state: toJsonSafe(state) ?? {} }).where(eq(jobs.id, jobId));
+              if (o.completeStep) await tx.update(jobSteps).set({ status: "succeeded", finishedAt: new Date(this.clock.now()) }).where(eq(jobSteps.id, row.id));
+            });
+            if (o.completeStep) completed = true;
+          },
         };
         let outcome: void | typeof SKIP_STEP;
         try {
           outcome = await stepDef.run(ctx);
         } catch (err) {
-          await this.updateStep(row.id, { status: "failed", message: redactString(errorMessage(err)).slice(0, 1000), finishedAt: new Date(this.clock.now()) });
-          throw err;
+          if (completed) {
+            // The step's completion was committed; a later failure in the step does not undo it.
+            await this.log(jobId, "warn", `Step ${stepDef.key} completed; a later error was ignored: ${redactString(errorMessage(err)).slice(0, 500)}`);
+            outcome = undefined;
+          } else {
+            await this.updateStep(row.id, { status: "failed", message: redactString(errorMessage(err)).slice(0, 1000), finishedAt: new Date(this.clock.now()) });
+            throw err;
+          }
         } finally {
           await this.db.update(jobs).set({ state: toJsonSafe(state) ?? {} }).where(eq(jobs.id, jobId));
         }

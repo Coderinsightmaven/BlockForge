@@ -117,6 +117,19 @@ describe("server page loading", () => {
     expect(screen.queryByText("Loading job…")).toBeNull();
   });
 
+  it("shows a running plugin/mod change (server operation `extensions`) as a job above the tabs", async () => {
+    renderPage(makeServer({ state: "running", activeOperation: "extensions", activeJobId: JOB_ID }));
+    expect((await screen.findAllByText(/Changing plugins\/mods/)).length).toBeGreaterThan(0);
+    expect(chunks.loaded.has("jobs")).toBe(true);
+  });
+
+  it("shows a plugin/mod change without a job (synchronous change or cleanup hold) and keeps Start disabled", async () => {
+    renderPage(makeServer({ state: "stopped", activeOperation: "extensions", activeJobId: null }));
+    expect((await screen.findAllByText(/Changing plugins\/mods/)).length).toBeGreaterThan(0);
+    const start = screen.getByRole("button", { name: /^start$/i }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+  });
+
   it("a tab whose chunk fails to download shows an error with Retry, which downloads it again", async () => {
     const user = userEvent.setup();
     renderPage(makeServer(), { tab: "users" });
