@@ -161,7 +161,8 @@ export type ExtensionMetadataView = z.infer<typeof ExtensionMetadataView>;
  * could not be parsed · `METADATA_WARNING` parser warning of the selected metadata · `NO_EXTENSION_DIR` the
  * server software loads no plugins/mods · `DUPLICATE_ID` another enabled jar in the same folder declares the
  * same plugin name / mod id (case-insensitive; Bukkit names with spaces as `_`): a warning for plugins
- * (Paper/Velocity load only one copy), an error for mods (Fabric/Forge/NeoForge refuse to start).
+ * (Paper/Velocity load only one copy), an error for mods (Fabric/Forge/NeoForge refuse to start; a warning when a
+ * client-only Fabric copy is involved, which dedicated servers skip).
  * `DUPLICATE_ID` depends on the other files and is computed when the list is read.
  */
 export const ExtensionProblemCode = z.enum([

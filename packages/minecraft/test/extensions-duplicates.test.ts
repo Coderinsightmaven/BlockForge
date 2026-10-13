@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extensionIdentityKey, flagDuplicateExtensions, jarCompatibility, parseJarMetadata, parseModsToml, type DuplicateCheckJar } from "../src/index.js";
+import { extensionIdentityKey, extensionPeerKeys, flagDuplicateExtensions, jarCompatibility, parseJarMetadata, parseModsToml, type DuplicateCheckJar } from "../src/index.js";
 
 const pluginYml = (name: string) => `name: ${name}\nversion: 1.0\nmain: x.Main\n`;
 const paperYml = (name: string) => `name: ${name}\nversion: 1.0\nmain: x.Main\napi-version: "1.21"\n`;
@@ -78,5 +78,43 @@ describe("flagDuplicateExtensions", () => {
     const out = flagDuplicateExtensions([many, jar("plugins/b.jar", { "plugin.yml": pluginYml("a") }, "paper")]);
     expect(out.get("plugins/a.jar")!.problems).toHaveLength(32);
     expect(out.get("plugins/a.jar")!.problems[0]!.code).toBe("DUPLICATE_ID");
+  });
+
+  it("compares jars of the same directory only", () => {
+    const a = jar("plugins/Chunky.jar", { "plugin.yml": pluginYml("Chunky") }, "paper");
+    const b = jar("other/Chunky.jar", { "plugin.yml": pluginYml("Chunky") }, "paper");
+    expect(flagDuplicateExtensions([a, b]).size).toBe(0);
+    expect(extensionPeerKeys(a)).toEqual(["plugins\0chunky"]);
+  });
+
+  it("flags a Velocity plugin id pair as a warning", () => {
+    const vel = (id: string) => ({ "velocity-plugin.json": JSON.stringify({ id, name: id, version: "1", main: "x.Main" }) });
+    const a = jar("plugins/lp-a.jar", vel("luckperms"), "velocity");
+    const b = jar("plugins/lp-b.jar", vel("luckperms"), "velocity");
+    const out = flagDuplicateExtensions([a, b]);
+    expect(out.get(a.path)!.problems).toEqual([expect.objectContaining({ code: "DUPLICATE_ID", level: "warning", message: expect.stringContaining('plugin name "luckperms"') })]);
+    expect(out.get(a.path)!.loadable).toBe(true);
+  });
+
+  it("NeoForge and legacy Forge metadata share one mod id namespace on NeoForge", () => {
+    const neo = `modLoader="javafml"\nloaderVersion="[1,)"\nlicense="MIT"\n[[mods]]\nmodId="ferritecore"\nversion="7"\n`;
+    const a = jar("mods/ferrite-neo.jar", { "META-INF/neoforge.mods.toml": neo }, "neoforge");
+    const b = jar("mods/ferrite-forge.jar", { "META-INF/mods.toml": neo }, "neoforge");
+    expect(a.metadata[0]!.format).toBe("neoforge");
+    expect(b.metadata[0]!.format).toBe("forge");
+    const out = flagDuplicateExtensions([a, b]);
+    expect(out.get(a.path)!.problems[0]).toMatchObject({ code: "DUPLICATE_ID", level: "error" });
+    expect(out.get(b.path)!.problems[0]).toMatchObject({ code: "DUPLICATE_ID", level: "error" });
+  });
+
+  it("a client-only Fabric copy makes the duplicate a warning (dedicated servers skip it)", () => {
+    const client = jar("mods/sodium-client.jar", { "fabric.mod.json": JSON.stringify({ schemaVersion: 1, id: "sodium", version: "1", environment: "client" }) }, "fabric");
+    const server = jar("mods/sodium.jar", { "fabric.mod.json": fabricJson("sodium") }, "fabric");
+    expect(client.compatibility!.loadable).toBe(true);
+    const out = flagDuplicateExtensions([client, server]);
+    for (const p of [client.path, server.path]) {
+      expect(out.get(p)!.loadable).toBe(true);
+      expect(out.get(p)!.problems[0]).toMatchObject({ code: "DUPLICATE_ID", level: "warning", message: expect.stringContaining("skips the client-only copy") });
+    }
   });
 });
