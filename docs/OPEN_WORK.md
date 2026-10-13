@@ -140,7 +140,7 @@ replace the note with the concrete gap. Affected lines:
 
 ### 5.2 CI on GitHub
 - The repository has a GitHub remote (`origin`) and CI runs on every push to `main` and on pull requests.
-- The first runs (38323141783, 38323453778) failed for three reasons, all fixed on branch `ci/green-on-github`:
+- The first runs (38323141783, 38323453778) failed for these reasons, all fixed on branch `ci/green-on-github`:
   - `packages/minecraft` real-log fixtures (`test/fixtures/logs/*.log`) were never committed: `.gitignore` has `*.log`.
     They were recaptured 2026-10-12 23:55–23:59 UTC from the official jars (see the fixtures README), and
     `!**/test/fixtures/**/*.log` now keeps them tracked.
@@ -148,6 +148,8 @@ replace the note with the concrete gap. Affected lines:
     inputs big enough that a backtracking/quadratic implementation needs seconds, with a 1 s ceiling (a growth-ratio
     variant measured 12x locally but 141x on GitHub, where GC dominates).
   - The web "checks for updates" test raced the lazy Updates chunk (`getByRole` → `findByRole`).
+  - Found on the PR run (38325460130): the control-plane enrollment test split the token on `_`, but the base64url
+    secret may contain `_`; it now parses with `ENROLLMENT_TOKEN_PATTERN` like production.
 - The `typescript` job now starts the same stack as local development (`pnpm infra:up`: Postgres with
   `blockforge_test`, VictoriaMetrics with the test flags, HTTPS MinIO) instead of separate service containers, which
   lacked MinIO and the VictoriaMetrics flags.

@@ -218,7 +218,9 @@ describe("#4 linear-time regexes", () => {
   it("stripAnsi is linear", () => {
     // Unterminated CSI runs are the backtracking trap; 200k characters take milliseconds when linear.
     for (const line of ["\u001b[" + ";".repeat(200_000), "\u001b[;".repeat(70_000)]) {
-      expect(timed(() => stripAnsi(line)).ms).toBeLessThan(LINEAR_MS);
+      const r = timed(() => stripAnsi(line));
+      expect(r.value).toBe(""); // fully stripped, so a fast path cannot skip long input
+      expect(r.ms).toBeLessThan(LINEAR_MS);
     }
     expect(stripAnsi("\u001b[1;31mred\u001b[0m \u009b0mx \u001b]0;title\u0007y \u001b(Bz")).toBe("red x y z");
   });
