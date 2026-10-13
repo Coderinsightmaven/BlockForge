@@ -103,10 +103,14 @@ export default function UploadDialog({
     setPhase({ kind: "completing", options });
     try {
       const r = await extensionsApi.completeUpload(server.id, uploadId, options);
+      // The installed extension's compatibility includes problems that depend on the other jars (DUPLICATE_ID);
+      // a duplicate shown there is not repeated as an upload warning.
+      const compatibility = r.extension.compatibility ?? r.compatibility;
+      const listedDuplicate = compatibility.problems.some((p) => p.code === "DUPLICATE_ID");
       setPhase({
         kind: "done",
-        compatibility: r.compatibility,
-        warnings: r.warnings,
+        compatibility,
+        warnings: listedDuplicate ? r.warnings.filter((w) => w.code !== "DUPLICATE_ID") : r.warnings,
         restartRequired: r.restartRequired,
       });
       onInstalled(r.restartRequired);

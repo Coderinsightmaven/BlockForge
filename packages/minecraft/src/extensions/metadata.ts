@@ -653,3 +653,98 @@ export function jarCompatibility(jar: readonly ExtensionMetadata[] | ParsedJarMe
   for (const w of metadata.warnings) add("METADATA_WARNING", "warning", w);
   return { loadable: !problems.some((p) => p.level === "error"), metadataIndex, problems };
 }
+
+/** One jar for `flagDuplicateExtensions` (shape of the contracts `InstalledExtension`). */
+export interface DuplicateCheckJar {
+  /** `plugins/<file>` / `mods/<file>`: only jars of the same directory are compared. */
+  path: string;
+  enabled: boolean;
+  metadata: readonly { format: ExtensionFormat; id: string; environment?: "client" | "server" | "both" | null }[];
+  /** The jar's own result (`jarCompatibility`); null = not read yet (never counted). */
+  compatibility: JarCompatibility | null;
+}
+
+const MOD_FORMATS: ReadonlySet<ExtensionFormat> = new Set(["fabric", "quilt", "forge", "neoforge"]);
+
+const dirOf = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+
+/**
+ * Identity key the loader compares. Plugin names: Bukkit replaces spaces with `_` (`PluginDescriptionFile`) and
+ * looks plugins up case-insensitively, so `My Plugin`, `my_plugin` and `MY_PLUGIN` collide; Paper's "Ambiguous
+ * plugin name" check compares the declared name, so this is a superset of it (a case-only difference is still
+ * flagged: such pairs are copies of one plugin in practice). Mod ids are lower-case by spec (Fabric, Forge,
+ * NeoForge); they are compared case-insensitively as well. The format is not part of the key: Paper and Bukkit
+ * plugins share one namespace, and so do NeoForge and legacy Forge mods on NeoForge.
+ */
+export function extensionIdentityKey(format: ExtensionFormat, id: string): string {
+  const k = MOD_FORMATS.has(format) ? id : id.replaceAll(" ", "_");
+  return k.toLowerCase();
+}
+
+/**
+ * Every (directory, identity) key a jar could take part in a duplicate with — all its metadata entries, whether
+ * enabled or loadable or not. For finding the jars whose `DUPLICATE_ID` state may change with this one (events).
+ */
+export function extensionPeerKeys(jar: Pick<DuplicateCheckJar, "path" | "metadata">): string[] {
+  const dir = dirOf(jar.path);
+  return [...new Set(jar.metadata.filter((m) => m.id).map((m) => `${dir}\0${extensionIdentityKey(m.format, m.id)}`))];
+}
+
+/**
+ * Duplicate copies in one install dir (`plugins/` or `mods/`): two enabled jars of the same directory whose
+ * selected metadata declare the same plugin name / mod id (`extensionIdentityKey`; a Forge jar declaring several
+ * mods counts every mod of the selected format). Disabled jars (`.jar.disabled`), jars not read yet and jars the
+ * server would not load anyway (`loadable: false`) are not counted and not flagged. Each affected jar gets one
+ * `DUPLICATE_ID` problem naming the other path(s): a warning for plugins (Paper/Velocity load only one copy); an
+ * error for mods (Fabric/Forge/NeoForge refuse to start with duplicate mod ids) — unless fewer than two of the
+ * copies are loaded by a dedicated server (a client-only Fabric mod is skipped there), then a warning. Returns the
+ * updated compatibility of the affected jars only, keyed by path; the others are unchanged.
+ */
+export function flagDuplicateExtensions(jars: readonly DuplicateCheckJar[]): Map<string, JarCompatibility> {
+  type Owner = { jar: DuplicateCheckJar; id: string; mod: boolean; serverLoaded: boolean };
+  const owners = new Map<string, Owner[]>();
+  for (const jar of jars) {
+    const c = jar.compatibility;
+    if (!jar.enabled || !c || !c.loadable || c.metadataIndex === null) continue;
+    const selected = jar.metadata[c.metadataIndex];
+    if (!selected) continue;
+    const keys = new Map<string, string>();
+    for (const m of jar.metadata) if (m.format === selected.format && m.id) keys.set(`${dirOf(jar.path)}\0${extensionIdentityKey(m.format, m.id)}`, m.id);
+    for (const [key, id] of keys) {
+      const list = owners.get(key) ?? [];
+      list.push({ jar, id, mod: MOD_FORMATS.has(selected.format), serverLoaded: selected.environment !== "client" });
+      owners.set(key, list);
+    }
+  }
+  const found = new Map<string, { jar: DuplicateCheckJar; messages: string[]; error: boolean }>();
+  for (const list of owners.values()) {
+    if (list.length < 2) continue;
+    const fatal = list.filter((x) => x.mod && x.serverLoaded).length >= 2;
+    for (const o of list) {
+      const others = list.filter((x) => x.jar !== o.jar).map((x) => x.jar.path);
+      if (others.length === 0) continue;
+      const shown = others.slice(0, 3).join(", ") + (others.length > 3 ? ` and ${others.length - 3} more` : "");
+      const what = o.mod ? `mod id "${o.id}"` : `plugin name "${o.id}"`;
+      const error = fatal && o.serverLoaded;
+      const effect = !o.mod
+        ? "the server loads only one of them"
+        : error
+          ? "the server refuses to start with duplicate mod ids"
+          : "a dedicated server skips the client-only copy; remove one of them";
+      const f = found.get(o.jar.path) ?? { jar: o.jar, messages: [], error: false };
+      f.messages.push(`${shown} declares the same ${what}; ${effect}`);
+      f.error ||= error;
+      found.set(o.jar.path, f);
+    }
+  }
+  const out = new Map<string, JarCompatibility>();
+  for (const [path, f] of found) {
+    const base = f.jar.compatibility!;
+    const level = f.error ? "error" : "warning";
+    const added: ExtensionProblem[] = f.messages.map((m) => ({ code: "DUPLICATE_ID", level, message: clean(m, 512) ?? "DUPLICATE_ID" }));
+    // Duplicates first so the cap never drops them.
+    const problems = [...added, ...base.problems].slice(0, MAX_PROBLEMS);
+    out.set(path, { loadable: base.loadable && level !== "error", metadataIndex: base.metadataIndex, problems });
+  }
+  return out;
+}

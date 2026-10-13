@@ -48,25 +48,51 @@ const UploadDialog = retryableLazy(() => import("./upload-dialog"));
 
 type Section = "installed" | "browse" | "updates" | "history";
 
+/**
+ * Provenance (`source`) plus, for a file BlockForge did not install from Modrinth, the Modrinth project a
+ * SHA-512 lookup identified it as (found on disk via the file manager/SFTP, or uploaded).
+ */
 function SourceBadge({ ext }: { ext: InstalledExtension }) {
   if (ext.source === "modrinth" && ext.modrinth) {
     return (
       <SafeLink href={ext.modrinth.pageUrl} className="inline-flex">
-        <Badge tone="info" title="Identified on Modrinth — opens its page">
+        <Badge tone="info" title="Installed from Modrinth by BlockForge — opens its page">
           Modrinth
           <ExternalLink aria-hidden />
         </Badge>
       </SafeLink>
     );
   }
-  if (ext.source === "upload") return <Badge variant="outline">Upload</Badge>;
+  const provenance =
+    ext.source === "upload" ? (
+      <Badge variant="outline">Upload</Badge>
+    ) : ext.source === "modrinth" ? (
+      <Badge variant="outline" title="Installed from Modrinth by BlockForge">
+        Modrinth
+      </Badge>
+    ) : (
+      <Badge
+        variant="outline"
+        title={
+          ext.modrinth
+            ? "Found on disk (file manager, SFTP, a plugin's own updater), not installed by BlockForge"
+            : "Found on disk (file manager, SFTP, a plugin's own updater) and not identified on Modrinth"
+        }
+      >
+        Unknown
+      </Badge>
+    );
+  if (!ext.modrinth) return provenance;
   return (
-    <Badge
-      variant="outline"
-      title="Found on disk (file manager, SFTP, a plugin's own updater) and not identified on Modrinth"
-    >
-      Unknown
-    </Badge>
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {provenance}
+      <SafeLink href={ext.modrinth.pageUrl} className="inline-flex">
+        <Badge tone="info" title="Identified on Modrinth by its SHA-512 — opens its page">
+          Identified on Modrinth
+          <ExternalLink aria-hidden />
+        </Badge>
+      </SafeLink>
+    </span>
   );
 }
 

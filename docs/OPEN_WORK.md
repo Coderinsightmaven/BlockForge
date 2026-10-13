@@ -51,10 +51,15 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
   - `artifact.fetch` missing from the capability check — fixed.
 
 ### 1.2 Follow-ups from the live run
-- Jars found on disk and identified by hash are labelled `source: "modrinth"`. The contract says found-on-disk =
-  `unknown` with a Modrinth ref; decide and align the code or the contract.
-- Two copies of the same plugin or mod (e.g. a file-manager copy) are not flagged. Add a compatibility problem;
-  Paper refuses ambiguous plugin names.
+- ~~Jars found on disk and identified by hash are labelled `source: "modrinth"`.~~ Fixed (code aligned to the
+  contract): `source` is provenance — scans never set `modrinth`, identified on-disk files stay `unknown` with the
+  `modrinth` ref (updates/rollback re-fetch keyed on the ref), externally changed BlockForge files become `unknown`;
+  migration 0007 relabels scan-labelled rows (`installed_at` null); web shows "Unknown" + "Identified on Modrinth".
+- ~~Two copies of the same plugin or mod are not flagged.~~ Fixed: `flagDuplicateExtensions` (library) adds a
+  `DUPLICATE_ID` problem to every enabled copy of a directory at read time (plugins: warning, case-insensitive with
+  spaces as `_`; mods: error unless a client-only Fabric copy); disabled jars do not count; `extensions.updated`
+  lists every affected copy. Library, control-plane integration and web tests. Grok review round 1 (2 major +
+  minors: stale sibling events, failed hash demoting provenance, rollback stamping/keep preference) fixed.
 - ~~Control-plane test "searches and shows projects … maps rate limits to 429" failed once in a full parallel run after
   the rate-limiter change (7486da7).~~ Fixed: the test injects the limiter clock/sleep (fixed clock, no real waits) and
   now also asserts the exact 60 s window and that nothing slept; two full parallel runs green.

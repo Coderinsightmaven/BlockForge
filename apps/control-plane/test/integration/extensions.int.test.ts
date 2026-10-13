@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   CompleteExtensionUploadResponse,
   ExtensionHistoryPage,
@@ -125,8 +126,9 @@ describe("extension scans", () => {
       { name: "empty.jar", reason: "empty" },
       { name: "link.jar", reason: "symlink" },
     ]);
+    // Found on disk and identified by SHA-512: provenance stays `unknown`, the identification is in `modrinth`.
     expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({
-      source: "modrinth",
+      source: "unknown",
       enabled: true,
       sha512: alpha.sha512,
       modrinth: { projectId: "AlphaLib", versionId: "AlphaV10", versionNumber: "1.0.0", slug: "alphalib", pageUrl: "https://modrinth.com/project/alphalib" },
@@ -303,7 +305,7 @@ describe("installs, updates, removal and rollback", () => {
     const l = await list(owner, id);
     const ownerId = (await owner.get("/auth/me")).json().user.id as string;
     expect(byName(l, "BetaPlug-1.0.0.jar")).toMatchObject({ source: "modrinth", installedBy: { id: ownerId, name: "owner" }, installedAt: expect.any(Number), compatibility: { loadable: true } });
-    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", installedBy: null, installedAt: null });
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "unknown", installedBy: null, installedAt: null, modrinth: { projectId: "AlphaLib" } });
     expect(byName(l, "BetaPlug-1.0.0.jar")!.modrinth).toMatchObject({ projectId: "BetaPlug", versionId: "BetaV100", slug: "betaplug" });
     // Downloaded to a temporary name, then renamed into place without overwriting (review round 2, item 6).
     expect(node.sim.fetched.slice(before).map((f) => f.destPath)).toEqual([expect.stringMatching(/^\.blockforge\/extensions\/fetch\/[0-9a-f-]{36}\.jar$/)]);
@@ -366,6 +368,7 @@ describe("installs, updates, removal and rollback", () => {
     let l = await scanned(owner, owner, id);
     const alpha = byName(l, "AlphaLib-1.0.0.jar")!;
     const custom = byName(l, "custom.jar")!;
+    expect(alpha).toMatchObject({ source: "unknown", installedAt: null, modrinth: { versionId: "AlphaV10" } });
     const v2 = up.addVersion("AlphaLib", { id: "AlphaV20", number: "2.0.0", filename: "AlphaLib-2.0.0.jar", jar: pluginJar("AlphaLib", "2.0.0") });
     up.addVersion("AlphaLib", { id: "AlphaB30", number: "3.0.0-beta", type: "beta", filename: "AlphaLib-3.0.0-beta.jar", jar: pluginJar("AlphaLib", "3.0.0-beta") });
 
@@ -392,19 +395,25 @@ describe("installs, updates, removal and rollback", () => {
     );
     l = await list(owner, id);
     expect(byName(l, "AlphaLib-1.0.0.jar")).toBeUndefined();
-    expect(byName(l, "AlphaLib-2.0.0.jar")).toMatchObject({ source: "modrinth", modrinth: { versionId: "AlphaV20" } });
+    expect(byName(l, "AlphaLib-2.0.0.jar")).toMatchObject({ source: "modrinth", modrinth: { versionId: "AlphaV20" }, installedAt: expect.any(Number) });
     const upd = (await history(owner, id)).items[0]!;
     expect(upd).toMatchObject({ action: "update", from: { versionId: "AlphaV10", path: "plugins/AlphaLib-1.0.0.jar" }, to: { versionId: "AlphaV20" }, rollback: { available: true } });
     expect(node.sim.read(id, `.blockforge/extensions/kept/${upd.id}.jar`)).not.toBeNull();
 
-    // Rollback of the update: v1 is fetched again by version id (SHA-512 verified), v2 goes to the keep area.
+    // Rollback of the update: the kept v1 is preferred; it vanished here, so v1 is fetched again by version id
+    // (SHA-512 verified), v2 goes to the keep area.
+    node.sim.files(id).delete(`.blockforge/extensions/kept/${upd.id}.jar`);
+    const fetchedBefore = node.sim.fetched.length;
     const rb = await owner.post(`/servers/${id}/extensions/history/${upd.id}/rollback`, {}, { "idempotency-key": "rb-1" });
     expect(rb.statusCode, rb.body).toBe(202);
     expect((await waitJob(owner, rb.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetchedBefore + 1);
     expect(node.sim.files(id).get("plugins/AlphaLib-1.0.0.jar")!.data.equals(v1.jar)).toBe(true);
     expect(node.sim.read(id, "plugins/AlphaLib-2.0.0.jar")).toBeNull();
     const h = await history(owner, id);
-    expect(h.items[0]).toMatchObject({ action: "rollback", from: { versionId: "AlphaV20" }, to: { versionId: "AlphaV10" } });
+    expect(h.items[0]).toMatchObject({ action: "rollback", from: { versionId: "AlphaV20" }, to: { versionId: "AlphaV10", source: "modrinth" } });
+    // Re-fetched from Modrinth by the rollback: BlockForge installed it now.
+    expect(byName(await list(owner, id), "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", installedAt: expect.any(Number), modrinth: { versionId: "AlphaV10" } });
     expect(h.items.find((e) => e.id === upd.id)!.rollback).toEqual({ available: false, reason: "superseded" });
 
     // Enable/disable (rename in place, same id; not rolled back through history).
@@ -444,6 +453,263 @@ describe("installs, updates, removal and rollback", () => {
     const p2 = await history(owner, id, `?limit=50&cursor=${encodeURIComponent(p1.nextCursor!)}`);
     expect(new Set([...p1.items, ...p2.items].map((e) => e.id)).size).toBe(p1.items.length + p2.items.length);
     expect((await history(owner, id, `?extensionId=${custom.id}`)).items.every((e) => e.extensionId === custom.id)).toBe(true);
+  });
+});
+
+describe("source provenance and duplicate copies (Phase 4b live-run follow-ups)", () => {
+  it("labels copied-in jars unknown (identified, update offered); a BlockForge install changed on disk becomes unknown", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await poll(async () => (await list(owner, id)).scan.status === "completed");
+    // Installed by BlockForge from Modrinth.
+    const plan = ModrinthInstallPlan.parse((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "alphalib" })).json());
+    const ins = await owner.post(`/servers/${id}/extensions/modrinth/install`, { project: "alphalib", expect: plan.files.map((f) => ({ projectId: f.projectId, versionId: f.versionId, action: f.action })) });
+    expect((await waitJob(owner, ins.json().jobId)).status).toBe("succeeded");
+    // Copied in through the file manager under another name, identified by its SHA-512.
+    const v1 = up.projects.get("AlphaLib")!.versions[0]!;
+    up.addProject({ id: "Chunky00", slug: "chunky", title: "Chunky", type: "plugin", loaders: ["paper"] });
+    const chunky = up.addVersion("Chunky00", { id: "ChunkV14", number: "1.4.40", filename: "Chunky-1.4.40.jar", jar: pluginJar("Chunky", "1.4.40") });
+    node.sim.put(id, "plugins/Chunky-1.4.40.jar", chunky.jar);
+    let l = await scanned(owner, owner, id);
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", installedAt: expect.any(Number), installedBy: { name: "owner" } });
+    const copied = byName(l, "Chunky-1.4.40.jar")!;
+    expect(copied).toMatchObject({ source: "unknown", installedAt: null, installedBy: null, modrinth: { projectId: "Chunky00", versionId: "ChunkV14", versionNumber: "1.4.40" } });
+    // The identification still drives update checks (live run: "update offered for the copied jar: 1.4.40 -> 1.5.3").
+    up.addVersion("Chunky00", { id: "ChunkV15", number: "1.5.3", filename: "Chunky-1.5.3.jar", jar: pluginJar("Chunky", "1.5.3") });
+    const u = ExtensionUpdatesResponse.parse((await owner.get(`/servers/${id}/extensions/updates`)).json());
+    expect(u.items.find((x) => x.extensionId === copied.id)).toMatchObject({ updateAvailable: true, current: { versionId: "ChunkV14" }, latest: { versionId: "ChunkV15" } });
+    // Removing the identified copy can be rolled back by re-fetching it from Modrinth (exact SHA-512).
+    const rm = RemoveExtensionResponse.parse((await owner.delete(`/servers/${id}/extensions/${copied.id}`)).json());
+    expect(rm.rollbackAvailable).toBe(true);
+    const removed = (await history(owner, id)).items[0]!;
+    expect(removed).toMatchObject({ action: "remove", from: { source: "unknown", projectId: "Chunky00", versionId: "ChunkV14" }, rollback: { available: true } });
+
+    // A BlockForge-installed jar replaced on disk (a plugin's own updater, SFTP): no longer BlockForge's install.
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", pluginJar("AlphaLib", "1.0.1-selfupdated"));
+    l = await scanned(owner, owner, id);
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "unknown", installedAt: null, installedBy: null, modrinth: null });
+    // Same bytes as a Modrinth version again (identified) → still unknown, identification restored.
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", v1.jar);
+    l = await scanned(owner, owner, id);
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "unknown", installedAt: null, modrinth: { versionId: "AlphaV10" } });
+    expect(up.misses).toEqual([]);
+  });
+
+  it("migration 0007 relabels scan-labelled modrinth rows only", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await poll(async () => (await list(owner, id)).scan.status === "completed");
+    const plan = ModrinthInstallPlan.parse((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "alphalib" })).json());
+    const ins = await owner.post(`/servers/${id}/extensions/modrinth/install`, { project: "alphalib", expect: plan.files.map((f) => ({ projectId: f.projectId, versionId: f.versionId, action: f.action })) });
+    expect((await waitJob(owner, ins.json().jobId)).status).toBe("succeeded");
+    node.sim.put(id, "plugins/copy.jar", up.projects.get("AlphaLib")!.versions[0]!.jar);
+    await scanned(owner, owner, id);
+    // What the old scan wrote for the copied jar.
+    await testPool().query("UPDATE installed_extensions SET source = 'modrinth' WHERE server_id = $1 AND path = 'plugins/copy.jar'", [id]);
+    expect(byName(await list(owner, id), "copy.jar")!.source).toBe("modrinth");
+    const sql = readFileSync(new URL("../../drizzle/0007_extension_source.sql", import.meta.url), "utf8");
+    await testPool().query(sql);
+    const l = await list(owner, id);
+    expect(byName(l, "copy.jar")).toMatchObject({ source: "unknown", modrinth: { projectId: "AlphaLib" } });
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", installedAt: expect.any(Number) });
+  });
+
+  it("flags duplicate copies of a plugin on both entries (list, single read, toggle); disabled copies do not count", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/Chunky-1.4.40.jar", pluginJar("Chunky", "1.4.40"));
+    node.sim.put(id, "plugins/Chunky-1.4.40 - Copy.jar", pluginJar("chunky", "1.4.40"));
+    node.sim.put(id, "plugins/Chunky-old.jar.disabled", pluginJar("Chunky", "1.3"));
+    node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
+    const l = await scanned(owner, owner, id);
+    const a = byName(l, "Chunky-1.4.40.jar")!;
+    const b = byName(l, "Chunky-1.4.40 - Copy.jar")!;
+    expect(a.compatibility).toEqual({
+      loadable: true,
+      metadataIndex: 0,
+      problems: [{ code: "DUPLICATE_ID", level: "warning", message: 'plugins/Chunky-1.4.40 - Copy.jar declares the same plugin name "Chunky"; the server loads only one of them' }],
+    });
+    expect(b.compatibility!.problems).toEqual([expect.objectContaining({ code: "DUPLICATE_ID", message: expect.stringContaining("plugins/Chunky-1.4.40.jar") })]);
+    expect(byName(l, "Chunky-old.jar.disabled")!.compatibility!.problems).toEqual([]);
+    expect(byName(l, "custom.jar")!.compatibility!.problems).toEqual([]);
+    expect(InstalledExtension.parse((await owner.get(`/servers/${id}/extensions/${a.id}`)).json()).compatibility!.problems[0]!.code).toBe("DUPLICATE_ID");
+    // Not stored: the row keeps the jar's own result.
+    const { rows } = await testPool().query("SELECT compatibility FROM installed_extensions WHERE id = $1", [a.id]);
+    expect(rows[0].compatibility.problems).toEqual([]);
+    // Disabling one copy clears the problem on both.
+    const off = UpdateExtensionResponse.parse((await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: false })).json());
+    expect(off.extension.compatibility!.problems).toEqual([]);
+    expect(byName(await list(owner, id), "Chunky-1.4.40.jar")!.compatibility!.problems).toEqual([]);
+    // Enabling it again: the response already reports the duplicate.
+    const on = UpdateExtensionResponse.parse((await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: true })).json());
+    expect(on.extension.compatibility!.problems.map((p) => p.code)).toEqual(["DUPLICATE_ID"]);
+  });
+
+  it("duplicate mod ids are errors (not loadable) on a Fabric server", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner);
+    // The test catalogue provisions Paper only; the extension target follows `servers.software`.
+    await testPool().query("UPDATE servers SET software = 'fabric' WHERE id = $1", [id]);
+    node.sim.put(id, "mods/sodium-a.jar", fabricJar("sodium"));
+    node.sim.put(id, "mods/sodium-b.jar", fabricJar("sodium"));
+    node.sim.put(id, "mods/other.jar", fabricJar("other"));
+    const l = await scanned(owner, owner, id);
+    for (const f of ["sodium-a.jar", "sodium-b.jar"]) {
+      expect(byName(l, f)!.compatibility).toMatchObject({ loadable: false, problems: [{ code: "DUPLICATE_ID", level: "error" }] });
+    }
+    expect(byName(l, "other.jar")!.compatibility).toMatchObject({ loadable: true, problems: [] });
+  });
+
+  it("extensions.updated lists every copy whose duplicate state may change (enable, disable, remove, scan)", async () => {
+    const { t, owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/Chunky.jar", pluginJar("Chunky", "1.4.40"));
+    node.sim.put(id, "plugins/Chunky-copy.jar.disabled", pluginJar("Chunky", "1.4.40"));
+    node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
+    const l = await scanned(owner, owner, id);
+    const a = byName(l, "Chunky.jar")!;
+    const b = byName(l, "Chunky-copy.jar.disabled")!;
+    const custom = byName(l, "custom.jar")!;
+    const ui = await UiSocket.open(t, owner);
+    sockets.push(ui);
+    await ui.subscribe(`server:${id}`);
+    // Only frames received after the call count (`waitFor` also matches earlier frames).
+    const changedOf = async (pred: (c: string[]) => boolean) =>
+      ((await ui.waitForEvent(`server:${id}`, "extensions.updated", 5000, (d) => {
+        const c = (d as { changed: string[] | null }).changed;
+        return c !== null && pred(c);
+      })).data as { changed: string[] }).changed;
+    // Enable the second copy: both rows change (the first one gains DUPLICATE_ID), the unrelated one does not.
+    ui.frames.splice(0);
+    const pOn = changedOf((c) => c.includes(b.id));
+    expect((await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: true })).statusCode).toBe(200);
+    expect((await pOn).sort()).toEqual([a.id, b.id].sort());
+    expect(byName(await list(owner, id), "Chunky.jar")!.compatibility!.problems.map((p) => p.code)).toEqual(["DUPLICATE_ID"]);
+    // Disable it again: both.
+    ui.frames.splice(0);
+    const pOff = changedOf((c) => c.includes(b.id));
+    expect((await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: false })).statusCode).toBe(200);
+    expect((await pOff).sort()).toEqual([a.id, b.id].sort());
+    // Re-enable, then remove one copy: the remaining one is listed too and loses the problem.
+    await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: true });
+    await ui.waitForEvent(`server:${id}`, "extensions.updated", 5000, (d) => !!(d as { changed: string[] | null }).changed?.includes(b.id));
+    ui.frames.splice(0);
+    const pRm = changedOf((c) => c.includes(a.id) && !c.includes(custom.id));
+    expect((await owner.delete(`/servers/${id}/extensions/${a.id}`)).statusCode).toBe(200);
+    expect((await pRm).sort()).toEqual([a.id, b.id].sort());
+    expect(byName(await list(owner, id), "Chunky-copy.jar")!.compatibility!.problems).toEqual([]);
+    // A scan that adds a copy lists the existing one as well.
+    node.sim.put(id, "plugins/Chunky-third.jar", pluginJar("chunky", "1.5"));
+    ui.frames.splice(0);
+    const pScan = changedOf((c) => c.includes(b.id));
+    const after = await scanned(owner, owner, id);
+    const third = byName(after, "Chunky-third.jar")!;
+    expect((await pScan).sort()).toEqual([b.id, third.id].sort());
+  });
+
+  it("a synchronous change listing more than 256 ids publishes changed: null (event cap)", async () => {
+    const { t, owner, node } = await boot();
+    const id = await paperServer(owner);
+    for (let i = 0; i < 257; i++) node.sim.put(id, `plugins/Chunky-${String(i).padStart(3, "0")}.jar`, pluginJar("Chunky", "1.0"));
+    node.sim.put(id, "plugins/Chunky-off.jar.disabled", pluginJar("Chunky", "1.0"));
+    const off = byName(await scanned(owner, owner, id), "Chunky-off.jar.disabled")!;
+    const ui = await UiSocket.open(t, owner);
+    sockets.push(ui);
+    await ui.subscribe(`server:${id}`);
+    ui.frames.splice(0);
+    expect((await owner.patch(`/servers/${id}/extensions/${off.id}`, { enabled: true })).statusCode).toBe(200);
+    const ev = await ui.waitForEvent(`server:${id}`, "extensions.updated");
+    expect((ev.data as { changed: unknown }).changed).toBeNull();
+    expect(ui.invalid).toEqual([]);
+  });
+
+  it("a kept file that cannot be hashed fails the rollback (retryable, no download); a later rollback uses it", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    up.addProject({ id: "Chunky00", slug: "chunky", title: "Chunky", type: "plugin", loaders: ["paper"] });
+    const chunky = up.addVersion("Chunky00", { id: "ChunkV14", number: "1.4.40", filename: "Chunky-1.4.40.jar", jar: pluginJar("Chunky", "1.4.40") });
+    node.sim.put(id, "plugins/Chunky-1.4.40.jar", chunky.jar);
+    const copied = byName(await scanned(owner, owner, id), "Chunky-1.4.40.jar")!;
+    const rm = RemoveExtensionResponse.parse((await owner.delete(`/servers/${id}/extensions/${copied.id}`)).json());
+    const fetched = node.sim.fetched.length;
+    node.sim.options = { ioErrorPaths: [`.blockforge/extensions/kept/${rm.historyEntryId}.jar`] };
+    const rb = await owner.post(`/servers/${id}/extensions/history/${rm.historyEntryId}/rollback`);
+    expect(rb.statusCode, rb.body).toBe(202);
+    const failed = await waitJob(owner, rb.json().jobId);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toMatchObject({ code: "HASH_FAILED" });
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(node.sim.read(id, "plugins/Chunky-1.4.40.jar")).toBeNull();
+    node.sim.options = {};
+    const again = await owner.post(`/servers/${id}/extensions/history/${rm.historyEntryId}/rollback`);
+    expect((await waitJob(owner, again.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(byName(await list(owner, id), "Chunky-1.4.40.jar")).toMatchObject({ source: "unknown", installedAt: null });
+  });
+
+  it("a failed hash keeps provenance, digest and metadata; the next good scan of the same bytes does not demote", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await poll(async () => (await list(owner, id)).scan.status === "completed");
+    const plan = ModrinthInstallPlan.parse((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "alphalib" })).json());
+    const ins = await owner.post(`/servers/${id}/extensions/modrinth/install`, { project: "alphalib", expect: plan.files.map((f) => ({ projectId: f.projectId, versionId: f.versionId, action: f.action })) });
+    expect((await waitJob(owner, ins.json().jobId)).status).toBe("succeeded");
+    const upBytes = pluginJar("Uploaded", "1.0");
+    node.sim.put(id, "plugins/Uploaded.jar", upBytes);
+    await scanned(owner, owner, id);
+    // Stands in for an upload (the upload route is covered elsewhere): provenance `upload` with install facts.
+    await testPool().query("UPDATE installed_extensions SET source = 'upload', installed_at = now() WHERE server_id = $1 AND path = 'plugins/Uploaded.jar'", [id]);
+    const before = await list(owner, id);
+    const alpha = byName(before, "AlphaLib-1.0.0.jar")!;
+    const uploaded = byName(before, "Uploaded.jar")!;
+    expect(alpha).toMatchObject({ source: "modrinth", installedAt: expect.any(Number) });
+    expect(uploaded).toMatchObject({ source: "upload", installedAt: expect.any(Number) });
+    // Both files are rewritten (same bytes, new mtime) and cannot be hashed during the next scan.
+    await new Promise((r) => setTimeout(r, 5));
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", up.projects.get("AlphaLib")!.versions[0]!.jar);
+    node.sim.put(id, "plugins/Uploaded.jar", upBytes);
+    node.sim.options = { ioErrorPaths: ["plugins/AlphaLib-1.0.0.jar", "plugins/Uploaded.jar"] };
+    const failed = await scanned(owner, owner, id);
+    for (const [name, prev] of [["AlphaLib-1.0.0.jar", alpha], ["Uploaded.jar", uploaded]] as const) {
+      const now = byName(failed, name)!;
+      expect(now).toMatchObject({ source: prev.source, installedAt: prev.installedAt, sha512: prev.sha512, metadata: prev.metadata, compatibility: prev.compatibility, modrinth: prev.modrinth, mtime: prev.mtime });
+    }
+    // Hashable again: same bytes → nothing demoted.
+    node.sim.options = {};
+    const ok = await scanned(owner, owner, id);
+    expect(byName(ok, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", installedAt: alpha.installedAt, sha512: alpha.sha512 });
+    expect(byName(ok, "Uploaded.jar")).toMatchObject({ source: "upload", installedAt: uploaded.installedAt, sha512: uploaded.sha512 });
+  });
+
+  it("rolls back the removal of an identified copy from the keep area (stays unknown) or, if the kept jar changed, from Modrinth", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    up.addProject({ id: "Chunky00", slug: "chunky", title: "Chunky", type: "plugin", loaders: ["paper"] });
+    const chunky = up.addVersion("Chunky00", { id: "ChunkV14", number: "1.4.40", filename: "Chunky-1.4.40.jar", jar: pluginJar("Chunky", "1.4.40") });
+    node.sim.put(id, "plugins/Chunky-1.4.40.jar", chunky.jar);
+    const copied = byName(await scanned(owner, owner, id), "Chunky-1.4.40.jar")!;
+    expect(copied).toMatchObject({ source: "unknown", modrinth: { versionId: "ChunkV14" } });
+    // Keep area preferred (no download).
+    const rm = RemoveExtensionResponse.parse((await owner.delete(`/servers/${id}/extensions/${copied.id}`)).json());
+    const fetched = node.sim.fetched.length;
+    const rb = await owner.post(`/servers/${id}/extensions/history/${rm.historyEntryId}/rollback`);
+    expect(rb.statusCode, rb.body).toBe(202);
+    expect((await waitJob(owner, rb.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(node.sim.files(id).get("plugins/Chunky-1.4.40.jar")!.data.equals(chunky.jar)).toBe(true);
+    const back = byName(await list(owner, id), "Chunky-1.4.40.jar")!;
+    expect(back).toMatchObject({ source: "unknown", installedAt: null, installedBy: null, modrinth: { versionId: "ChunkV14" } });
+    expect((await history(owner, id)).items[0]).toMatchObject({ action: "rollback", to: { source: "unknown", sha512: chunky.sha512 } });
+    // Kept jar changed meanwhile → the job re-fetches the exact file from Modrinth instead.
+    const rm2 = RemoveExtensionResponse.parse((await owner.delete(`/servers/${id}/extensions/${back.id}`)).json());
+    node.sim.put(id, `.blockforge/extensions/kept/${rm2.historyEntryId}.jar`, "swapped");
+    const rb2 = await owner.post(`/servers/${id}/extensions/history/${rm2.historyEntryId}/rollback`);
+    expect(rb2.statusCode, rb2.body).toBe(202);
+    expect((await waitJob(owner, rb2.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched + 1);
+    expect(node.sim.files(id).get("plugins/Chunky-1.4.40.jar")!.data.equals(chunky.jar)).toBe(true);
+    expect(byName(await list(owner, id), "Chunky-1.4.40.jar")).toMatchObject({ source: "modrinth", installedAt: expect.any(Number), modrinth: { versionId: "ChunkV14" } });
+    expect((await history(owner, id)).items[0]).toMatchObject({ action: "rollback", to: { source: "modrinth" } });
   });
 });
 
@@ -647,7 +913,7 @@ describe("Modrinth and Mojang over the real pinned transport", () => {
     node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", v1.jar);
     node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
     const l = await scanned(owner, owner, id);
-    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "modrinth", modrinth: { projectId: "AlphaLib", versionId: "AlphaV10", slug: "alphalib", title: "Alpha Lib" } });
+    expect(byName(l, "AlphaLib-1.0.0.jar")).toMatchObject({ source: "unknown", modrinth: { projectId: "AlphaLib", versionId: "AlphaV10", slug: "alphalib", title: "Alpha Lib" } });
     expect(byName(l, "custom.jar")).toMatchObject({ source: "unknown", modrinth: null });
     up.addVersion("AlphaLib", { id: "AlphaV20", number: "2.0.0", filename: "AlphaLib-2.0.0.jar", jar: pluginJar("AlphaLib", "2.0.0") });
     const u = await owner.get(`/servers/${id}/extensions/updates`);
