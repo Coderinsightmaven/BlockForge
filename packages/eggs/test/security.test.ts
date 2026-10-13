@@ -116,6 +116,14 @@ const timed = <T>(fn: () => T): { ms: number; value: T } => {
   const value = fn();
   return { ms: performance.now() - t0, value };
 };
+// Wall-clock bounds are generous on purpose: shared CI runners are slow and noisy. A backtracking engine on these
+// inputs takes ~2^40 steps (hours), so a 1 s ceiling still tells linear from catastrophic.
+const LINEAR_MS = 1000;
+/** Median time of `runs` calls; used to compare growth across input sizes instead of absolute milliseconds. */
+const medianMs = (fn: () => unknown, runs = 5): number => {
+  const ms = Array.from({ length: runs }, () => timed(fn).ms).sort((a, b) => a - b);
+  return ms[Math.floor(runs / 2)]!;
+};
 
 describe("#2 INI injection", () => {
   const openttd = () => ruleOf("pelican-games-standalone-egg-openttd.json");
@@ -180,25 +188,25 @@ describe("#4 linear-time regexes", () => {
     const m = createDoneMatcher(["regex:(a+)+$", "regex:(a+){10,}$"]);
     const r = timed(() => m(evil));
     expect(r.value).toBe(false);
-    expect(r.ms).toBeLessThan(50);
+    expect(r.ms).toBeLessThan(LINEAR_MS);
     const big = timed(() => createDoneMatcher(["regex:x$"])("a".repeat(1_000_000) + "x"));
     expect(big.value).toBe(false); // only the first 8 KiB are inspected
-    expect(big.ms).toBeLessThan(200);
+    expect(big.ms).toBeLessThan(2 * LINEAR_MS);
   });
 
   it("variable regex rules run on RE2", () => {
     const r = timed(() => validateVariableValue({ name: "V", envName: "V", rules: "regex:/^(a+)+$/" }, evil));
     expect(r.value).toMatch(/invalid format/);
-    expect(r.ms).toBeLessThan(50);
+    expect(r.ms).toBeLessThan(LINEAR_MS);
     const nested = timed(() => validateVariableValue({ name: "V", envName: "V", rules: "regex:/^(a+){10,}$/" }, evil));
-    expect(nested.ms).toBeLessThan(50);
+    expect(nested.ms).toBeLessThan(LINEAR_MS);
   });
 
   it("config conditions run on RE2", () => {
     const rule: ConfigFileRule = { path: "c.json", parser: "json", find: { k: { "regex:(a+)+$": "x", "regex:(a+){10,}b": "y" } } };
     const r = timed(() => applyConfigFileRule(rule, JSON.stringify({ k: evil }), ctx));
     expect(r.value.changed).toBe(false);
-    expect(r.ms).toBeLessThan(50);
+    expect(r.ms).toBeLessThan(LINEAR_MS);
   });
 
   it("refuses at import what RE2 cannot express", () => {
@@ -212,9 +220,14 @@ describe("#4 linear-time regexes", () => {
   });
 
   it("stripAnsi is linear", () => {
-    const line = "\u001b[" + ";".repeat(8000);
-    const r = timed(() => stripAnsi(line));
-    expect(r.ms).toBeLessThan(5);
+    // Growth, not absolute time: 16x the input costs ~12-16x when linear and ~256x when quadratic.
+    const line = (n: number) => "\u001b[" + ";".repeat(n);
+    const small = line(12_500);
+    const large = line(200_000);
+    stripAnsi(large); // warm up the JIT before measuring
+    const ratio = medianMs(() => stripAnsi(large)) / Math.max(medianMs(() => stripAnsi(small)), 0.05);
+    expect(ratio).toBeLessThan(40);
+    expect(timed(() => stripAnsi(large)).ms).toBeLessThan(LINEAR_MS);
     expect(stripAnsi("\u001b[1;31mred\u001b[0m \u009b0mx \u001b]0;title\u0007y \u001b(Bz")).toBe("red x y z");
   });
 });

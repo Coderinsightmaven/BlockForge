@@ -9,8 +9,8 @@ describe("real startup logs (captured 2026-10-12)", () => {
   it("Velocity 4.2.0: readiness, levels and logger", () => {
     const ls = lines("velocity-4.2.0-startup.log");
     const ready = ls.map((l) => detectReadiness(l)).filter(Boolean);
-    expect(ready).toEqual([{ seconds: 1.55 }]);
-    expect(parseLogLine(ls[2]!)).toMatchObject({ time: "03:42:23", level: "warn", layout: "bracket-level" });
+    expect(ready).toEqual([{ seconds: 0.96 }]);
+    expect(parseLogLine(ls[2]!)).toMatchObject({ time: "23:55:43", level: "warn", layout: "bracket-level" });
     expect(parseLogLine(ls.find((l) => l.includes("MacAddressUtil"))!)).toMatchObject({ level: "warn", logger: "io.netty.util.internal.MacAddressUtil" });
   });
 

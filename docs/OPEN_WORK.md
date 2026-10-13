@@ -139,23 +139,26 @@ replace the note with the concrete gap. Affected lines:
   through an SSH tunnel instead.
 
 ### 5.2 CI on GitHub
-- The repository has a GitHub remote (`origin`) and CI runs on every push to `main`.
-- **First runs fail.** Run 38323141783 (53f81f7):
-  - The `node-agent` job is green.
-  - The `typescript` job passed install, lint and typecheck, then failed `pnpm test` in `packages/eggs`
-    (`test/security.test.ts` › "#4 linear-time regexes" › "stripAnsi is linear": wall-clock ratio 14.1, limit 5).
-    GitHub's slower shared runner trips the threshold; this is not a regression.
-- **Fix:** make that test (and any other wall-clock assertion) robust. For example, compare growth across input sizes
-  with a generous factor, or count steps instead of milliseconds.
-- **Still unconfirmed on GitHub:** the remaining packages' tests, `pnpm build` and `bundle:check`, because turbo stops at
-  the first failure. The same applies to the control-plane integration tests' service containers.
-- After the fix, check that the whole workflow passes, including `pnpm --filter @blockforge/web bundle:check` and the
-  fixtures diff.
-- Control-plane tests need Postgres, VictoriaMetrics and MinIO (`infra/compose/docker-compose.dev.yml`) plus `openssl`
-  on PATH (the safe-fetch transport tests generate a certificate at test time). Make sure the workflow provides these.
-- Go integration tests need Docker.
+- The repository has a GitHub remote (`origin`) and CI runs on every push to `main` and on pull requests.
+- The first runs (38323141783, 38323453778) failed for three reasons, all fixed on branch `ci/green-on-github`:
+  - `packages/minecraft` real-log fixtures (`test/fixtures/logs/*.log`) were never committed: `.gitignore` has `*.log`.
+    They were recaptured 2026-10-12 23:55–23:59 UTC from the official jars (see the fixtures README), and
+    `!**/test/fixtures/**/*.log` now keeps them tracked.
+  - `packages/eggs` wall-clock assertions (`stripAnsi is linear` < 5 ms) tripped on the slower runner. They now use a
+    growth ratio (16x input, ratio < 40) and generous 1 s ceilings for the RE2 cases.
+  - The web "checks for updates" test raced the lazy Updates chunk (`getByRole` → `findByRole`).
+- The `typescript` job now starts the same stack as local development (`pnpm infra:up`: Postgres with
+  `blockforge_test`, VictoriaMetrics with the test flags, HTTPS MinIO) instead of separate service containers, which
+  lacked MinIO and the VictoriaMetrics flags.
+- Go integration tests need Docker (present on GitHub's Ubuntu runners).
 
 ### 5.3 Dev environment notes
+- **Moved to macOS (2026-10-12).** Development continues on a Mac (Docker via colima; `docker compose` needs
+  `cliPluginsExtraDirs: ["/opt/homebrew/lib/docker/cli-plugins"]` in `~/.docker/config.json`). Two things did not come
+  across from the Windows checkout because they were never committed: the gitignored `.data/` directory, including
+  the e2e scripts named in 1.5 (`.data/e2e_*.py`), and the minecraft log fixtures (recaptured, see 5.2). The e2e
+  scripts must be rewritten, and this time committed (e.g. under `scripts/e2e/`), before sign-off. The
+  `scripts/dev-*.ps1` helpers are PowerShell; run them with `pwsh` or add shell equivalents.
 - **Start and stop:** `scripts/dev-up.ps1 -Tunnel` starts the control plane and the reverse tunnel to the test node;
   `scripts/dev-down.ps1` stops them, together with the web dev server. Start the web dev server manually:
   `npx vite --port 5173 --strictPort` in `apps/web`, with its pid in `.data/web.pid`.
