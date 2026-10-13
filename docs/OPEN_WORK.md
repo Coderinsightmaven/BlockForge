@@ -67,8 +67,9 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - Player sessions and live join/leave with a real Minecraft client (no client on the LAN test so far).
 - Velocity proxy sessions; pre-1.13 `list` output.
 - Zip64 jars through the real agent (unit-tested in the agent only).
-- Upload completion with `replaceExisting` / `allowIncompatible`, and a real Modrinth update apply (needs an
-  outdated plugin installed first).
+- Upload completion with `replaceExisting` / `allowIncompatible`.
+- ~~A real Modrinth update apply~~ — done 2026-10-13: Chunky 1.4.40 → 1.5.3 through `POST …/extensions/updates/apply`
+  (`scripts/e2e/e2e_ext_updates.py`); see "Phase 4b sign-off re-run" in `docs/development/test-node.md`.
 
 ### 1.4 Cross-model re-review rounds (policy: fixes of high/major findings get a second look)
 - Control-plane fixes for 1.1 → Grok round 2.

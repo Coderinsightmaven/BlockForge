@@ -26,8 +26,9 @@ Watchtower runs with `--label-enable`, so it only updates containers labelled
 * Agent: Docker container `blockforge-agent` (`restart: unless-stopped`, survives logout without lingering),
   `network_mode: host`, user `1000:1000` + supplementary group 983 for `/var/run/docker.sock`,
   `/proc:/host/proc:ro`, `/sys:/host/sys:ro`, `/home/game/blockforge` bind-mounted at the identical path.
-* Ports for BlockForge test servers: **25570–25600** (verified free). Never 25565.
-  Since the move to the Mac control plane (2026-10-13) its allocation pool is **25572–25600**: two untracked
+* Ports for BlockForge test servers: **25572–25600** (the allocation pool of the Mac control plane since
+  2026-10-13; 25570–25600 were verified free on 2026-10-11, before the Windows-era servers took 25570/25571).
+  Never 25565, 25570 or 25571: two untracked
   BlockForge containers from the Windows control plane (`bf-1cacbc31-…` on 25571, `bf-123abf52-…` on 25570) are
   left running and must not be touched. `scripts/e2e` refuses to start a server on 25565, 25570 or 25571.
 * Capacity: set node allocatable memory to ≈ 6 GiB — the ATM11 server already uses most of the RAM.

@@ -162,7 +162,7 @@ def run(c):
 
     seq = c.console_seq(sid)
     c.action(sid, "restart", timeout=600)
-    c.wait_state(sid, "running", timeout=600)
+    c.wait_state(sid, bf.LIVE_STATES, timeout=600)
     line = c.wait_console(sid, seq, "[Chunky] Enabling Chunky", timeout=180)
     check(True, f"after restart Paper says {line.split(']: ')[-1]!r}")
 

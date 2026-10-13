@@ -18,6 +18,8 @@ NOTCH_UUID = "069a79f4-44e9-4726-a5be-fca90e38aaf5"
 IP = "203.0.113.7"
 REASON = "BlockForge e2e"
 LIST_KEYS = ("whitelist", "ops", "bannedPlayers", "bannedIps")
+# After a 504 no_feedback: the control plane's command linger (60 s, players/console.ts) plus a margin.
+LATE_FEEDBACK_S = 65.0
 
 
 def overview(c, sid):
@@ -53,9 +55,11 @@ def wait_lists(c, sid, ip, key, present, timeout=10.0):
 def remove_entries(c, sid, ip, stop_fallback=False):
     """Removes Notch / `ip` from every list; idempotent and tolerant of 504 no_feedback.
 
-    Running server: console commands (a 504 is retried once after re-reading the lists). Stopped server: file
-    edits. With `stop_fallback`, entries a running server would not remove are removed as file edits after
-    stopping the server. Raises AssertionError naming what is left.
+    Running (or degraded) server: console commands. A 504 no_feedback is never resent — the control plane keeps
+    the timed-out command lingering for up to 60 s, so a resend would be ambiguous — instead the lists are
+    re-read for up to LATE_FEEDBACK_S. Stopped server: file edits. With `stop_fallback`, entries a live server
+    did not remove are removed as file edits after stopping it (left stopped). Raises AssertionError naming
+    what is left.
     """
     undo = {
         "bannedPlayers": {"action": "pardon", "name": PLAYER},
@@ -70,18 +74,15 @@ def remove_entries(c, sid, ip, stop_fallback=False):
             if not in_lists(overview(c, sid), ip)[key]:
                 continue
             body = undo[key]
-            for n in (1, 2):
-                try:
-                    r = act(c, sid, body)
-                    print(f"  ..  cleanup: {body['action']} ({r['applied']}{', ' + repr(r['feedback']['message']) if r['feedback'] else ''})")
-                    break
-                except bf.ApiError as e:
-                    print(f"  ..  cleanup: {body['action']} -> HTTP {e.status} {(e.body.get('error') or {}).get('code') if isinstance(e.body, dict) else ''}")
-                    if not bf.is_no_feedback(e) or n == 2:
-                        break
-                    if wait_lists(c, sid, ip, key, False, timeout=5) is not None:
-                        break
-            if wait_lists(c, sid, ip, key, False) is None:
+            wait = 10.0
+            try:
+                r = act(c, sid, body)
+                print(f"  ..  cleanup: {body['action']} ({r['applied']}{', ' + repr(r['feedback']['message']) if r['feedback'] else ''})")
+            except bf.ApiError as e:
+                print(f"  ..  cleanup: {body['action']} -> HTTP {e.status} {(e.body.get('error') or {}).get('code') if isinstance(e.body, dict) else ''}")
+                if bf.is_no_feedback(e):
+                    wait = LATE_FEEDBACK_S
+            if wait_lists(c, sid, ip, key, False, timeout=wait) is None:
                 left.append(key)
         return left
 
@@ -97,25 +98,22 @@ def remove_entries(c, sid, ip, stop_fallback=False):
 def console_action(c, sid, body, expect_words, key, present, ip=IP):
     """One console-backed action: feedback ok + expected wording, then the re-read list must reflect it.
 
-    A 504 no_feedback (the server's first Mojang lookup after a start can exceed the 5 s window) is retried
-    once; the retry must then itself return the server's feedback ("Nothing changed" counts when the first
-    command applied late), otherwise the step fails.
+    A 504 no_feedback (the server's first Mojang lookup after a start can exceed the 5 s window) is NOT
+    resent: the control plane keeps the timed-out command lingering for 60 s, so a resend would be ambiguous.
+    The lists are re-read for up to LATE_FEEDBACK_S instead; if they show the action applied, the step is
+    recorded as "504 no_feedback, applied (lists confirm)" — distinct from a feedback-confirmed step — else
+    it fails. Returns the action result, or None after such a 504.
     """
     try:
         r = act(c, sid, body)
     except bf.ApiError as e:
         if not bf.is_no_feedback(e):
             raise
-        print(f"  ..  note: {body['action']} -> 504 no_feedback (sent, outcome unknown); retrying once")
-        time.sleep(5)
-        r = act(c, sid, body)
-        fb = r["feedback"]
-        check(r["applied"] == "console" and fb is not None, f"{body['action']}: retry after 504 returned feedback {fb and fb['message']!r}")
-        if not fb["ok"]:
-            # The first command applied late, so the retry is refused as a no-op ("…already…", "Nothing changed").
-            confirmed = wait_lists(c, sid, ip, key, present) is not None
-            check(confirmed, f"{body['action']}: 504, then retry feedback {fb['message']!r} (no-op) and re-read {key} confirm the first command applied")
-            return r
+        print(f"  ..  note: {body['action']} -> 504 no_feedback (sent, outcome unknown); not resending, re-reading {key} for up to {LATE_FEEDBACK_S:.0f} s")
+        t0 = time.time()
+        confirmed = wait_lists(c, sid, ip, key, present, timeout=LATE_FEEDBACK_S) is not None
+        check(confirmed, f"{body['action']}: 504 no_feedback, applied (lists confirm, after {time.time() - t0:.1f} s; no server feedback)")
+        return None
     fb = r["feedback"]
     check(r["applied"] == "console" and fb is not None and fb["ok"], f"{body['action']}: applied via console, feedback ok")
     msg = fb["message"]
@@ -177,7 +175,7 @@ def cleanup(c):
     """Runs after every run (bf.main): removes the e2e entries if a failure left any behind."""
     s = c.find_server(PAPER_NAME)
     if s is not None:
-        c.wait_state(s["id"], ("running", "stopped", "crashed"), timeout=180)
+        c.wait_state(s["id"], bf.SETTLED_STATES, timeout=180)  # running/degraded: console path; stopped/crashed: files
         remove_entries(c, s["id"], IP, stop_fallback=True)
 
 

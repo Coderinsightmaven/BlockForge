@@ -96,7 +96,7 @@ def run(c):
     # Start: the server must load every entry.
     STATE["started"] = True
     s = c.ensure_running(sid)
-    check(s["state"] == "running", "started e2e-vanilla")
+    check(s["state"] in bf.LIVE_STATES, f"started e2e-vanilla ({s['state']})")
     line = c.console(sid, "whitelist list", expect="whitelisted player")
     check(PLAYER in line, f"server loaded the whitelist: {line.split(']: ')[-1]!r}")
     line = c.console(sid, "banlist players", expect=f"{PLAYER} was banned by")
@@ -129,13 +129,22 @@ def cleanup(c):
     if s is None:
         return
     sid = s["id"]
-    c.wait_state(sid, ("running", "stopped", "crashed"), timeout=180)
+    errors = []
     try:
+        c.wait_state(sid, bf.SETTLED_STATES, timeout=180)
         remove_entries(c, sid, IP, stop_fallback=True)
-    finally:
-        if STATE["started"] and c.server(sid)["state"] != "stopped":
-            c.ensure_stopped(sid)
-            print("  ..  cleanup: stopped e2e-vanilla (started by this run)")
+    except Exception as e:  # noqa: BLE001 - still try to stop the server below, then report
+        errors.append(e)
+    if STATE["started"]:
+        try:
+            if c.server(sid)["state"] not in ("stopped", "crashed"):
+                c.ensure_stopped(sid)  # waits for a settled state first; stops running *and* degraded
+                print("  ..  cleanup: stopped e2e-vanilla (started by this run)")
+            STATE["started"] = False
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    if errors:
+        raise errors[0]
 
 
 if __name__ == "__main__":

@@ -21,6 +21,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 BASE = os.environ.get("BF_URL", "http://127.0.0.1:8080")
 # Host ports the e2e servers must never use on the test node (ATM11 and two untracked old servers).
 FORBIDDEN_PORTS = frozenset({25565, 25570, 25571})
+# Server states with a live process (console commands work; `degraded` = running but unhealthy) and the
+# settled states a script can act from (no transition in progress).
+LIVE_STATES = ("running", "degraded")
+SETTLED_STATES = ("running", "degraded", "stopped", "crashed")
 
 
 def guard_ports(server):
@@ -212,14 +216,16 @@ class Client:
         return r
 
     def ensure_running(self, server_id, timeout=600):
-        s = self.wait_state(server_id, ("running", "stopped", "crashed", "degraded"), timeout=timeout)
-        if s["state"] not in ("running",):
+        """Starts a stopped/crashed server; a `degraded` one is live already (console works) and is returned as is."""
+        s = self.wait_state(server_id, SETTLED_STATES, timeout=timeout)
+        if s["state"] not in LIVE_STATES:
             self.action(server_id, "start", timeout=timeout)
-            s = self.wait_state(server_id, "running", timeout=timeout)
+            s = self.wait_state(server_id, LIVE_STATES, timeout=timeout)
         return s
 
     def ensure_stopped(self, server_id, timeout=300):
-        s = self.wait_state(server_id, ("running", "stopped", "crashed", "degraded"), timeout=timeout)
+        """Stops a running or degraded server."""
+        s = self.wait_state(server_id, SETTLED_STATES, timeout=timeout)
         if s["state"] not in ("stopped", "crashed"):
             self.action(server_id, "stop", timeout=timeout)
             s = self.wait_state(server_id, ("stopped",), timeout=timeout)
@@ -321,6 +327,9 @@ def main(fn, cleanup=None):
     except (ApiError, AssertionError, TimeoutError) as e:
         print(f"  FAIL  {_describe(e)}")
         traceback.print_exc(limit=3)
+        status = 1
+    except OSError as e:  # owner file missing/too permissive (PermissionError), control plane unreachable (URLError)
+        print(f"  FAIL  {_describe(e)}")
         status = 1
     finally:
         if cleanup is not None and c is not None:

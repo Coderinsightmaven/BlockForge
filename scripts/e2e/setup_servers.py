@@ -101,7 +101,7 @@ def ensure_paper(c, running=True):
     check(s["software"] == "paper" and s["minecraftVersion"] == PAPER_VERSION, f"{PAPER_NAME} is Paper {PAPER_VERSION}")
     _guard(s)
     s = c.ensure_running(s["id"]) if running else c.ensure_stopped(s["id"])
-    check(s["state"] == ("running" if running else "stopped"), f"{PAPER_NAME} is {s['state']}")
+    check(s["state"] in (bf.LIVE_STATES if running else ("stopped",)), f"{PAPER_NAME} is {s['state']}")
     return s
 
 
@@ -166,7 +166,7 @@ def ensure_vanilla(c, running=True):
     check(eula is not None and "eula=true" in eula["content"], "eula.txt says eula=true (file manager API)")
     _guard(c.server(sid))
     s = c.ensure_running(sid) if running else c.ensure_stopped(sid)
-    check(s["state"] == ("running" if running else "stopped"), f"{VANILLA_NAME} is {s['state']}")
+    check(s["state"] in (bf.LIVE_STATES if running else ("stopped",)), f"{VANILLA_NAME} is {s['state']}")
     return s
 
 

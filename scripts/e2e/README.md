@@ -3,8 +3,11 @@
 Stdlib-only Python 3 (3.9+) scripts that drive a running control plane through its public API
 (`/api/v1`) against a real node. They are evidence runs, not unit tests: each prints one line per check
 (`ok  …`), stops at the first failure (printing the API error body) and exits non-zero; `PASS` at the end.
-After every run — passed, failed, or interrupted with Ctrl-C — the script's cleanup runs (`bf.main(run,
-cleanup)`); a cleanup that cannot restore the node prints `CLEANUP FAILED …` and also exits non-zero.
+After every run of the four test scripts — passed, failed, or interrupted with Ctrl-C — the script's cleanup
+runs (`bf.main(run, cleanup)`); a cleanup that cannot restore the node prints `CLEANUP FAILED …` and also exits
+non-zero. `setup_servers.py` has no cleanup by design: its job is to leave both servers in place and running.
+A missing or group/world-readable owner file, or an unreachable control plane, is reported as a `FAIL` line.
+Servers in state `degraded` count as live (console actions, stop) like `running`.
 
 ## Prerequisites
 
@@ -40,9 +43,10 @@ Run from the repository root, e.g. `python3 scripts/e2e/setup_servers.py`.
 ## Cleanup scope
 
 Cleanup only touches the two e2e servers and only the state the scripts create: the Notch whitelist/op/ban
-entries and the IP bans 203.0.113.7 / 203.0.113.8 (console commands on a running server — a 504 `no_feedback`
-is retried once — or file edits on a stopped one; if a running server still lists an entry, it is stopped,
-the entry removed as a file edit, and the server left stopped), and every `Chunky*` / `BfE2E*` extension in `e2e-paper`'s `plugins/`
+entries and the IP bans 203.0.113.7 / 203.0.113.8 (console commands on a running/degraded server — after a
+504 `no_feedback` the lists are re-read for up to 65 s, never resent — or file edits on a stopped one; if a live
+server still lists an entry, it is stopped, the entry removed as a file edit, and the server left stopped), and
+every `Chunky*` / `BfE2E*` extension in `e2e-paper`'s `plugins/`
 (removed into the keep area, so the history keeps a rollback for a while). `e2e_players_stopped.py` also stops
 `e2e-vanilla` again when it started it. Removed jars, the imported `vanilla-minecraft` template, the two servers
 and Chunky's own `plugins/Chunky/` config folder are kept. Delete the servers through the UI/API
@@ -52,5 +56,8 @@ and Chunky's own `plugins/Chunky/` config folder are kept. Delete the servers th
 
 The server's first Mojang profile lookup after a start can take ~10 s, longer than the 5 s feedback window
 of console-backed player actions; the API then answers 504 `no_feedback` (command sent, outcome unknown).
-`e2e_players.py` retries once and requires the retry's own feedback: either the normal confirmation, or a
-no-op refusal ("already …") together with re-read lists showing that the first command applied.
+The control plane keeps such a timed-out command "lingering" for 60 s (`players/console.ts`), so resending it
+would only be ambiguous and time out again. The console-backed steps of `e2e_players.py` and
+`e2e_players_stopped.py` therefore never resend: they re-read the lists for up to 65 s and, if the lists show the
+action applied, record the step as `504 no_feedback, applied (lists confirm …; no server feedback)` — labelled
+differently from a feedback-confirmed step — and continue; if the lists never show it, the step fails.
