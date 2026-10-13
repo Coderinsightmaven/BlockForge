@@ -272,10 +272,17 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   `details.reason: "extension_job_running"`); none while the server is provisioning, reinstalling, restoring,
   migrating or deleting (409 `INVALID_STATE`). Everything that changes the server's files (install, apply updates,
   rollback jobs; enable/disable, remove, upload completion) holds the server operation lock as
-  `activeOperation: "extensions"` (no state change) for its whole duration: backup, restore, reinstall, delete and
-  power actions answer the usual 409 `INVALID_STATE` meanwhile, and no extension change starts while another
-  operation runs. Undo and rollback move a kept jar back only while its SHA-512 is still the one taken right after
-  it was kept, never overwrite an existing file and delete only files the job wrote.
+  `activeOperation: "extensions"` (no state change) for its whole duration: start, backup, restore, reinstall and
+  delete answer the usual 409 `INVALID_STATE` meanwhile, and no extension change starts while another operation
+  runs. On a `running`/`degraded` server **stop, restart and kill pre-empt** the change (contracts
+  `canStartOperation`): the job notices the lost lock at its next re-check, undoes its file changes and fails with
+  `LOCK_LOST` (failed history row); a synchronous change undoes itself and answers 409 `preempted`. Every move of
+  a jar is hashed before and verified after (`fs.rename` takes no expected digest, so a swap in between is
+  detected and undone/refused, not prevented): kept jars go back only while they have the digest taken when they
+  were kept, downloads land in `.blockforge/extensions/fetch/` and are renamed into place without overwriting,
+  undo deletes only files the job wrote, and a changed staged upload is refused (409 `upload_changed`). A kept
+  file that cannot be vouched for is never restored; its failed history row points at it (no digest) for
+  inspection and pruning. Locks of jobs that ended without releasing them are taken over / swept by maintenance.
 * **`restartRequired`** is true whenever the server is not `stopped`/`crashed`: plugins and mods load only at
   start; BlockForge never hot-reloads (`/reload`) and never restarts the server on its own.
 * **Uploads.** `POST …/uploads` (refused with 422 `uploads_disabled` when `extensions.uploads.allowed` is false)

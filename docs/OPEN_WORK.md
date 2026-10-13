@@ -17,7 +17,10 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - **High 2 — fixed:** Modrinth rollback downloads to a temporary name and renames without overwriting; undo deletes
   only files the job wrote (digest checked).
 - **High 3 — fixed:** file-changing extension work holds `servers.active_operation = 'extensions'` (new additive
-  `ServerOperation` value, migration 0006), re-checked at every step; backup/restore/reinstall/delete get the usual 409.
+  `ServerOperation` value, migration 0006), re-checked at every step; backup/restore/reinstall/delete get the usual 409;
+  stop/restart/kill pre-empt it on a running server (the change undoes itself).
+- **Round 2 (Grok) on these fixes — fixed:** blocker B1 (failed finalize pinned the lock), majors 2–5 (pre-emption,
+  journaled digests, kept files always recorded, verify-after-move) and minors 6–11; see the review record.
 - **High 4:** player action feedback accepts target-less failure lines from other commands. Require the target, else 504
   `no_feedback`.
 - **Major 5 — fixed:** apply is idempotent (job-derived history ids and keep names, a checkpointed journal, history
