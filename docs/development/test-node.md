@@ -161,6 +161,23 @@ order against `e2e-paper` (Paper 26.3, 25572) and `e2e-vanilla` (Pterodactyl Van
   (`P3y2MXnd`) and offered 1.5.3; then 1.4.40 installed through the install route and **updated to 1.5.3 through
   `POST …/extensions/updates/apply`** (job 1.2 s, result `updated`, history `update` 1.4.40 → 1.5.3 with
   `rollback.available`) — the first live verification of update apply.
-* Still open from this run: identified on-disk copies are labelled `source: "modrinth"` (see above; fixed since,
-  not yet re-run live); the project
+* Still open from this run: identified on-disk copies were labelled `source: "modrinth"` (fixed in PR #5 and
+  re-run live below); the project
   route's prerelease check used `luckperms`, which has no prereleases for 26.3 (the scripts now use `viaversion`).
+
+## Phase 4b sign-off (2026-10-13, main 03a0dd7)
+Control plane restarted on main 03a0dd7 (PRs #1–#5 merged; migrations 0006 + 0007 applied) with `scripts/dev-up.sh`
+(the 18081 tunnel kept running); agent reconnected. `scripts/e2e/*` run in order, all PASS, 173 checks:
+`setup_servers.py` 10, `e2e_players.py` 50, `e2e_players_stopped.py` 55, `e2e_extensions.py` 33,
+`e2e_ext_updates.py` 25. No error-level lines in the control-plane log.
+* Provenance (`source`) live: the Chunky 1.4.40 jar copied in through the file manager is identified on Modrinth by
+  SHA-512 (`P3y2MXnd`) and listed as `source: "unknown"` with the Modrinth ref; BlockForge's install of Chunky 1.5.3 is
+  `modrinth`; the generated upload is `upload`.
+* Update apply again: 1.4.40 → 1.5.3 via `POST …/extensions/updates/apply` (job 1.2 s, result `updated`, history
+  `update` 1.4.40 → 1.5.3 with `rollback.available`).
+* Players (running Paper and stopped Vanilla egg) and Plugins & mods (install, toggle, upload, remove, rollback,
+  restart → `[Chunky] Enabling Chunky v1.5.3`) as in the re-run above, now on the reviewed fixes (feedback
+  attribution, extension server lock, fenced undo).
+* `DUPLICATE_ID` is covered by library and control-plane integration tests (Paper warning, Fabric error, peer-aware
+  events); not exercised against the live node.
+* Node left with `e2e-paper` running (25572) and `e2e-vanilla` stopped (25573), no e2e list entries or test jars.
