@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { ModrinthInstallPlan, type ModrinthPlannedFile } from "@blockforge/contracts";
 import { checkModrinthUpdates, fromContractPlanRequest, planModrinthInstall, primaryJarFile, toContractInstallPlan, type InstalledExtensionRef } from "@blockforge/minecraft";
 import { and, eq, inArray } from "drizzle-orm";
@@ -7,17 +6,40 @@ import { extensionHistory, installedExtensions, servers } from "../db/schema/ind
 import { JobError, type JobDefinition, type StepContext } from "../jobs/types.js";
 import {
   agentOpts,
+  assertHoldsLock,
+  ensureDir,
   EXTENSION_JOBS,
+  FETCH_DIR,
   jobAgentError,
+  keptPathOf,
   releaseExtensionLock,
   restartRequired,
+  refetchable,
   rollbackOf,
   snapshotOf,
   targetOf,
   type ExtensionDeps,
   type ExtensionRow,
 } from "./model.js";
-import { applyPlannedFiles, deleteFile, exists, fetchModrinthFile, keepFile, sha512Of, stampInstalled, writeHistory, type FileCtx, type HistoryActorFields, type PendingEntry } from "./ops.js";
+import {
+  applyPlannedFiles,
+  deleteCreated,
+  exists,
+  fetchModrinthFile,
+  keepFile,
+  KeptFileChangedError,
+  restoreKept,
+  sha512Of,
+  stableId,
+  stampInstalled,
+  writeHistory,
+  type ApplyJournal,
+  type FileCtx,
+  type HistoryActorFields,
+  type JournalEntry,
+  type Kept,
+  type PendingEntry,
+} from "./ops.js";
 import { publishExtensions, runScan, setScanStatus } from "./scan.js";
 
 const Actor = z.object({ actorType: z.enum(["user", "api_token", "schedule", "system"]), actorId: z.uuid().nullable(), actorName: z.string().max(128).nullable() });
@@ -41,6 +63,19 @@ function fileCtx<I>(ctx: StepContext<I>, serverId: string, nodeId: string): File
   return { serverId, nodeId, jobId: ctx.jobId, signal: ctx.signal, log: (l, m) => ctx.log(l, m) };
 }
 
+/** Apply progress in `ctx.state.journal`, checkpointed before/after every file operation (resumable). */
+function journalOf<I>(ctx: StepContext<I>): ApplyJournal {
+  const all = ((ctx.state.journal as Record<string, JournalEntry> | undefined) ?? {}) as Record<string, JournalEntry>;
+  ctx.state.journal = all;
+  return {
+    get: (id) => all[id],
+    set: async (id, e) => {
+      all[id] = e;
+      await ctx.checkpoint();
+    },
+  };
+}
+
 /** Rescan after a change (the job keeps the lock); a failing rescan does not undo the change. */
 async function rescan<I>(d: ExtensionDeps, ctx: StepContext<I>, serverId: string): Promise<string[] | null> {
   try {
@@ -61,8 +96,11 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
       }
     } finally {
       await releaseExtensionLock(d.db, f.input.serverId, f.jobId);
+      // The server's `extensions` operation lock (file-changing jobs; a no-op for scans).
+      await d.state.end(f.input.serverId, f.jobId);
     }
   };
+  const holdsLock = <I extends { serverId: string }>(ctx: StepContext<I>) => assertHoldsLock(d, ctx.input.serverId, ctx.jobId);
 
   const scan: JobDefinition<z.infer<typeof ScanInput>> = {
     type: EXTENSION_JOBS.scan,
@@ -102,9 +140,13 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         label: "Download and verify the files",
         run: async (ctx) => {
           const s = await serverOf(d, ctx.input.serverId);
-          const entries = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), ctx.input.plan.files, { actor: ctx.input.actor as HistoryActorFields, jobId: ctx.jobId });
-          await writeHistory(d, s.id, entries, { actor: ctx.input.actor as HistoryActorFields, jobId: ctx.jobId, status: "succeeded" });
-          ctx.state.entries = entries;
+          await holdsLock(ctx);
+          const actor = ctx.input.actor as HistoryActorFields;
+          const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), ctx.input.plan.files, { actor, jobId: ctx.jobId, journal: journalOf(ctx), assertLock: () => holdsLock(ctx) });
+          ctx.state.entries = r.entries;
+          delete ctx.state.journal;
+          // History, state and step success in one transaction: a resumed job never applies twice.
+          await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx), { completeStep: true });
           await ctx.log("info", `Installed ${ctx.input.plan.files.length} file(s)${restartRequired(s.state) ? "; they take effect at the next restart" : ""}`);
         },
       },
@@ -181,22 +223,32 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         label: "Install the updates",
         run: async (ctx) => {
           const s = await serverOf(d, ctx.input.serverId);
+          await holdsLock(ctx);
+          const actor = ctx.input.actor as HistoryActorFields;
           const plans = (ctx.state.plans as Array<{ extensionId: string; files: ModrinthPlannedFile[] }>) ?? [];
-          const results = (ctx.state.results as UpdateResult[]) ?? [];
-          const applied: { files: ModrinthPlannedFile[]; entries: PendingEntry[] }[] = [];
-          for (const p of plans) {
+          // Resumable: results/applied/done are checkpointed after every plan.
+          const results = ((ctx.state.results as UpdateResult[]) ?? []) as UpdateResult[];
+          const applied = ((ctx.state.applied as { files: ModrinthPlannedFile[]; entries: PendingEntry[] }[]) ?? []) as { files: ModrinthPlannedFile[]; entries: PendingEntry[] }[];
+          const done = ((ctx.state.done as number[]) ?? []) as number[];
+          Object.assign(ctx.state, { results, applied, done });
+          const journal = journalOf(ctx);
+          for (const [k, p] of plans.entries()) {
+            if (done.includes(k)) continue;
             try {
-              const entries = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), p.files, { actor: ctx.input.actor as HistoryActorFields, jobId: ctx.jobId });
-              await writeHistory(d, s.id, entries, { actor: ctx.input.actor as HistoryActorFields, jobId: ctx.jobId, status: "succeeded" });
-              applied.push({ files: p.files, entries });
+              const r = await applyPlannedFiles(d, fileCtx(ctx, s.id, s.nodeId), p.files, { actor, jobId: ctx.jobId, key: `update:${k}`, journal, assertLock: () => holdsLock(ctx) });
+              applied.push({ files: p.files, entries: r.entries });
               results.push({ extensionId: p.extensionId, status: "updated", versionId: p.files.find((f) => f.reason === "requested")?.versionId ?? null, error: null });
+              done.push(k);
+              await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx));
             } catch (err) {
+              if (err instanceof JobError && err.code === "LOCK_LOST") throw err;
               results.push({ extensionId: p.extensionId, status: "failed", versionId: null, error: (err as Error).message.slice(0, 1024) });
+              done.push(k);
+              await ctx.checkpoint();
               await ctx.log("warn", `Update of ${p.extensionId} failed: ${(err as Error).message}`);
             }
           }
-          ctx.state.results = results;
-          ctx.state.applied = applied;
+          delete ctx.state.journal;
           if (results.length && results.every((r) => r.status === "failed")) {
             ctx.state.allFailed = true;
           }
@@ -231,16 +283,46 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
         label: "Restore the previous state",
         run: async (ctx) => {
           const s = await serverOf(d, ctx.input.serverId);
+          await holdsLock(ctx);
           const c = fileCtx(ctx, s.id, s.nodeId);
           const [entry] = await d.db.select().from(extensionHistory).where(and(eq(extensionHistory.id, ctx.input.entryId), eq(extensionHistory.serverId, s.id)));
           if (!entry) throw new JobError("NOT_FOUND", "the history entry no longer exists");
+          const id = stableId(ctx.jobId, "rollback");
+          const actor = ctx.input.actor as HistoryActorFields;
+          const fromKeep = !!entry.from && !refetchable(entry.from);
+          const finish = async (p: PendingEntry | null) => {
+            ctx.state.restoredPath = entry.from?.path ?? null;
+            ctx.state.restored = entry.from ?? null;
+            ctx.state.entryId = id;
+            delete ctx.state.rb;
+            // History, the consumed kept file and step success in one transaction (never applied twice).
+            await ctx.checkpoint(
+              async (tx) => {
+                if (p) await writeHistory(d, s.id, [p], { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
+                if (fromKeep) await tx.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, entry.id));
+              },
+              { completeStep: true },
+            );
+            await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
+          };
+          // Idempotency (#5): an interrupted attempt that already recorded its history is not re-run.
+          const [prior] = await d.db.select().from(extensionHistory).where(eq(extensionHistory.id, id));
+          if (prior) {
+            if (prior.status === "failed") throw new JobError("ROLLBACK_FAILED", `rollback: ${prior.error ?? "failed"}`);
+            return finish(null);
+          }
           const newer = await d.db.select().from(extensionHistory).where(and(eq(extensionHistory.serverId, s.id), eq(extensionHistory.status, "succeeded")));
           const avail = rollbackOf(entry, newer.filter((n) => n.at > entry.at), d.clock.now());
           if (!avail.available) throw new JobError("ROLLBACK_UNAVAILABLE", `the change can no longer be rolled back (${avail.reason})`);
           const rows = await d.db.select().from(installedExtensions).where(eq(installedExtensions.serverId, s.id));
-          const id = randomUUID();
-          const actor = ctx.input.actor as HistoryActorFields;
           const current = entry.to ? (rows.find((r) => r.path === entry.to!.path) ?? null) : null;
+          // Progress of an interrupted attempt (checkpointed after every file operation).
+          type Progress = { started?: boolean; kept?: Kept | null; restored?: boolean };
+          const rb = ((ctx.state.rb as Progress | undefined) ?? {}) as Progress;
+          const resumed = rb.started === true;
+          rb.started = true;
+          ctx.state.rb = rb;
+          await ctx.checkpoint();
           const pending: PendingEntry = {
             id,
             action: "rollback",
@@ -250,57 +332,103 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             from: current ? snapshotOf(current) : (entry.to ?? null),
             to: entry.from ?? null,
             keptPath: null,
-            keptSha512: current?.sha512 ?? entry.to?.sha512 ?? null,
+            keptSha512: null,
           };
-          let keptCurrent: string | null = null;
-          let restoredFetched = false;
-          let movedBack = false;
+          const fetchTemp = `${FETCH_DIR}/${id}.jar`;
           try {
-            // The current file (the change being undone) goes to the keep area.
-            if (entry.to && (await exists(d, c, entry.to.path))) {
-              keptCurrent = await keepFile(d, c, entry.to.path, id);
-              pending.keptPath = keptCurrent;
+            // The current file (the change being undone) goes to the keep area, hashed right after the move.
+            if (entry.to && rb.kept === undefined) {
+              const keptName = keptPathOf(id);
+              if (await exists(d, c, entry.to.path)) rb.kept = await keepFile(d, c, entry.to.path, id);
+              else if (resumed && (await exists(d, c, keptName))) rb.kept = { path: keptName, sha512: await sha512Of(d, c, keptName) };
+              else rb.kept = null;
+              await ctx.checkpoint();
             }
-            if (entry.from) {
+            if (rb.kept) {
+              pending.keptPath = rb.kept.path;
+              pending.keptSha512 = rb.kept.sha512;
+            }
+            if (entry.from && !rb.restored) {
+              await holdsLock(ctx);
               const from = entry.from;
-              if (from.source === "modrinth" && from.projectId && from.versionId && from.sha512) {
-                let version;
-                try {
-                  version = await d.upstreams.modrinth.getVersion(from.versionId);
-                } catch (err) {
-                  throw d.upstreams.jobError(err, "modrinth");
+              if (!fromKeep) {
+                // Downloaded to a temporary name first, then renamed into place: `fs.rename` never overwrites,
+                // so an unrelated file that now has the old name is neither replaced nor later deleted (#2).
+                const placed = resumed && !(await exists(d, c, fetchTemp)) && (await sha512Of(d, c, from.path)) === from.sha512;
+                if (!placed) {
+                  const downloaded = resumed && (await sha512Of(d, c, fetchTemp)) === from.sha512;
+                  if (await exists(d, c, from.path)) throw new JobError("CONFLICT", `${from.path} exists; remove or rename it first`);
+                  if (!downloaded) {
+                    let version;
+                    try {
+                      version = await d.upstreams.modrinth.getVersion(from.versionId!);
+                    } catch (err) {
+                      throw d.upstreams.jobError(err, "modrinth");
+                    }
+                    const picked = primaryJarFile(version, d.upstreams.modrinth.cdnHosts);
+                    if ("problem" in picked) throw new JobError("ROLLBACK_UNAVAILABLE", `the old version has no installable file (${picked.problem})`);
+                    if (picked.sha512 !== from.sha512) throw new JobError("ROLLBACK_UNAVAILABLE", "Modrinth no longer serves the exact file that was installed");
+                    await ctx.log("info", `Downloading ${from.versionNumber ?? from.versionId} from Modrinth`);
+                    await ensureDir(d.gateway, c.nodeId, s.id, FETCH_DIR, c);
+                    await fetchModrinthFile(d, c, { url: picked.url, destPath: fetchTemp, sha512: from.sha512!, sizeBytes: picked.file.size });
+                  }
+                  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: fetchTemp, to: from.path }, agentOpts(c));
                 }
-                const picked = primaryJarFile(version, d.upstreams.modrinth.cdnHosts);
-                if ("problem" in picked) throw new JobError("ROLLBACK_UNAVAILABLE", `the old version has no installable file (${picked.problem})`);
-                if (picked.sha512 !== from.sha512) throw new JobError("ROLLBACK_UNAVAILABLE", "Modrinth no longer serves the exact file that was installed");
-                await ctx.log("info", `Downloading ${from.versionNumber ?? from.versionId} from Modrinth`);
-                await fetchModrinthFile(d, c, { url: picked.url, destPath: from.path, sha512: from.sha512, sizeBytes: picked.file.size });
-                restoredFetched = true;
               } else {
                 if (!entry.keptPath || !entry.keptSha512) throw new JobError("ROLLBACK_UNAVAILABLE", "the previous file is no longer kept (file_unavailable)");
-                if ((await sha512Of(d, c, entry.keptPath)) !== entry.keptSha512) throw new JobError("ROLLBACK_UNAVAILABLE", "the kept file is missing or changed (file_unavailable)");
-                if (await exists(d, c, from.path)) throw new JobError("CONFLICT", `${from.path} exists; remove it first`);
-                await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: entry.keptPath, to: from.path }, agentOpts(c));
-                movedBack = true;
-                await d.db.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, entry.id));
+                const placed = resumed && !(await exists(d, c, entry.keptPath)) && (await sha512Of(d, c, from.path)) === entry.keptSha512;
+                if (!placed) {
+                  if (await exists(d, c, from.path)) throw new JobError("CONFLICT", `${from.path} exists; remove it first`);
+                  try {
+                    await restoreKept(d, c, entry.keptPath, entry.keptSha512, from.path);
+                  } catch (err) {
+                    if (err instanceof KeptFileChangedError) throw new JobError("ROLLBACK_UNAVAILABLE", "the kept file is missing or changed (file_unavailable)");
+                    throw err;
+                  }
+                }
               }
+              rb.restored = true;
+              await ctx.checkpoint();
             }
           } catch (err) {
-            try {
-              if (restoredFetched && entry.from) await deleteFile(d, c, entry.from.path);
-              if (movedBack && entry.from && entry.keptPath) await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: entry.from.path, to: entry.keptPath }, agentOpts(c));
-              if (keptCurrent && entry.to) await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: keptCurrent, to: entry.to.path }, agentOpts(c));
-            } catch (e) {
-              await ctx.log("error", `Undo failed: ${(e as Error).message}`);
+            if (err instanceof JobError && err.code === "LOCK_LOST") throw err;
+            // Undo: only files this job wrote are removed, and kept files go back only while unchanged.
+            const notes: string[] = [];
+            const undo = async (what: string, fn: () => Promise<void>): Promise<boolean> => {
+              try {
+                await fn();
+                return true;
+              } catch (e) {
+                notes.push((e as Error).message);
+                await ctx.log("error", `Undo failed (${what}): ${(e as Error).message}`);
+                return false;
+              }
+            };
+            const from = entry.from;
+            if (from && rb.restored) {
+              if (!fromKeep) await undo(from.path, () => deleteCreated(d, c, from.path, from.sha512!));
+              else if (entry.keptPath && entry.keptSha512) {
+                const keptPath = entry.keptPath;
+                const sha = entry.keptSha512;
+                await undo(from.path, async () => {
+                  if ((await sha512Of(d, c, from.path)) !== sha) throw new JobError("FILE_CHANGED", `${from.path} changed after it was restored; it was not moved back to the keep area`);
+                  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: s.id, from: from.path, to: keptPath }, agentOpts(c));
+                });
+              }
             }
-            await writeHistory(d, s.id, [pending], { actor, jobId: ctx.jobId, status: "failed", error: (err as Error).message });
-            throw jobAgentError(err, "rollback");
+            if (from && !fromKeep) await undo(fetchTemp, () => deleteCreated(d, c, fetchTemp, from.sha512!));
+            if (rb.kept && entry.to) {
+              const k = rb.kept;
+              const to = entry.to.path;
+              if (!(await undo(to, () => restoreKept(d, c, k.path, k.sha512, to)))) pending.leftInKeep = true;
+            }
+            const base = (err as Error).message;
+            await writeHistory(d, s.id, [pending], { actor, jobId: ctx.jobId, status: "failed", error: notes.length ? `${base}; undo: ${notes.join("; ")}` : base });
+            const e = jobAgentError(err, "rollback");
+            if (notes.length) throw new JobError(e instanceof JobError ? e.code : "ROLLBACK_FAILED", `${(e as Error).message}; undo: ${notes.join("; ")}`);
+            throw e;
           }
-          await writeHistory(d, s.id, [pending], { actor, jobId: ctx.jobId, status: "succeeded" });
-          ctx.state.restoredPath = entry.from?.path ?? null;
-          ctx.state.restored = entry.from ?? null;
-          ctx.state.entryId = id;
-          await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
+          await finish(pending);
         },
       },
       {

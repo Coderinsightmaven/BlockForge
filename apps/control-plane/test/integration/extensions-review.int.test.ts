@@ -1,0 +1,384 @@
+/**
+ * Regression tests for the control plane Phase 4b review (docs/reviews/2026-10-12-control-plane-phase4b.md):
+ * #1 #2 #3 #5 #6 #7 and L2 L3 L4 L6 L7.
+ */
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { CompleteExtensionUploadResponse, ExtensionHistoryPage, ExtensionList, ExtensionUploadResponse, ModrinthInstallPlan, RemoveExtensionResponse } from "@blockforge/contracts";
+import { afterEach, describe, expect, it } from "vitest";
+import { batched } from "../../src/extensions/scan.js";
+import { startWithOwner, type ApiClient, type TestApp } from "../support/app.js";
+import { testPool } from "../support/db.js";
+import type { FakeAgent } from "../support/fake-agent.js";
+import { FakeUpstreams } from "../support/modrinth.js";
+import { catalogOptions, connectSimNode, paperRequest, poll, publicLookup, templateIdByKey, waitJob, type SimNodeHandle } from "../support/panel.js";
+import { makeJar } from "../support/zip.js";
+
+let t: TestApp | null = null;
+const agents: FakeAgent[] = [];
+afterEach(async () => {
+  for (const a of agents.splice(0)) await a.close().catch(() => undefined);
+  await t?.close();
+  t = null;
+});
+
+const pluginJar = (name: string, version: string, extra = "") => makeJar({ "plugin.yml": `name: ${name}\nversion: ${version}\nmain: com.example.${name.toLowerCase()}.Main\napi-version: '1.21'\n${extra}` });
+const sha512 = (b: Buffer | string) => createHash("sha512").update(b).digest("hex");
+const KEPT = ".blockforge/extensions/kept/";
+
+async function boot() {
+  const up = new FakeUpstreams();
+  const cat = catalogOptions();
+  const r = await startWithOwner({
+    background: true,
+    catalog: cat.catalog,
+    env: { SCHEDULER_INTERVAL_MS: "300000" },
+    serverJobs: { readyTimeoutMs: 10_000, slpWaitMs: 0 },
+    upstream: { fetchImpl: up.fetch, lookup: publicLookup },
+  });
+  t = r.t;
+  const node = await connectSimNode(r.t, r.owner, { agents });
+  up.attach(node.sim);
+  up.addProject({ id: "AlphaLib", slug: "alphalib", title: "Alpha Lib", type: "plugin", loaders: ["paper", "spigot", "bukkit"] });
+  up.addVersion("AlphaLib", { id: "AlphaV10", number: "1.0.0", filename: "AlphaLib-1.0.0.jar", jar: pluginJar("AlphaLib", "1.0.0") });
+  up.addProject({ id: "GammaPl", slug: "gammapl", title: "Gamma", type: "plugin", loaders: ["paper"] });
+  return { ...r, node, up };
+}
+
+async function paperServer(owner: ApiClient): Promise<string> {
+  const created = await owner.post("/servers", paperRequest(await templateIdByKey(owner, "minecraft-java"), { startup: "manual" }));
+  expect(created.statusCode, created.body).toBe(202);
+  expect((await waitJob(owner, created.json().jobId)).status).toBe("succeeded");
+  return created.json().server.id as string;
+}
+
+const list = async (c: ApiClient, id: string) => ExtensionList.parse((await c.get(`/servers/${id}/extensions`)).json());
+async function scanned(c: ApiClient, id: string): Promise<ExtensionList> {
+  const r = await c.post(`/servers/${id}/extensions/scan`, {});
+  expect(r.statusCode, r.body).toBe(202);
+  expect((await waitJob(c, r.json().jobId)).status).toBe("succeeded");
+  return list(c, id);
+}
+const history = async (c: ApiClient, id: string) => ExtensionHistoryPage.parse((await c.get(`/servers/${id}/extensions/history`)).json());
+const keptFiles = (node: SimNodeHandle, id: string) => [...node.sim.files(id).keys()].filter((p) => p.startsWith(KEPT));
+const expectFiles = (plan: ModrinthInstallPlan) => plan.files.map((f) => ({ projectId: f.projectId, versionId: f.versionId, action: f.action }));
+async function install(c: ApiClient, id: string, project: string): Promise<string> {
+  const plan = ModrinthInstallPlan.parse((await c.post(`/servers/${id}/extensions/modrinth/plan`, { project })).json());
+  const r = await c.post(`/servers/${id}/extensions/modrinth/install`, { project, expect: expectFiles(plan) });
+  expect(r.statusCode, r.body).toBe(202);
+  return r.json().jobId as string;
+}
+
+describe("Phase 4b review: kept files, rollback targets and recovery", () => {
+  it("#1: the undo of a failed install does not restore a kept jar that changed during the download", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await scanned(owner, id);
+    const original = pluginJar("Gamma", "0.9-local");
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    await scanned(owner, id);
+    const gamma = up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+    node.sim.artifacts.set(gamma.url, Buffer.from("tampered on the CDN"));
+    // A plugin writes into the keep area while the (failing) download runs.
+    node.sim.options = { before: { "artifact.fetch": () => { for (const k of keptFiles(node, id)) node.sim.put(id, k, "EVIL-KEPT-JAR"); } } };
+    const job = await waitJob(owner, await install(owner, id, "gammapl"));
+    node.sim.options = {};
+    expect(job.status).toBe("failed");
+    expect((job.error as { message: string }).message).toMatch(/kept file .* changed since it was kept/);
+    expect(node.sim.read(id, "plugins/Gamma-1.0.jar")).not.toBe("EVIL-KEPT-JAR");
+    expect(node.sim.read(id, "plugins/Gamma-1.0.jar")).toBeNull();
+    // The swapped file stays in the keep area (and is recorded there for pruning), never in plugins/.
+    const [k] = keptFiles(node, id);
+    expect(node.sim.read(id, k!)).toBe("EVIL-KEPT-JAR");
+    const { rows } = await testPool().query("SELECT status, kept_path, kept_sha512 FROM extension_history WHERE server_id = $1", [id]);
+    expect(rows).toEqual([]); // the failure happened before the entry was complete: only the job error records it
+
+    // Without interference the undo still restores the original.
+    node.sim.files(id).delete(k!);
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    expect((await waitJob(owner, await install(owner, id, "gammapl"))).status).toBe("failed");
+    expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
+  });
+
+  it("#2: a Modrinth rollback never overwrites or deletes a file that now has the old name", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    const v1 = up.projects.get("AlphaLib")!.versions[0]!;
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", v1.jar);
+    const alpha = (await scanned(owner, id)).items.find((x) => x.filename === "AlphaLib-1.0.0.jar")!;
+    const v2 = up.addVersion("AlphaLib", { id: "AlphaV20", number: "2.0.0", filename: "AlphaLib-2.0.0.jar", jar: pluginJar("AlphaLib", "2.0.0") });
+    const apply = await owner.post(`/servers/${id}/extensions/updates/apply`, { extensionIds: [alpha.id] });
+    expect((await waitJob(owner, apply.json().jobId)).status).toBe("succeeded");
+    const upd = (await history(owner, id)).items[0]!;
+    expect(upd).toMatchObject({ action: "update", from: { path: "plugins/AlphaLib-1.0.0.jar" } });
+
+    // Something unrelated now has the old name.
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", "UNRELATED");
+    const fetchedBefore = node.sim.fetched.length;
+    const rb = await owner.post(`/servers/${id}/extensions/history/${upd.id}/rollback`);
+    expect(rb.statusCode, rb.body).toBe(202);
+    const rj = await waitJob(owner, rb.json().jobId);
+    expect(rj.status).toBe("failed");
+    expect(rj.error).toMatchObject({ code: "CONFLICT" });
+    expect(node.sim.read(id, "plugins/AlphaLib-1.0.0.jar")).toBe("UNRELATED");
+    expect(node.sim.files(id).get("plugins/AlphaLib-2.0.0.jar")!.data.equals(v2.jar)).toBe(true);
+    expect(node.sim.fetched.length).toBe(fetchedBefore);
+
+    // Appearing during the download: the rename into place refuses, the occupant survives the undo.
+    node.sim.files(id).delete("plugins/AlphaLib-1.0.0.jar");
+    node.sim.options = { before: { "artifact.fetch": () => node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", "LATE-ARRIVAL") } };
+    const rb2 = await owner.post(`/servers/${id}/extensions/history/${upd.id}/rollback`);
+    const rj2 = await waitJob(owner, rb2.json().jobId);
+    node.sim.options = {};
+    expect(rj2.status).toBe("failed");
+    expect(node.sim.read(id, "plugins/AlphaLib-1.0.0.jar")).toBe("LATE-ARRIVAL");
+    expect(node.sim.files(id).get("plugins/AlphaLib-2.0.0.jar")!.data.equals(v2.jar)).toBe(true);
+    expect([...node.sim.files(id).keys()].filter((p) => p.startsWith(".blockforge/extensions/fetch/"))).toEqual([]);
+
+    // A free old name: the rollback works (fetched under a temporary name, renamed into place).
+    node.sim.files(id).delete("plugins/AlphaLib-1.0.0.jar");
+    const rb3 = await owner.post(`/servers/${id}/extensions/history/${upd.id}/rollback`);
+    expect((await waitJob(owner, rb3.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.files(id).get("plugins/AlphaLib-1.0.0.jar")!.data.equals(v1.jar)).toBe(true);
+    expect(node.sim.read(id, "plugins/AlphaLib-2.0.0.jar")).toBeNull();
+  });
+
+  it("#3: extension jobs hold the server operation lock against backup, restore, reinstall and delete (and vice versa)", async () => {
+    const { owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await scanned(owner, id);
+    const bk = await owner.post(`/servers/${id}/backups`, { name: "before" });
+    expect(bk.statusCode, bk.body).toBe(202);
+    expect((await waitJob(owner, bk.json().jobId)).status).toBe("succeeded");
+    const backupId = bk.json().backup.id as string;
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+
+    node.sim.options = { delay: { "artifact.fetch": 2000 } };
+    const job = await install(owner, id, "gammapl");
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: "extensions", activeJobId: job, state: "stopped" });
+    for (const [what, r] of [
+      ["backup", await owner.post(`/servers/${id}/backups`, {})],
+      ["restore", await owner.post(`/servers/${id}/backups/${backupId}/restore`, { startAfter: false })],
+      ["reinstall", await owner.post(`/servers/${id}/reinstall`)],
+      ["delete", await owner.delete(`/servers/${id}?deleteData=true`)],
+    ] as const) {
+      expect(r.statusCode, `${what}: ${r.body}`).toBe(409);
+      expect(r.json().error, what).toMatchObject({ code: "INVALID_STATE", details: { activeOperation: "extensions" } });
+    }
+    expect((await waitJob(owner, job)).status).toBe("succeeded");
+    node.sim.options = {};
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null, activeJobId: null, state: "stopped" });
+
+    // A running backup: no extension change starts (job or synchronous).
+    node.sim.options = { delay: { "backup.create": 1500 } };
+    const bk2 = await owner.post(`/servers/${id}/backups`, {});
+    expect(bk2.statusCode, bk2.body).toBe(202);
+    const gammaRow = (await list(owner, id)).items.find((x) => x.filename === "Gamma-1.0.jar")!;
+    const refusedInstall = await owner.post(`/servers/${id}/extensions/updates/apply`, { extensionIds: [gammaRow.id] });
+    expect(refusedInstall.statusCode).toBe(409);
+    expect(refusedInstall.json().error).toMatchObject({ code: "INVALID_STATE", details: { activeOperation: "backup" } });
+    const refusedRemove = await owner.delete(`/servers/${id}/extensions/${gammaRow.id}`);
+    expect(refusedRemove.statusCode).toBe(409);
+    expect(node.sim.read(id, "plugins/Gamma-1.0.jar")).not.toBeNull();
+    expect((await waitJob(owner, bk2.json().jobId)).status).toBe("succeeded");
+    node.sim.options = {};
+  });
+
+  it("#5: a job resumed after a crash between keep+fetch and the history write neither keeps nor fetches again", async () => {
+    const { t, owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    await scanned(owner, id);
+    const original = pluginJar("Gamma", "0.9-local");
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    await scanned(owner, id);
+    const newJar = pluginJar("Gamma", "1.0");
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: newJar });
+    const jobId = await install(owner, id, "gammapl");
+    expect((await waitJob(owner, jobId)).status).toBe("succeeded");
+    const entry = (await history(owner, id)).items[0]!;
+    const keptPath = `${KEPT}${entry.id}.jar`;
+    expect(node.sim.files(id).get(keptPath)!.data.equals(original)).toBe(true);
+    const fetched = node.sim.fetched.length;
+
+    // Crash after the file was kept and the new one fetched, before the history row (state as checkpointed then).
+    await t.ctx.jobs.stop();
+    await testPool().query("DELETE FROM extension_history WHERE job_id = $1", [jobId]);
+    await testPool().query("UPDATE installed_extensions SET sha512 = $2, sha1 = NULL, source = 'unknown', modrinth = NULL WHERE server_id = $1 AND path = 'plugins/Gamma-1.0.jar'", [id, sha512(original)]);
+    await testPool().query("UPDATE jobs SET status = 'running', finished_at = NULL, result = NULL, error = NULL, state = $2 WHERE id = $1", [
+      jobId,
+      JSON.stringify({ journal: { [entry.id]: { atDest: true, kept: { "plugins/Gamma-1.0.jar": sha512(original) } } } }),
+    ]);
+    await testPool().query("UPDATE job_steps SET status = CASE WHEN key = 'fetch' THEN 'running' ELSE 'pending' END, finished_at = NULL WHERE job_id = $1", [jobId]);
+    await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = $2 WHERE id = $1", [id, jobId]);
+    await testPool().query("UPDATE extension_scans SET active_job_id = $2 WHERE server_id = $1", [id, jobId]);
+    await t.ctx.jobs.start();
+
+    const row = await t.ctx.jobs.waitForCompletion(jobId);
+    expect(row.status, JSON.stringify(row.error)).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(node.sim.files(id).get(keptPath)!.data.equals(original)).toBe(true);
+    expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(newJar)).toBe(true);
+    expect(keptFiles(node, id)).toEqual([keptPath]);
+    const { rows } = await testPool().query("SELECT id, status, kept_path, kept_sha512 FROM extension_history WHERE job_id = $1", [jobId]);
+    expect(rows).toEqual([{ id: entry.id, status: "succeeded", kept_path: keptPath, kept_sha512: sha512(original) }]);
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+
+    // A resumed step whose history was already written (crash before the step was marked done) does not apply again.
+    await t.ctx.jobs.stop();
+    await testPool().query("UPDATE jobs SET status = 'running', finished_at = NULL WHERE id = $1", [jobId]);
+    await testPool().query("UPDATE job_steps SET status = CASE WHEN key = 'fetch' THEN 'running' ELSE 'pending' END, finished_at = NULL WHERE job_id = $1", [jobId]);
+    await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = $2 WHERE id = $1", [id, jobId]);
+    await t.ctx.jobs.start();
+    expect((await t.ctx.jobs.waitForCompletion(jobId)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched);
+    expect(keptFiles(node, id)).toEqual([keptPath]);
+    expect((await testPool().query("SELECT count(*)::int AS n FROM extension_history WHERE job_id = $1", [jobId])).rows[0].n).toBe(1);
+  });
+
+  it("#6: remove and upload-replace keep the digest of the file actually kept (changed since the scan, or never scanned)", async () => {
+    const { t, owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
+    const custom = (await scanned(owner, id)).items[0]!;
+    const changed = pluginJar("Custom", "1.1-hotfix");
+    node.sim.put(id, "plugins/custom.jar", changed); // no rescan
+    const rm = RemoveExtensionResponse.parse((await owner.delete(`/servers/${id}/extensions/${custom.id}`)).json());
+    expect(rm.rollbackAvailable).toBe(true);
+    expect((await history(owner, id)).items[0]!.rollback).toEqual({ available: true, reason: null });
+    const back = await owner.post(`/servers/${id}/extensions/history/${rm.historyEntryId}/rollback`);
+    expect(back.statusCode, back.body).toBe(202);
+    expect((await waitJob(owner, back.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.files(id).get("plugins/custom.jar")!.data.equals(changed)).toBe(true);
+
+    // Upload replacing a file the scan never saw.
+    const unscanned = pluginJar("Unscanned", "1.0");
+    node.sim.put(id, "plugins/Unscanned.jar", unscanned);
+    const v2 = pluginJar("Unscanned", "2.0");
+    const u = ExtensionUploadResponse.parse((await owner.post(`/servers/${id}/extensions/uploads`, { filename: "Unscanned.jar", sizeBytes: v2.length })).json());
+    const put = await t.app.inject({ method: "PUT", url: u.url, headers: { cookie: owner.cookieHeader(), "content-type": "application/octet-stream" }, payload: v2 });
+    expect(put.statusCode, put.body).toBe(200);
+    const done = await owner.post(`/servers/${id}/extensions/uploads/${u.uploadId}/complete`, { replaceExisting: true });
+    expect(done.statusCode, done.body).toBe(200);
+    expect(CompleteExtensionUploadResponse.parse(done.json()).warnings.map((w) => w.code)).toEqual(["REPLACED_EXISTING"]);
+    const entry = (await history(owner, id)).items[0]!;
+    expect(entry).toMatchObject({ action: "upload", rollback: { available: true } });
+    const { rows } = await testPool().query("SELECT kept_sha512 FROM extension_history WHERE id = $1", [entry.id]);
+    expect(rows[0].kept_sha512).toBe(sha512(unscanned));
+    const rb = await owner.post(`/servers/${id}/extensions/history/${entry.id}/rollback`);
+    expect((await waitJob(owner, rb.json().jobId)).status).toBe("succeeded");
+    expect(node.sim.files(id).get("plugins/Unscanned.jar")!.data.equals(unscanned)).toBe(true);
+  });
+
+  it("#7: history names the acting user by username; the migration replaces stored e-mail addresses", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
+    const custom = (await scanned(owner, id)).items[0]!;
+    expect((await owner.patch(`/servers/${id}/extensions/${custom.id}`, { enabled: false })).statusCode).toBe(200);
+    const h = await history(owner, id);
+    expect(h.items[0]!.actor).toMatchObject({ type: "user", name: "owner" });
+    expect(JSON.stringify(h)).not.toContain("owner@example.com");
+
+    // Rows written before the fix: the 0006 migration maps them to usernames (or clears unknown e-mails).
+    const ownerId = (await owner.get("/auth/me")).json().user.id as string;
+    await testPool().query("UPDATE extension_history SET actor_name = 'owner@example.com' WHERE server_id = $1", [id]);
+    await testPool().query(
+      `INSERT INTO extension_history (id, server_id, action, status, extension_name, path, actor_type, actor_id, actor_name, at)
+       VALUES (gen_random_uuid(), $1, 'remove', 'succeeded', 'Gone', 'plugins/gone.jar', 'user', gen_random_uuid(), 'deleted.user@example.com', now() - interval '1 day')`,
+      [id],
+    );
+    const sql = readFileSync(fileURLToPath(new URL("../../drizzle/0006_extensions_review.sql", import.meta.url)), "utf8");
+    for (const stmt of sql.split("--> statement-breakpoint").filter((s) => /UPDATE "extension_history"/.test(s))) await testPool().query(stmt);
+    const { rows } = await testPool().query("SELECT actor_id, actor_name FROM extension_history WHERE server_id = $1 ORDER BY at", [id]);
+    expect(rows.map((r) => r.actor_name)).toEqual([null, "owner"]);
+    expect(rows[1].actor_id).toBe(ownerId);
+  });
+});
+
+describe("Phase 4b review: low findings", () => {
+  it("L2: a hash answer that does not match the requested paths fails the scan cleanly", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/a.jar", pluginJar("A", "1"));
+    node.sim.put(id, "plugins/b.jar", pluginJar("B", "1"));
+    node.sim.options = { mapResult: { "fs.hash": (data) => ({ files: (data as { files: unknown[] }).files.slice(1) }) } };
+    const r = await owner.post(`/servers/${id}/extensions/scan`, {});
+    const job = await waitJob(owner, r.json().jobId);
+    node.sim.options = {};
+    expect(job.status).toBe("failed");
+    expect(job.error).toMatchObject({ code: "AGENT_PROTOCOL" });
+    expect((await list(owner, id)).scan).toMatchObject({ status: "failed", error: expect.stringContaining("result(s) for 2 path(s)") });
+    // Unit level: shorter, longer and reordered answers are refused.
+    const ok = (p: string) => ({ path: p, ok: true });
+    await expect(batched(["x", "y"], 10, async (b) => b.slice(1).map(ok))).rejects.toMatchObject({ code: "AGENT_PROTOCOL" });
+    await expect(batched(["x", "y"], 10, async (b) => [...b, "z"].map(ok))).rejects.toMatchObject({ code: "AGENT_PROTOCOL" });
+    await expect(batched(["x", "y"], 10, async (b) => [...b].reverse().map(ok))).rejects.toMatchObject({ code: "AGENT_PROTOCOL" });
+    expect([...(await batched(["x", "y"], 10, async (b) => b.map(ok))).keys()]).toEqual(["x", "y"]);
+  });
+
+  it("L3: a synchronous remove holds the lock while it acts (no job, backup or second change starts meanwhile)", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/a.jar", pluginJar("A", "1"));
+    node.sim.put(id, "plugins/b.jar", pluginJar("B", "1"));
+    const l = await scanned(owner, id);
+    const [a, b] = [l.items.find((x) => x.filename === "a.jar")!, l.items.find((x) => x.filename === "b.jar")!];
+    node.sim.options = { delay: { "fs.rename": 1000 } };
+    const removing = owner.delete(`/servers/${id}/extensions/${a.id}`);
+    await poll(async () => (await owner.get(`/servers/${id}`)).json().activeOperation === "extensions", 5000, 20);
+    const scan = await owner.post(`/servers/${id}/extensions/scan`, {});
+    expect(scan.statusCode).toBe(409);
+    expect(scan.json().error.details).toEqual({ reason: "extension_job_running" });
+    const toggle = await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: false });
+    expect(toggle.statusCode).toBe(409);
+    expect(toggle.json().error.details).toEqual({ reason: "extension_job_running" });
+    const backup = await owner.post(`/servers/${id}/backups`, {});
+    expect(backup.statusCode).toBe(409);
+    expect((await removing).statusCode).toBe(200);
+    node.sim.options = {};
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+    expect((await owner.patch(`/servers/${id}/extensions/${b.id}`, { enabled: false })).statusCode).toBe(200);
+  });
+
+  it("L4: pruning never deletes a recorded kept path outside the keep area; L3: stale synchronous locks are released", async () => {
+    const { t, owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/important.jar", "do not delete");
+    node.sim.put(id, "plugins/other.jar", "x");
+    for (const kept of ["plugins/important.jar", ".blockforge/extensions/kept/../../../plugins/other.jar"]) {
+      await testPool().query(
+        `INSERT INTO extension_history (id, server_id, action, status, extension_name, path, actor_type, at, kept_path, kept_sha512, kept_until)
+         VALUES (gen_random_uuid(), $1, 'remove', 'succeeded', 'X', 'plugins/x.jar', 'system', now(), $2, 'abc', now() - interval '1 minute')`,
+        [id, kept],
+      );
+    }
+    await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, updated_at = now() - interval '1 hour' WHERE id = $1", [id]);
+    await t.tasks.maintenance!.runNow();
+    expect(node.sim.read(id, "plugins/important.jar")).toBe("do not delete");
+    expect(node.sim.read(id, "plugins/other.jar")).toBe("x");
+    const { rows } = await testPool().query("SELECT kept_path FROM extension_history WHERE server_id = $1", [id]);
+    expect(rows.every((r) => r.kept_path === null)).toBe(true);
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+  });
+
+  it("L6/L7: an outdated agent is reported in the list's scan status, and artifact.fetch is part of the capability check", async () => {
+    const { t, owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    const fetchedBefore = node.sim.fetched.length;
+    // L6: the automatic first scan cannot start; the list says why (as an explicit scan would).
+    t.ctx.gateway.session(node.nodeId)!.capabilities = ["docker"];
+    const l = await list(owner, id);
+    expect(l.scan).toMatchObject({ status: "never", jobId: null, error: expect.stringContaining("too old") });
+    const explicit = await owner.post(`/servers/${id}/extensions/scan`, {});
+    expect(l.scan.error).toBe(explicit.json().error.message);
+    // L7: an agent with the scan commands but without artifact.fetch cannot install.
+    t.ctx.gateway.session(node.nodeId)!.capabilities = ["docker", "fs.hash", "jar.readEntries"];
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+    const plan = ModrinthInstallPlan.parse((await owner.post(`/servers/${id}/extensions/modrinth/plan`, { project: "gammapl" })).json());
+    const r = await owner.post(`/servers/${id}/extensions/modrinth/install`, { project: "gammapl", expect: expectFiles(plan) });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatchObject({ code: "INVALID_STATE", details: { reason: "agent_outdated", missingCapabilities: ["artifact.fetch"] } });
+    expect(node.sim.fetched.length).toBe(fetchedBefore);
+  });
+});

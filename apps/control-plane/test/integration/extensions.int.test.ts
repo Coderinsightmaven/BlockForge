@@ -531,7 +531,7 @@ describe("extension uploads", () => {
     t.ctx.gateway.session(node.nodeId)!.capabilities = ["docker"];
     const r = await owner.post(`/servers/${id}/extensions/scan`, {});
     expect(r.statusCode).toBe(409);
-    expect(r.json().error).toMatchObject({ code: "INVALID_STATE", details: { reason: "agent_outdated", missingCapabilities: ["fs.hash", "jar.readEntries"] } });
+    expect(r.json().error).toMatchObject({ code: "INVALID_STATE", details: { reason: "agent_outdated", missingCapabilities: ["fs.hash", "jar.readEntries", "artifact.fetch"] } });
     expect((await list(owner, id)).scan.status).toBe("never");
   });
 });

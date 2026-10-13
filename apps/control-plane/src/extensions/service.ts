@@ -55,8 +55,10 @@ import {
   HISTORY_RETENTION_MS,
   historyActor,
   historyDto,
+  keptAreaPath,
   KEPT_PER_SERVER,
   KEPT_RETENTION_MS,
+  lockExtensions,
   refetchable,
   requireTarget,
   restartRequired,
@@ -71,7 +73,7 @@ import {
   type ExtensionRow,
   type ExtensionTarget,
 } from "./model.js";
-import { deleteFile, exists, keepFile, sha512Of, writeHistory, type FileCtx } from "./ops.js";
+import { deleteFile, exists, keepFile, KeptFileChangedError, restoreKept, sha512Of, writeHistory, type FileCtx, type Kept } from "./ops.js";
 import { publishExtensions } from "./scan.js";
 
 type UploadWarning = { code: "REPLACED_EXISTING" | "INCOMPATIBLE_ALLOWED" | "DUPLICATE_ID" | "NO_METADATA"; level: "info" | "warning"; message: string };
@@ -105,16 +107,43 @@ export class ExtensionsService {
     await this.d.audit.record({ ...actor, action: `server.extension.${action}`, targetType: "server", targetId: access.server.id, outcome: "success", details });
   }
 
-  /** Enqueues an extension job under the per-server extension lock. */
+  /**
+   * Enqueues an extension job under the per-server extension lock. Jobs that change the server's files
+   * (everything but scans) also take the server's `extensions` operation lock, so backup, restore,
+   * reinstall and delete are refused while they run and vice versa (released by the job's finalize).
+   */
   private async enqueue(access: ServerAccess, type: string, input: Record<string, unknown>, actor: AuditActor | null): Promise<string> {
     assertExtensionsAllowed(access.server);
     assertAgentSupportsExtensions(this.d.gateway, access.server.nodeId);
     const serverId = access.server.id;
     return withTransaction(this.d.db, async (tx, after) => {
       const jobId = await this.d.jobs.enqueue(type, { serverId, ...input }, { targetType: "server", targetId: serverId, requestedBy: actor ? actorUserId(actor) : null }, tx, after);
+      if (type !== EXTENSION_JOBS.scan) {
+        await lockExtensions(this.d, tx, serverId, jobId);
+        after.add(() => this.d.state.notify(serverId));
+      }
       await acquireExtensionLock(tx, serverId, jobId);
       return jobId;
     });
+  }
+
+  /**
+   * A synchronous file change (enable/disable, remove, upload completion) holds the server's `extensions`
+   * operation lock for its whole duration, taken atomically with the extension-job check (L3).
+   */
+  private async syncChange<T>(access: ServerAccess, fn: () => Promise<T>): Promise<T> {
+    assertExtensionsAllowed(access.server);
+    const serverId = access.server.id;
+    await withTransaction(this.d.db, async (tx) => {
+      await lockExtensions(this.d, tx, serverId, null);
+      await ensureScanRow(tx, serverId);
+      await assertNoExtensionJob(tx, serverId, { lock: true });
+    });
+    try {
+      return await fn();
+    } finally {
+      await this.d.state.unlock(serverId, "extensions");
+    }
   }
 
   // --- Installed --------------------------------------------------------------------------------
@@ -134,6 +163,8 @@ export class ExtensionsService {
         scan = { ...scan, status: "running", jobId };
       } catch (err) {
         if (!(err instanceof AppError)) throw err;
+        // An outdated agent is reported like an explicit scan reports it (L6); a busy server is not an error.
+        if ((err.details as { reason?: unknown } | undefined)?.reason === "agent_outdated") scan = { ...scan, error: err.message.slice(0, 1024) };
       }
     }
     const items = await toDtos(this.d.db, (await this.rows(access.server.id)).slice(0, 4096));
@@ -157,55 +188,61 @@ export class ExtensionsService {
     const r = await this.row(access.server.id, id);
     const to = toggledExtensionPath(r.path, enabled);
     if (to === null) return { extension: (await toDtos(this.d.db, [r]))[0]!, restartRequired: false };
-    assertExtensionsAllowed(access.server);
-    await assertNoExtensionJob(this.d.db, access.server.id);
-    const c = this.ctx(access, actor);
-    if (await exists(this.d, c, to).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)))) throw conflict(`${to} already exists`, { reason: "exists" });
-    try {
-      await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: r.path, to }, agentOpts(c));
-    } catch (err) {
-      if (err instanceof AgentCommandError && err.code === "NOT_FOUND") throw notFound("Extension file");
-      throw commandErrorToHttp(err);
-    }
-    const filename = to.slice(to.indexOf("/") + 1);
-    const [updated] = await this.d.db.update(installedExtensions).set({ path: to, filename, enabled }).where(eq(installedExtensions.id, r.id)).returning();
-    const from = snapshotOf(r);
-    await writeHistory(
-      this.d,
-      access.server.id,
-      [{ id: randomUUID(), action: enabled ? "enable" : "disable", extensionId: r.id, extensionName: displayName(r), path: to, from, to: { ...from, path: to }, keptPath: null, keptSha512: null }],
-      { actor: historyActor(actor), jobId: null, status: "succeeded" },
-    );
+    const updated = await this.syncChange(access, async () => {
+      const cur = await this.row(access.server.id, id);
+      if (cur.path !== r.path) throw conflict("The extension changed meanwhile; reload it", { reason: "exists" });
+      const c = this.ctx(access, actor);
+      if (await exists(this.d, c, to).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)))) throw conflict(`${to} already exists`, { reason: "exists" });
+      try {
+        await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: r.path, to }, agentOpts(c));
+      } catch (err) {
+        if (err instanceof AgentCommandError && err.code === "NOT_FOUND") throw notFound("Extension file");
+        throw commandErrorToHttp(err);
+      }
+      const filename = to.slice(to.indexOf("/") + 1);
+      const [u] = await this.d.db.update(installedExtensions).set({ path: to, filename, enabled }).where(eq(installedExtensions.id, r.id)).returning();
+      const from = snapshotOf(r);
+      await writeHistory(
+        this.d,
+        access.server.id,
+        [{ id: randomUUID(), action: enabled ? "enable" : "disable", extensionId: r.id, extensionName: displayName(r), path: to, from, to: { ...from, path: to }, keptPath: null, keptSha512: null }],
+        { actor: await historyActor(this.d.db, actor), jobId: null, status: "succeeded" },
+      );
+      return u!;
+    });
     await this.audit(actor, access, enabled ? "enable" : "disable", { extensionId: r.id, from: r.path, to });
     void publishExtensions(this.d, access.server.id, [r.id]);
-    return { extension: (await toDtos(this.d.db, [updated!]))[0]!, restartRequired: restartRequired(access.server.state) };
+    return { extension: (await toDtos(this.d.db, [updated]))[0]!, restartRequired: restartRequired(access.server.state) };
   }
 
   async remove(access: ServerAccess, id: string, actor: AuditActor): Promise<{ restartRequired: boolean; historyEntryId: string; rollbackAvailable: boolean }> {
     requireTarget(access.server);
-    const r = await this.row(access.server.id, id);
-    assertExtensionsAllowed(access.server);
-    await assertNoExtensionJob(this.d.db, access.server.id);
-    const c = this.ctx(access, actor);
+    await this.row(access.server.id, id);
     const historyId = randomUUID();
-    let kept: string | null = null;
-    try {
-      kept = await keepFile(this.d, c, r.path, historyId);
-    } catch (err) {
-      // Already gone from disk: only the row is removed.
-      if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) throw commandErrorToHttp(err);
-    }
-    await this.d.db.delete(installedExtensions).where(eq(installedExtensions.id, r.id));
+    const { r, kept } = await this.syncChange(access, async () => {
+      const r = await this.row(access.server.id, id);
+      const c = this.ctx(access, actor);
+      let kept: Kept | null = null;
+      try {
+        // The digest of what was actually kept (#6), not the scan-time hash.
+        kept = await keepFile(this.d, c, r.path, historyId);
+      } catch (err) {
+        // Already gone from disk: only the row is removed.
+        if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) throw commandErrorToHttp(err);
+      }
+      await this.d.db.delete(installedExtensions).where(eq(installedExtensions.id, r.id));
+      await writeHistory(
+        this.d,
+        access.server.id,
+        [{ id: historyId, action: "remove", extensionId: null, extensionName: displayName(r), path: r.path, from: snapshotOf(r), to: null, keptPath: kept?.path ?? null, keptSha512: kept?.sha512 ?? null }],
+        { actor: await historyActor(this.d.db, actor), jobId: null, status: "succeeded" },
+      );
+      return { r, kept };
+    });
     const from = snapshotOf(r);
-    await writeHistory(
-      this.d,
-      access.server.id,
-      [{ id: historyId, action: "remove", extensionId: null, extensionName: displayName(r), path: r.path, from, to: null, keptPath: kept, keptSha512: kept ? r.sha512 : null }],
-      { actor: historyActor(actor), jobId: null, status: "succeeded" },
-    );
     await this.audit(actor, access, "remove", { extensionId: r.id, path: r.path, kept: kept !== null });
     void publishExtensions(this.d, access.server.id, [r.id]);
-    return { restartRequired: restartRequired(access.server.state), historyEntryId: historyId, rollbackAvailable: refetchable(from) || (kept !== null && !!r.sha512) };
+    return { restartRequired: restartRequired(access.server.state), historyEntryId: historyId, rollbackAvailable: refetchable(from) || (kept !== null && !!kept.sha512) };
   }
 
   // --- Modrinth ---------------------------------------------------------------------------------
@@ -267,7 +304,7 @@ export class ExtensionsService {
     if (!plan.installable || fresh.size !== expected.size || [...fresh].some((k) => !expected.has(k))) {
       throw conflict(plan.installable ? "The install plan changed; review it again" : "The install plan is no longer installable", { reason: "plan_changed", plan });
     }
-    const jobId = await this.enqueue(access, EXTENSION_JOBS.install, { plan, actor: historyActor(actor), userId: actorUserId(actor) }, actor);
+    const jobId = await this.enqueue(access, EXTENSION_JOBS.install, { plan, actor: await historyActor(this.d.db, actor), userId: actorUserId(actor) }, actor);
     await this.audit(actor, access, "install", {
       project: plan.root.projectId,
       versionId: plan.root.versionId,
@@ -304,7 +341,7 @@ export class ExtensionsService {
     const rows = await this.rows(access.server.id);
     const missing = req.extensionIds.filter((id) => !rows.some((r) => r.id === id));
     if (missing.length) throw notFound("Extension");
-    const jobId = await this.enqueue(access, EXTENSION_JOBS.update, { extensionIds: req.extensionIds, allowPrerelease: req.allowPrerelease, actor: historyActor(actor), userId: actorUserId(actor) }, actor);
+    const jobId = await this.enqueue(access, EXTENSION_JOBS.update, { extensionIds: req.extensionIds, allowPrerelease: req.allowPrerelease, actor: await historyActor(this.d.db, actor), userId: actorUserId(actor) }, actor);
     await this.audit(actor, access, "update", { extensionIds: req.extensionIds, allowPrerelease: req.allowPrerelease, jobId });
     return { jobId };
   }
@@ -422,6 +459,23 @@ export class ExtensionsService {
     if (!info.compatibility.loadable && !req.allowIncompatible) throw rejected(422, "incompatible", "The jar cannot be loaded by this server's software", { compatibility: info.compatibility });
 
     const dest = `${t.installDir}/${u.filename}`;
+    return this.syncChange(access, () => this.installUpload(access, u, t, dest, hashed, info, req, actor, c));
+  }
+
+  /** The file-changing half of `completeUpload` (under the server's `extensions` operation lock). */
+  private async installUpload(
+    access: ServerAccess,
+    u: typeof extensionUploads.$inferSelect,
+    t: ExtensionTarget,
+    dest: string,
+    hashed: { sizeBytes: number; mtime: number; sha1?: string | undefined; sha512?: string | undefined },
+    info: ReturnType<typeof toContractJarInfo>,
+    req: { replaceExisting: boolean; allowIncompatible: boolean },
+    actor: AuditActor,
+    c: FileCtx,
+  ): Promise<{ extension: InstalledExtension; compatibility: NonNullable<InstalledExtension["compatibility"]>; warnings: UploadWarning[]; restartRequired: boolean }> {
+    const [again] = await this.d.db.select({ completedAt: extensionUploads.completedAt }).from(extensionUploads).where(eq(extensionUploads.id, u.id));
+    if (!again || again.completedAt) throw conflict("The upload was completed meanwhile; repeat the request", { reason: "exists", existing: null });
     const rows = await this.rows(access.server.id);
     const existingRow = rows.find((r) => r.path === dest) ?? null;
     const onDisk = existingRow !== null || (await exists(this.d, c, dest).catch((err: unknown) => Promise.reject(commandErrorToHttp(err))));
@@ -429,9 +483,10 @@ export class ExtensionsService {
 
     const warnings: UploadWarning[] = [];
     const historyId = randomUUID();
-    let kept: string | null = null;
+    let kept: Kept | null = null;
     if (onDisk) {
       try {
+        // The digest of what was actually kept (#6), not the scan-time hash (null for unscanned paths).
         kept = await keepFile(this.d, c, dest, historyId);
       } catch (err) {
         if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) throw commandErrorToHttp(err);
@@ -441,7 +496,27 @@ export class ExtensionsService {
     try {
       await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: u.serverId, from: u.stagingPath, to: dest }, agentOpts(c));
     } catch (err) {
-      if (kept) await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: u.serverId, from: kept, to: dest }, agentOpts(c)).catch(() => undefined);
+      if (kept) {
+        // Undo: the kept jar goes back only while it is exactly what was kept (#1).
+        const k = kept;
+        try {
+          await restoreKept(this.d, c, k.path, k.sha512, dest);
+        } catch (e) {
+          const changed = e instanceof KeptFileChangedError;
+          await this.d.audit.record({
+            ...actor,
+            action: "server.extension.upload.complete",
+            targetType: "server",
+            targetId: access.server.id,
+            outcome: "failed",
+            details: { uploadId: u.id, path: dest, undo: changed ? "kept_file_changed" : "failed", keptPath: k.path },
+          });
+          throw new AppError(409, "CONFLICT", `Installing the upload failed and ${changed ? `the kept file ${k.path} changed, so it was not restored` : `restoring ${k.path} failed`}; it is left in the keep area`, {
+            reason: changed ? "kept_file_changed" : "undo_failed",
+            keptPath: k.path,
+          });
+        }
+      }
       throw commandErrorToHttp(err);
     }
     if (!info.compatibility.loadable) warnings.push({ code: "INCOMPATIBLE_ALLOWED", level: "warning", message: "Installed although the server software cannot load it" });
@@ -486,11 +561,11 @@ export class ExtensionsService {
           path: dest,
           from: existingRow ? snapshotOf(existingRow) : onDisk ? { source: "unknown", path: dest, projectId: null, versionId: null, versionNumber: null, sha512: null, sizeBytes: null } : null,
           to: snapshotOf(row),
-          keptPath: kept,
-          keptSha512: kept ? (existingRow?.sha512 ?? null) : null,
+          keptPath: kept?.path ?? null,
+          keptSha512: kept?.sha512 ?? null,
         },
       ],
-      { actor: historyActor(actor), jobId: null, status: "succeeded" },
+      { actor: await historyActor(this.d.db, actor), jobId: null, status: "succeeded" },
     );
     await this.d.db.update(extensionUploads).set({ completedAt: now, result: { extensionId: row.id, warnings, compatibility: info.compatibility } }).where(eq(extensionUploads.id, u.id));
     await this.audit(actor, access, "upload.complete", { uploadId: u.id, path: dest, extensionId: row.id, sha512: row.sha512, replaced: onDisk, allowIncompatible: req.allowIncompatible, loadable: info.compatibility.loadable });
@@ -544,7 +619,7 @@ export class ExtensionsService {
       const sha = await sha512Of(this.d, this.ctx(access, actor), e.keptPath!).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)));
       if (sha !== e.keptSha512) throw unavailable("file_unavailable");
     }
-    const jobId = await this.enqueue(access, EXTENSION_JOBS.rollback, { entryId, actor: historyActor(actor), userId: actorUserId(actor) }, actor);
+    const jobId = await this.enqueue(access, EXTENSION_JOBS.rollback, { entryId, actor: await historyActor(this.d.db, actor), userId: actorUserId(actor) }, actor);
     await this.audit(actor, access, "rollback", { entryId, action: e.action, path: e.path, jobId });
     return { jobId };
   }
@@ -554,6 +629,8 @@ export class ExtensionsService {
   /** Kept jars beyond 30 days / 20 per server are deleted (node must be connected); history rows after 1 year. */
   async prune(): Promise<void> {
     const now = this.d.clock.now();
+    // A synchronous change's lock left behind by a crashed request (they take seconds, never 30 minutes).
+    await this.d.state.releaseStaleLocks("extensions", 30 * 60_000);
     const stale = await this.d.db.execute<{ id: string; server_id: string; kept_path: string; node_id: string }>(sql`
       SELECT x.id, x.server_id, x.kept_path, s.node_id FROM (
         SELECT id, server_id, kept_path, kept_until, row_number() OVER (PARTITION BY server_id ORDER BY at DESC) AS rn
@@ -561,9 +638,16 @@ export class ExtensionsService {
         JOIN servers s ON s.id = x.server_id
        WHERE x.rn > ${KEPT_PER_SERVER} OR x.kept_until < ${new Date(now)}`);
     for (const k of stale.rows) {
+      // Only files inside the keep area are ever deleted (L4); anything else is forgotten, not touched.
+      const inKeep = keptAreaPath(k.kept_path);
+      if (!inKeep) {
+        this.d.logger.warn({ serverId: k.server_id, historyId: k.id }, "a kept path outside the keep area was not deleted");
+        await this.d.db.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, k.id));
+        continue;
+      }
       if (!this.d.gateway.isReady(k.node_id)) continue;
       try {
-        await deleteFile(this.d, { serverId: k.server_id, nodeId: k.node_id, timeoutMs: 30_000 }, k.kept_path);
+        await deleteFile(this.d, { serverId: k.server_id, nodeId: k.node_id, timeoutMs: 30_000 }, inKeep);
         await this.d.db.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, k.id));
       } catch (err) {
         this.d.logger.warn({ err: (err as Error).message, serverId: k.server_id }, "pruning a kept extension jar failed");

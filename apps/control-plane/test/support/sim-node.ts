@@ -37,6 +37,10 @@ export interface SimOptions {
   fail?: Partial<Record<AgentCommandType, { code: string; message: string; retryable?: boolean }>>;
   /** Delay before answering a command type (ms). */
   delay?: Partial<Record<AgentCommandType, number>>;
+  /** Runs before a command type is answered (after `delay`): lets a test change files "meanwhile". */
+  before?: Partial<Record<AgentCommandType, (payload: Record<string, unknown>) => void | Promise<void>>>;
+  /** Rewrites a successful answer (protocol-violation tests). */
+  mapResult?: Partial<Record<AgentCommandType, (data: unknown) => unknown>>;
   /** Answer `save-all flush` with "Saved the game" (default true). */
   saveConfirm?: boolean;
   /** Answer `save-all flush` with the disk-full failure instead. */
@@ -153,12 +157,15 @@ export class SimNode {
       agent.onCommandType(type, async (body) => {
         const delay = this.options.delay?.[type];
         if (delay) await sleep(delay);
+        const payload = body.payload as Record<string, unknown>;
+        await this.options.before?.[type]?.(payload);
         const f = this.options.fail?.[type];
         if (f) return { ok: false, error: { retryable: false, ...f } };
-        const payload = body.payload as Record<string, unknown>;
         if (type.startsWith("fs.")) this.denylists.push({ type, denylist: payload.denylist as string[] | undefined });
         try {
-          return { ok: true, data: await fn(payload, body) };
+          const data = await fn(payload, body);
+          const map = this.options.mapResult?.[type];
+          return { ok: true, data: map ? map(data) : data };
         } catch (err) {
           if (err instanceof SimError) return { ok: false, error: { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) } };
           throw err;

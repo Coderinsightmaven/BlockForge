@@ -38,13 +38,18 @@ const unreadable = (message: string): JarInfo => ({
 /**
  * Runs `fn` over `paths` in batches; entries answered `BUDGET_EXCEEDED` are retried in the next
  * command (the agent always processes the first path of a command, so this always progresses).
+ * The agent answers one result per path in request order (`path` echoed verbatim); any other answer
+ * fails the scan instead of attributing digests to the wrong files (L2).
  */
-async function batched<R extends { path: string; ok: boolean; error?: string }>(paths: readonly string[], size: number, fn: (batch: string[]) => Promise<R[]>): Promise<Map<string, R>> {
+export async function batched<R extends { path: string; ok: boolean; error?: string }>(paths: readonly string[], size: number, fn: (batch: string[]) => Promise<R[]>): Promise<Map<string, R>> {
   const out = new Map<string, R>();
   let pending = [...paths];
   while (pending.length) {
     const batch = pending.slice(0, size);
     const results = await fn(batch);
+    if (results.length !== batch.length || results.some((r, i) => r.path !== batch[i])) {
+      throw new JobError("AGENT_PROTOCOL", `the agent answered ${results.length} result(s) for ${batch.length} path(s) or out of order; the scan was stopped`);
+    }
     const retry: string[] = [];
     results.forEach((r, i) => {
       const path = batch[i]!;

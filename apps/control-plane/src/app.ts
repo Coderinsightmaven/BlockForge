@@ -339,7 +339,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   const upstreams = new Upstreams({ logger: logger.child({ module: "upstream" }), version: APP_VERSION, contact: config.modrinthContact, ...(opts.upstream ?? {}) });
   const serverEvents = new ServerEventPublisher(hub, serverAccess, logger.child({ module: "server-events" }));
   const extensionDeps: ExtensionDeps = {
-    db, clock, logger: logger.child({ module: "extensions" }), gateway, audit, upstreams, settings, events: serverEvents, jobs, access: serverAccess, browser: browserTransfers, transfers,
+    db, clock, logger: logger.child({ module: "extensions" }), gateway, audit, upstreams, settings, events: serverEvents, jobs, access: serverAccess, browser: browserTransfers, transfers, state: serverState,
   };
   for (const def of extensionJobDefinitions(extensionDeps)) jobs.define(def as JobDefinition<unknown>);
   const extensions = new ExtensionsService(extensionDeps);

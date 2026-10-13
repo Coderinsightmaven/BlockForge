@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionFileSnapshot, ExtensionHistoryAction, ModrinthPlannedFile, ModrinthRef } from "@blockforge/contracts";
 import { assertAllowedUrl, MODRINTH_HOSTS } from "@blockforge/minecraft";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { AgentCommandError } from "../agents/gateway.js";
+import type { DbOrTx } from "../db/client.js";
 import { extensionHistory, installedExtensions } from "../db/schema/index.js";
-import type { JobLogLevel } from "../jobs/types.js";
+import { JobError, type JobLogLevel } from "../jobs/types.js";
 import {
   agentOpts,
   displayName,
@@ -12,6 +13,7 @@ import {
   jobAgentError,
   KEPT_DIR,
   KEPT_RETENTION_MS,
+  keptPathOf,
   snapshotOf,
   type ExtensionDeps,
   type ExtensionRow,
@@ -25,6 +27,17 @@ export interface FileCtx extends SendOpts {
   serverId: string;
   nodeId: string;
   log?: (level: JobLogLevel, message: string) => Promise<void>;
+}
+
+/**
+ * Deterministic UUID (v4 layout) for `(jobId, key)`: a resumed job step derives the same history ids and
+ * keep-area names as the interrupted attempt. Without a job: random.
+ */
+export function stableId(jobId: string | null | undefined, key: string): string {
+  if (!jobId) return randomUUID();
+  const h = createHash("sha256").update(`${jobId}\0${key}`).digest("hex");
+  const variant = ((parseInt(h[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${variant}${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
 /** `fs.delete` that tolerates a missing file. */
@@ -47,19 +60,63 @@ export async function exists(d: ExtensionDeps, c: FileCtx, path: string): Promis
   }
 }
 
-/** Moves a jar into the keep area (`.blockforge/extensions/kept/<name>.jar`) and returns the kept path. */
-export async function keepFile(d: ExtensionDeps, c: FileCtx, path: string, name: string): Promise<string> {
-  await ensureDir(d.gateway, c.nodeId, c.serverId, KEPT_DIR, c);
-  const kept = `${KEPT_DIR}/${name}.jar`;
-  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: kept }, agentOpts(c));
-  return kept;
-}
-
 /** SHA-512 of one file (null when it does not exist or cannot be hashed). */
 export async function sha512Of(d: ExtensionDeps, c: FileCtx, path: string): Promise<string | null> {
   const r = await d.gateway.send(c.nodeId, "fs.hash", { workloadId: c.serverId, paths: [path], algorithms: ["sha512"], maxBytesPerFile: 2 * 1024 ** 3, maxTotalBytes: 16 * 1024 ** 3 }, agentOpts(c));
-  const f = r.files[0];
+  const f = r.files.length === 1 && r.files[0]?.path === path ? r.files[0] : undefined;
   return f?.ok ? (f.sha512 ?? null) : null;
+}
+
+/** A jar in the keep area and the SHA-512 of exactly what was kept (null: it could not be hashed). */
+export interface Kept {
+  path: string;
+  sha512: string | null;
+}
+
+/**
+ * Moves a jar into the keep area (`.blockforge/extensions/kept/<name>.jar`) and hashes the kept file
+ * right away: that digest — never a scan-time one — is what a later restore must find again.
+ */
+export async function keepFile(d: ExtensionDeps, c: FileCtx, path: string, name: string): Promise<Kept> {
+  await ensureDir(d.gateway, c.nodeId, c.serverId, KEPT_DIR, c);
+  const kept = keptPathOf(name);
+  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: kept }, agentOpts(c));
+  let sha512: string | null = null;
+  try {
+    sha512 = await sha512Of(d, c, kept);
+  } catch (err) {
+    await c.log?.("warn", `Hashing the kept file ${kept} failed: ${(err as Error).message}`);
+  }
+  return { path: kept, sha512 };
+}
+
+/** A kept file that changed (or vanished) since it was kept is never moved back. */
+export class KeptFileChangedError extends JobError {
+  constructor(
+    readonly keptPath: string,
+    readonly target: string,
+  ) {
+    super("KEPT_FILE_CHANGED", `the kept file ${keptPath} is missing or changed since it was kept; it was not restored to ${target} (left in the keep area)`);
+    this.name = "KeptFileChangedError";
+  }
+}
+
+/**
+ * Moves a kept jar back to `to` only while it still has the digest taken right after it was kept; the
+ * agent's `fs.rename` never overwrites an existing `to`.
+ */
+export async function restoreKept(d: ExtensionDeps, c: FileCtx, kept: string, expectedSha512: string | null, to: string): Promise<void> {
+  const actual = await sha512Of(d, c, kept);
+  if (!expectedSha512 || actual !== expectedSha512) throw new KeptFileChangedError(kept, to);
+  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: kept, to }, agentOpts(c));
+}
+
+/** Deletes a file this job wrote, only while it still has the digest it was written with (else it is left alone). */
+export async function deleteCreated(d: ExtensionDeps, c: FileCtx, path: string, sha512: string): Promise<void> {
+  const actual = await sha512Of(d, c, path);
+  if (actual === null) return;
+  if (actual !== sha512) throw new JobError("FILE_CHANGED", `${path} changed after it was written; it was not deleted`);
+  await deleteFile(d, c, path);
 }
 
 /** `artifact.fetch` of a Modrinth file (CDN host re-checked, SHA-512 verified by the agent). */
@@ -99,7 +156,7 @@ export const plannedSnapshot = (f: ModrinthPlannedFile): ExtensionFileSnapshot =
 /** A placeholder snapshot of a file found on disk without a row. */
 const bareSnapshot = (path: string): ExtensionFileSnapshot => ({ source: "unknown", path, projectId: null, versionId: null, versionNumber: null, sha512: null, sizeBytes: null });
 
-type Undo = { kind: "delete"; path: string } | { kind: "restore"; kept: string; path: string };
+type Undo = { kind: "delete"; path: string; sha512: string } | { kind: "restore"; kept: string; sha512: string | null; path: string };
 
 export interface PendingEntry {
   id: string;
@@ -111,81 +168,178 @@ export interface PendingEntry {
   to: ExtensionFileSnapshot | null;
   keptPath: string | null;
   keptSha512: string | null;
+  /** A failed change could not put the kept file back (it changed): the row keeps `keptPath` (pruned later). */
+  leftInKeep?: boolean;
 }
+
+export const pendingOf = (r: HistoryRow): PendingEntry => ({
+  id: r.id,
+  action: r.action as ExtensionHistoryAction,
+  extensionId: r.extensionId,
+  extensionName: r.extensionName,
+  path: r.path,
+  from: r.from ?? null,
+  to: r.to ?? null,
+  keptPath: r.keptPath,
+  keptSha512: r.keptSha512,
+});
 
 export async function writeHistory(
   d: ExtensionDeps,
   serverId: string,
   entries: readonly PendingEntry[],
   o: { actor: HistoryActorFields; jobId: string | null; status: "succeeded" | "failed"; error?: string | null },
+  db: DbOrTx = d.db,
 ): Promise<void> {
   if (!entries.length) return;
   const now = d.clock.now();
-  await d.db.insert(extensionHistory).values(
-    entries.map((e, i) => ({
-      id: e.id,
-      serverId,
-      extensionId: e.extensionId,
-      action: e.action,
-      status: o.status,
-      extensionName: e.extensionName.slice(0, 256),
-      path: e.path,
-      from: e.from,
-      to: e.to,
-      ...o.actor,
-      // Strictly increasing within one write so "newest entry" is well defined.
-      at: new Date(now + i),
-      jobId: o.jobId,
-      error: o.status === "failed" ? (o.error ?? "failed").slice(0, 1024) : null,
-      // A failed change put the kept file back: nothing is kept for it.
-      keptPath: o.status === "succeeded" ? e.keptPath : null,
-      keptSha512: o.status === "succeeded" ? e.keptSha512 : null,
-      keptUntil: o.status === "succeeded" && e.keptPath ? new Date(now + KEPT_RETENTION_MS) : null,
-    })),
+  await db.insert(extensionHistory).values(
+    entries.map((e, i) => {
+      // A failed change put the kept file back: nothing is kept for it (unless it could not be put back).
+      const keptPath = o.status === "succeeded" || e.leftInKeep ? e.keptPath : null;
+      return {
+        id: e.id,
+        serverId,
+        extensionId: e.extensionId,
+        action: e.action,
+        status: o.status,
+        extensionName: e.extensionName.slice(0, 256),
+        path: e.path,
+        from: e.from,
+        to: e.to,
+        ...o.actor,
+        // Strictly increasing within one write so "newest entry" is well defined.
+        at: new Date(now + i),
+        jobId: o.jobId,
+        error: o.status === "failed" ? (o.error ?? "failed").slice(0, 1024) : null,
+        keptPath,
+        keptSha512: o.status === "succeeded" ? e.keptSha512 : null,
+        keptUntil: keptPath ? new Date(now + KEPT_RETENTION_MS) : null,
+      };
+    }),
   );
+}
+
+/**
+ * Progress of an interrupted apply, persisted by the job (`ctx.state`) before and after every file
+ * operation: whether the destination was occupied and the digest of every file kept so far.
+ */
+export interface ApplyJournal {
+  get(id: string): JournalEntry | undefined;
+  set(id: string, e: JournalEntry): Promise<void>;
+}
+export interface JournalEntry {
+  atDest: boolean;
+  /** Source path → SHA-512 of its kept copy (taken right after the move). */
+  kept: Record<string, string | null>;
+}
+
+export interface ApplyResult {
+  entries: PendingEntry[];
+  /** The history of this apply was already written by an interrupted attempt (do not write it again). */
+  recorded: boolean;
 }
 
 /**
  * Applies planned Modrinth files in dependency order: an existing file at the destination is moved
  * to the keep area first, the new file is fetched (SHA-512 verified), then the files it `replaces` are
- * kept. Any failure undoes everything done so far (fetched files removed, kept files restored) and
- * records the history entries as failed.
+ * kept. Any failure undoes everything done so far (fetched files removed while unchanged, kept files
+ * restored while unchanged) and records the history entries as failed.
+ *
+ * Idempotent for a resumed job step (#5): history ids and keep-area names derive from the job id, an
+ * already recorded history is returned as is, and with a journal a file that was already kept or
+ * fetched is neither kept again nor fetched again.
  */
 export async function applyPlannedFiles(
   d: ExtensionDeps,
   c: FileCtx,
   files: readonly ModrinthPlannedFile[],
-  o: { actor: HistoryActorFields; jobId: string | null; action?: (f: ModrinthPlannedFile, replaced: ExtensionRow | null) => ExtensionHistoryAction },
-): Promise<PendingEntry[]> {
+  o: {
+    actor: HistoryActorFields;
+    jobId: string | null;
+    action?: (f: ModrinthPlannedFile, replaced: ExtensionRow | null) => ExtensionHistoryAction;
+    /** Distinguishes several applies of one job (stable ids). */
+    key?: string;
+    journal?: ApplyJournal;
+    /** Re-checks the server's operation lock before every file. */
+    assertLock?: () => Promise<void>;
+  },
+): Promise<ApplyResult> {
+  const key = o.key ?? "apply";
+  const plan = files.map((f) => ({
+    f,
+    id: stableId(o.jobId, `${key}:${f.destPath}`),
+    others: f.replaces.filter((p) => p !== f.destPath).map((p) => ({ path: p, id: stableId(o.jobId, `${key}:${f.destPath}:replaces:${p}`) })),
+  }));
+  if (o.jobId) {
+    const ids = plan.flatMap((p) => [p.id, ...p.others.map((x) => x.id)]);
+    const prior = await d.db
+      .select()
+      .from(extensionHistory)
+      .where(and(eq(extensionHistory.jobId, o.jobId), inArray(extensionHistory.id, ids)))
+      .orderBy(asc(extensionHistory.at));
+    if (prior.length) {
+      const failed = prior.find((r) => r.status === "failed");
+      if (failed) throw new JobError("INSTALL_FAILED", `install: ${failed.error ?? "failed"}`);
+      return { entries: prior.map(pendingOf), recorded: true };
+    }
+  }
   const rows = await d.db.select().from(installedExtensions).where(eq(installedExtensions.serverId, c.serverId));
   const byPath = new Map(rows.map((r) => [r.path, r]));
   const undo: Undo[] = [];
   const entries: PendingEntry[] = [];
   try {
-    for (const f of files) {
-      const id = randomUUID();
-      const replacedPaths = [...new Set([...(byPath.has(f.destPath) || (await exists(d, c, f.destPath)) ? [f.destPath] : []), ...f.replaces])];
-      const primary = replacedPaths[0] ?? null;
-      const primaryRow = primary ? (byPath.get(primary) ?? null) : null;
-      let keptPrimary: string | null = null;
-      if (primary === f.destPath) {
-        keptPrimary = await keepFile(d, c, f.destPath, id);
-        undo.push({ kind: "restore", kept: keptPrimary, path: f.destPath });
+    for (const { f, id, others } of plan) {
+      await o.assertLock?.();
+      let j = o.journal?.get(id);
+      const resumed = j !== undefined;
+      if (!j) {
+        j = { atDest: byPath.has(f.destPath) || (await exists(d, c, f.destPath)), kept: {} };
+        await o.journal?.set(id, j);
       }
-      await c.log?.("info", `Downloading ${f.filename} (${f.projectTitle ?? f.projectId} ${f.versionNumber})`);
-      await fetchModrinthFile(d, c, f);
-      undo.push({ kind: "delete", path: f.destPath });
+      const journal = j;
+      /**
+       * Keeps `path` as `name` once: a copy recorded by an interrupted attempt is reused, and a copy it
+       * made just before it could record it is adopted. Null: nothing to keep (`optional` source missing).
+       */
+      const keepOnce = async (path: string, name: string, optional: boolean): Promise<Kept | null> => {
+        const target = keptPathOf(name);
+        if (path in journal.kept) return { path: target, sha512: journal.kept[path] ?? null };
+        let k: Kept;
+        if (await exists(d, c, path)) k = await keepFile(d, c, path, name);
+        else if (resumed && (await exists(d, c, target))) k = { path: target, sha512: await sha512Of(d, c, target) };
+        else if (optional) return null;
+        else k = await keepFile(d, c, path, name); // fails with NOT_FOUND
+        journal.kept[path] = k.sha512;
+        await o.journal?.set(id, journal);
+        return k;
+      };
+
+      const primary = journal.atDest ? f.destPath : (others[0]?.path ?? null);
+      const primaryRow = primary ? (byPath.get(primary) ?? null) : null;
+      let keptPrimary: Kept | null = null;
+      if (journal.atDest) {
+        keptPrimary = await keepOnce(f.destPath, id, false);
+        undo.push({ kind: "restore", kept: keptPrimary!.path, sha512: keptPrimary!.sha512, path: f.destPath });
+      }
+      // Skip the download when an interrupted attempt already put exactly this file in place.
+      const fetched = resumed && (await sha512Of(d, c, f.destPath)) === f.sha512;
+      if (!fetched) {
+        if (resumed && (await exists(d, c, f.destPath))) throw new JobError("CONFLICT", `${f.destPath} is occupied by a file this job did not write`);
+        await c.log?.("info", `Downloading ${f.filename} (${f.projectTitle ?? f.projectId} ${f.versionNumber})`);
+        await fetchModrinthFile(d, c, f);
+      }
+      undo.push({ kind: "delete", path: f.destPath, sha512: f.sha512 });
       const extra: PendingEntry[] = [];
-      for (const [i, path] of replacedPaths.entries()) {
-        if (path === f.destPath) continue;
-        if (!(await exists(d, c, path))) continue;
-        const name = i === 0 ? id : randomUUID();
-        const kept = await keepFile(d, c, path, name);
-        undo.push({ kind: "restore", kept, path });
-        if (i === 0) keptPrimary = kept;
+      for (const [i, x] of others.entries()) {
+        const asPrimary = !journal.atDest && i === 0;
+        const k = await keepOnce(x.path, asPrimary ? id : x.id, true);
+        if (!k) continue;
+        undo.push({ kind: "restore", kept: k.path, sha512: k.sha512, path: x.path });
+        if (asPrimary) keptPrimary = k;
         else {
-          const r = byPath.get(path);
-          extra.push({ id: name, action: "remove", extensionId: r?.id ?? null, extensionName: r ? displayName(r) : path, path, from: r ? snapshotOf(r) : bareSnapshot(path), to: null, keptPath: kept, keptSha512: r?.sha512 ?? null });
+          const r = byPath.get(x.path);
+          extra.push({ id: x.id, action: "remove", extensionId: r?.id ?? null, extensionName: r ? displayName(r) : x.path, path: x.path, from: r ? snapshotOf(r) : bareSnapshot(x.path), to: null, keptPath: k.path, keptSha512: k.sha512 });
         }
       }
       entries.push({
@@ -196,28 +350,34 @@ export async function applyPlannedFiles(
         path: f.destPath,
         from: primary ? (primaryRow ? snapshotOf(primaryRow) : bareSnapshot(primary)) : null,
         to: plannedSnapshot(f),
-        keptPath: keptPrimary,
-        keptSha512: primaryRow?.sha512 ?? null,
+        keptPath: keptPrimary?.path ?? null,
+        keptSha512: keptPrimary?.sha512 ?? null,
       });
       entries.push(...extra);
     }
   } catch (err) {
+    if (err instanceof JobError && err.code === "LOCK_LOST") throw err;
+    const notes: string[] = [];
     for (const u of undo.reverse()) {
       try {
-        if (u.kind === "delete") await deleteFile(d, c, u.path);
-        else {
-          await deleteFile(d, c, u.path);
-          await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: u.kept, to: u.path }, agentOpts(c));
-        }
+        if (u.kind === "delete") await deleteCreated(d, c, u.path, u.sha512);
+        else await restoreKept(d, c, u.kept, u.sha512, u.path);
       } catch (e) {
+        notes.push((e as Error).message);
+        if (u.kind === "restore") for (const en of entries) if (en.keptPath === u.kept) en.leftInKeep = true;
         await c.log?.("error", `Undo failed for ${u.path}: ${(e as Error).message}`);
       }
     }
-    const message = err instanceof Error ? err.message : String(err);
+    const base = err instanceof Error ? err.message : String(err);
+    const message = notes.length ? `${base}; undo: ${notes.join("; ")}` : base;
     await writeHistory(d, c.serverId, entries, { actor: o.actor, jobId: o.jobId, status: "failed", error: message });
+    if (notes.length) {
+      const e = jobAgentError(err, "install");
+      throw new JobError(e instanceof JobError ? e.code : "INSTALL_FAILED", `${e instanceof Error ? e.message : base}; undo: ${notes.join("; ")}`);
+    }
     throw jobAgentError(err, "install");
   }
-  return entries;
+  return { entries, recorded: false };
 }
 
 /**
