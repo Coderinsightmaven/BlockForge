@@ -223,7 +223,18 @@ export type CommandFeedback =
       /** The server message (untrusted console text, prefix removed). */
       message: string;
     }
-  | { action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "player"; ok: false; message: string };
+  | {
+      action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "player";
+      ok: false;
+      /**
+       * The player the failure names (1.12.2 `Could not op %s` …), or null when the message names
+       * nobody (26.3 `Nothing changed. The player is already an operator`, `No player was found`, …).
+       * A target-less failure cannot be attributed to one command: callers must only accept it when
+       * no other command can be answering on that console at the same time.
+       */
+      target: string | null;
+      message: string;
+    };
 
 type Rule = [RegExp, (m: RegExpExecArray, msg: string) => CommandFeedback | null];
 
@@ -236,26 +247,39 @@ const ok = (action: Extract<CommandFeedback, { ok: true }>["action"], target: st
   }
   return isValidPlayerName(target) ? { action, ok: true, target, reason, message: "" } : null;
 };
-const fail = (action: Extract<CommandFeedback, { ok: false }>["action"]) => (_m: RegExpExecArray, msg: string): CommandFeedback => ({ action, ok: false, message: msg });
+/**
+ * Failure feedback. When the message names a player (capture group 1, 1.12.2 wording) it must be a
+ * valid player name (otherwise the line is not recognised); messages without a name have `target: null`.
+ */
+const fail =
+  (action: Extract<CommandFeedback, { ok: false }>["action"]) =>
+  (m: RegExpExecArray, msg: string): CommandFeedback | null => {
+    const named = m[1];
+    if (named === undefined) return { action, ok: false, target: null, message: msg };
+    return isValidPlayerName(named) ? { action, ok: false, target: named, message: msg } : null;
+  };
 
-/** Success/failure strings of 26.3 (`en_us.json`) and 1.12.2 (`en_us.lang`). */
+/**
+ * Success/failure strings of 26.3 (`en_us.json`) and 1.12.2 (`en_us.lang`). Successes always name
+ * their target; failures name it only in the 1.12.2 wording (capture group 1 of a failure rule).
+ */
 const FEEDBACK: Rule[] = [
   [/^Added (\S+) to the whitelist$/, (m) => ok("whitelist.add", m[1]!)],
   [/^Removed (\S+) from the whitelist$/, (m) => ok("whitelist.remove", m[1]!)],
-  [/^(?:Player is already whitelisted|Could not add \S+ to the whitelist)$/, fail("whitelist.add")],
-  [/^(?:Player is not whitelisted|Could not remove \S+ from the whitelist)$/, fail("whitelist.remove")],
+  [/^(?:Player is already whitelisted|Could not add (\S+) to the whitelist)$/, fail("whitelist.add")],
+  [/^(?:Player is not whitelisted|Could not remove (\S+) from the whitelist)$/, fail("whitelist.remove")],
   [/^(?:Made (\S+) a server operator|Opped (\S+))$/, (m) => ok("op", (m[1] ?? m[2])!)],
   [/^(?:Made (\S+) no longer a server operator|De-opped (\S+))$/, (m) => ok("deop", (m[1] ?? m[2])!)],
-  [/^(?:Nothing changed\. The player is already an operator|Could not op \S+)$/, fail("op")],
-  [/^(?:Nothing changed\. The player is not an operator|Could not de-op \S+)$/, fail("deop")],
+  [/^(?:Nothing changed\. The player is already an operator|Could not op (\S+))$/, fail("op")],
+  [/^(?:Nothing changed\. The player is not an operator|Could not de-op (\S+))$/, fail("deop")],
   [/^Banned IP (\S+): (.*)$/, (m) => ok("ban-ip", m[1]!, m[2]!)],
   [/^Banned IP address (\S+)(?: belonging to .*)?$/, (m) => ok("ban-ip", m[1]!)],
   [/^Banned (\S+): (.*)$/, (m) => ok("ban", m[1]!, m[2]!)],
   [/^Banned player (\S+)$/, (m) => ok("ban", m[1]!)],
-  [/^(?:Nothing changed\. The player is already banned|Could not ban player \S+)$/, fail("ban")],
+  [/^(?:Nothing changed\. The player is already banned|Could not ban player (\S+))$/, fail("ban")],
   [/^Unbanned IP(?: address)? (\S+)$/, (m) => ok("pardon-ip", m[1]!)],
   [/^Unbanned(?: player)? (\S+)$/, (m) => ok("pardon", m[1]!)],
-  [/^(?:Nothing changed\. The player isn't banned|Could not unban player \S+)$/, fail("pardon")],
+  [/^(?:Nothing changed\. The player isn't banned|Could not unban player (\S+))$/, fail("pardon")],
   [/^(?:Nothing changed\. That IP is already banned|Invalid IP address or unknown player|You have entered an invalid IP address or a player that is not online)$/, fail("ban-ip")],
   [/^(?:Nothing changed\. That IP isn't banned|Invalid IP address|You have entered an invalid IP address)$/, fail("pardon-ip")],
   [/^Kicked (\S+): (.*)$/, (m) => ok("kick", m[1]!, m[2]!)],
