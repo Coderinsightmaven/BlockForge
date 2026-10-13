@@ -51,24 +51,42 @@ export function parseHttpDate(value: string, nowMs: number): number | null {
   return new Date(at).getUTCDate() === d ? at : null;
 }
 
-/**
- * Parses a `Retry-After` header (RFC 9110 §10.2.3: delay-seconds or an HTTP-date) into milliseconds
- * from `nowMs`, clamped to `[1 s, maxMs]`. Non-negative decimal seconds are accepted leniently and
- * rounded up to whole seconds. Absent or malformed values → null (callers fall back to
- * `MOJANG_DEFAULT_RETRY_AFTER_MS`); a date in the past → 1 s.
- */
-export function parseRetryAfter(value: string | null | undefined, nowMs: number, maxMs = MOJANG_MAX_RETRY_AFTER_MS): number | null {
-  if (value === null || value === undefined) return null;
-  const v = value.trim();
-  if (v === "") return null;
+function retryAfterElement(v: string, nowMs: number, maxMs: number): number | null {
   let ms: number;
-  if (/^\d{1,10}(?:\.\d{1,9})?$/.test(v)) ms = Math.ceil(Number(v)) * 1000;
+  const secs = /^(\d+)(?:\.\d{1,9})?$/.exec(v);
+  if (secs) ms = secs[1]!.length > 10 ? maxMs : Math.ceil(Number(v)) * 1000;
   else {
     const at = parseHttpDate(v, nowMs);
     if (at === null) return null;
     ms = at - nowMs;
   }
   return Math.min(Math.max(ms, 1000), maxMs);
+}
+
+/**
+ * Parses a `Retry-After` header (RFC 9110 §10.2.3: delay-seconds or an HTTP-date) into milliseconds
+ * from `nowMs`, clamped to `[1 s, maxMs]`. Non-negative decimal seconds are accepted leniently and
+ * rounded up; more than 10 digits clamp to `maxMs`. A signed value (`+120`, `-5`) is not
+ * delay-seconds and is rejected. Repeated headers joined with commas (`120, 30`; HTTP-dates contain a
+ * comma themselves) yield the longest valid element. Absent or malformed values → null (callers fall
+ * back to `MOJANG_DEFAULT_RETRY_AFTER_MS`); a date in the past → 1 s.
+ */
+export function parseRetryAfter(value: string | null | undefined, nowMs: number, maxMs = MOJANG_MAX_RETRY_AFTER_MS): number | null {
+  if (value === null || value === undefined) return null;
+  const v = value.trim();
+  if (v === "") return null;
+  const whole = retryAfterElement(v, nowMs, maxMs);
+  if (whole !== null || !v.includes(",")) return whole;
+  // Re-join "<weekday>, <rest>" of HTTP-dates while splitting the list.
+  const parts = v.split(",").map((p) => p.trim());
+  let best: number | null = null;
+  for (let i = 0; i < parts.length; i++) {
+    let el = parts[i]!;
+    if (/^[A-Za-z]+$/.test(el) && i + 1 < parts.length) el = `${el}, ${parts[++i]!}`;
+    const ms = el === "" ? null : retryAfterElement(el, nowMs, maxMs);
+    if (ms !== null && (best === null || ms > best)) best = ms;
+  }
+  return best;
 }
 
 export interface MojangRateLimiterOptions {

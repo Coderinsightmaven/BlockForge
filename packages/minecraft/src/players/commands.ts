@@ -66,6 +66,52 @@ export const playerCommands = {
 
 export type PlayerCommandName = keyof typeof playerCommands;
 
+/** The (action, target) a console command line acts on, in the terms of `CommandFeedback`. */
+export interface PlayerCommandTarget {
+  action: Extract<CommandFeedback, { ok: true }>["action"];
+  /** Lowercase player name, or the normalised IP for `ban-ip <ip>` / `pardon-ip`. */
+  target: string;
+}
+
+/**
+ * Recognises a vanilla player command typed into the console (`op Steve`, `/minecraft:ban Steve x`,
+ * `whitelist add Steve`, `ban-ip 1.2.3.4`, …) and returns the action and target its feedback would
+ * name; null for anything else (`say`, `list`, plugin commands, selectors, invalid names). Used to tell
+ * whether two console commands could print the same feedback line. A plugin command that prints
+ * vanilla-identical feedback is not recognised and could still collide.
+ */
+export function parsePlayerCommand(line: string): PlayerCommandTarget | null {
+  const words = line.trim().replace(/^\//, "").split(/\s+/);
+  const cmd = (words[0] ?? "").toLowerCase().replace(/^minecraft:/, "");
+  const name = (w: string | undefined) => (w !== undefined && isValidPlayerName(w) ? w.toLowerCase() : null);
+  let action: PlayerCommandTarget["action"] | null = null;
+  let target: string | null = null;
+  switch (cmd) {
+    case "op":
+    case "deop":
+    case "ban":
+    case "pardon":
+    case "kick":
+      action = cmd;
+      target = name(words[1]);
+      break;
+    case "whitelist": {
+      const sub = (words[1] ?? "").toLowerCase();
+      if (sub === "add" || sub === "remove") {
+        action = sub === "add" ? "whitelist.add" : "whitelist.remove";
+        target = name(words[2]);
+      }
+      break;
+    }
+    case "ban-ip":
+    case "pardon-ip":
+      action = cmd;
+      target = words[1] === undefined ? null : (normalizeIp(words[1]) ?? (cmd === "ban-ip" ? name(words[1]) : null));
+      break;
+  }
+  return action !== null && target !== null ? { action, target } : null;
+}
+
 /** Which builders apply to a server software (Velocity has no built-in ban/whitelist/op). */
 export function supportedPlayerCommands(software: ServerSoftware): PlayerCommandName[] {
   if (software === "velocity") return ["glistAll"];

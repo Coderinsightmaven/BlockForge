@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CatalogError, MojangRateLimiter, TtlCache, lookupMojangProfile, parseCommandFeedback, parseRetryAfter, type CatalogContext, type Fetch } from "../src/index.js";
+import { CatalogError, MojangRateLimiter, TtlCache, lookupMojangProfile, parseCommandFeedback, parsePlayerCommand, parseRetryAfter, type CatalogContext, type Fetch } from "../src/index.js";
 import { fixture } from "./helpers.js";
 
 /**
@@ -32,6 +32,23 @@ describe("#4 round 2: kick refusals and in-game command output", () => {
       `[12:00:00 INFO]: [Steve: ${lang["commands.op.failed"]}]`,
       "[12:00:00 INFO]: [Steve: No player was found]",
     ]) expect(parseCommandFeedback(line), line).toBeNull();
+  });
+});
+
+describe("#4 round 3: parsePlayerCommand", () => {
+  it("recognises vanilla player commands and their target; everything else is null", () => {
+    expect(parsePlayerCommand("op Steve")).toEqual({ action: "op", target: "steve" });
+    expect(parsePlayerCommand("/minecraft:OP steve")).toEqual({ action: "op", target: "steve" });
+    expect(parsePlayerCommand("  deop   Steve ")).toEqual({ action: "deop", target: "steve" });
+    expect(parsePlayerCommand("ban Steve griefing a lot")).toEqual({ action: "ban", target: "steve" });
+    expect(parsePlayerCommand("kick Steve bye")).toEqual({ action: "kick", target: "steve" });
+    expect(parsePlayerCommand("pardon Steve")).toEqual({ action: "pardon", target: "steve" });
+    expect(parsePlayerCommand("whitelist add Steve")).toEqual({ action: "whitelist.add", target: "steve" });
+    expect(parsePlayerCommand("whitelist remove Steve")).toEqual({ action: "whitelist.remove", target: "steve" });
+    expect(parsePlayerCommand("ban-ip 203.0.113.7 spam")).toEqual({ action: "ban-ip", target: "203.0.113.7" });
+    expect(parsePlayerCommand("ban-ip Steve")).toEqual({ action: "ban-ip", target: "steve" });
+    expect(parsePlayerCommand("pardon-ip 203.0.113.7")).toEqual({ action: "pardon-ip", target: "203.0.113.7" });
+    for (const other of ["say op Steve", "list", "whitelist on", "op @a", "op", "pardon-ip Steve", "lp user Steve permission set x", ""]) expect(parsePlayerCommand(other), other).toBeNull();
   });
 });
 
@@ -82,6 +99,16 @@ describe("#8 Retry-After parsing", () => {
     expect(parseRetryAfter("Mon, 12 Oct 2026 11:00:00 GMT", now)).toBe(1_000); // in the past
     expect(parseRetryAfter("Tue, 12 Oct 2027 12:00:00 GMT", now)).toBe(15 * 60_000);
     for (const bad of [null, undefined, "", "-5", "soon", "12 Oct 2026", "Mon, 99 Foo 2026 12:00:00 GMT", "1e3", ".5", "Mon, 31 Feb 2026 12:00:00 GMT"]) expect(parseRetryAfter(bad, now), String(bad)).toBeNull();
+  });
+
+  it("round 3: comma-joined repeated headers take the longest valid element; signs rejected; huge values clamp", () => {
+    expect(parseRetryAfter("120, 30", now)).toBe(120_000);
+    expect(parseRetryAfter("30,120,bogus", now)).toBe(120_000);
+    expect(parseRetryAfter("Mon, 12 Oct 2026 12:05:00 GMT, 30", now)).toBe(300_000);
+    expect(parseRetryAfter("10, Mon, 12 Oct 2026 12:00:20 GMT", now)).toBe(20_000);
+    expect(parseRetryAfter("bogus, nonsense", now)).toBeNull();
+    expect(parseRetryAfter("+120", now)).toBeNull();
+    expect(parseRetryAfter("12345678901234567890", now)).toBe(15 * 60_000);
   });
 
   it("round 2: decimal seconds round up; RFC 850 and asctime dates are UTC", () => {
