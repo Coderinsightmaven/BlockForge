@@ -51,6 +51,8 @@ export function parseHttpDate(value: string, nowMs: number): number | null {
   return new Date(at).getUTCDate() === d ? at : null;
 }
 
+const DAY_NAME = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$/i;
+
 function retryAfterElement(v: string, nowMs: number, maxMs: number): number | null {
   let ms: number;
   const secs = /^(\d+)(?:\.\d{1,9})?$/.exec(v);
@@ -77,13 +79,17 @@ export function parseRetryAfter(value: string | null | undefined, nowMs: number,
   if (v === "") return null;
   const whole = retryAfterElement(v, nowMs, maxMs);
   if (whole !== null || !v.includes(",")) return whole;
-  // Re-join "<weekday>, <rest>" of HTTP-dates while splitting the list.
+  // Re-join "<weekday>, <rest>" of HTTP-dates while splitting the list: only after a day name, and only
+  // when the joined text is a valid date; otherwise every piece is evaluated on its own.
   const parts = v.split(",").map((p) => p.trim());
   let best: number | null = null;
   for (let i = 0; i < parts.length; i++) {
-    let el = parts[i]!;
-    if (/^[A-Za-z]+$/.test(el) && i + 1 < parts.length) el = `${el}, ${parts[++i]!}`;
-    const ms = el === "" ? null : retryAfterElement(el, nowMs, maxMs);
+    let ms: number | null = null;
+    if (DAY_NAME.test(parts[i]!) && i + 1 < parts.length) {
+      ms = retryAfterElement(`${parts[i]!}, ${parts[i + 1]!}`, nowMs, maxMs);
+      if (ms !== null) i++;
+    }
+    if (ms === null && parts[i] !== "") ms = retryAfterElement(parts[i]!, nowMs, maxMs);
     if (ms !== null && (best === null || ms > best)) best = ms;
   }
   return best;

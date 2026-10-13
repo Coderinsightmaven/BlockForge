@@ -69,47 +69,56 @@ export type PlayerCommandName = keyof typeof playerCommands;
 /** The (action, target) a console command line acts on, in the terms of `CommandFeedback`. */
 export interface PlayerCommandTarget {
   action: Extract<CommandFeedback, { ok: true }>["action"];
-  /** Lowercase player name, or the normalised IP for `ban-ip <ip>` / `pardon-ip`. */
+  /**
+   * Lowercase player name, the normalised IP for `ban-ip`/`pardon-ip` with a literal address, or
+   * `PLAYER_COMMAND_ANY_TARGET` when the feedback could name anyone (selectors, UUIDs, `ban-ip <name>`
+   * — vanilla resolves an online player's name to their IP —, missing or unparsable arguments).
+   */
   target: string;
+}
+
+/** Target wildcard of `parsePlayerCommand`: the command's feedback may name any player or address. */
+export const PLAYER_COMMAND_ANY_TARGET = "*";
+
+/** A Brigadier word or quoted string (`"Steve"`, `'Steve'`) holding a valid player name, lowercased; else null. */
+function plainName(w: string | undefined): string | null {
+  if (w === undefined) return null;
+  const q = /^(["'])(.*)\1$/.exec(w);
+  const v = q ? q[2]! : w;
+  return isValidPlayerName(v) ? v.toLowerCase() : null;
 }
 
 /**
  * Recognises a vanilla player command typed into the console (`op Steve`, `/minecraft:ban Steve x`,
- * `whitelist add Steve`, `ban-ip 1.2.3.4`, …) and returns the action and target its feedback would
- * name; null for anything else (`say`, `list`, plugin commands, selectors, invalid names). Used to tell
- * whether two console commands could print the same feedback line. A plugin command that prints
- * vanilla-identical feedback is not recognised and could still collide.
+ * `whitelist add Steve`, `ban-ip 1.2.3.4`, …): whenever the verb (after an optional `/` and
+ * `minecraft:`, case-insensitive) is a player action, the action is returned, with the canonical
+ * target or `PLAYER_COMMAND_ANY_TARGET` (see `PlayerCommandTarget.target`). Null for every other
+ * command (`say`, `list`, `whitelist on`, plugin commands, `execute … run op …`). Used to tell whether
+ * two console commands could print the same feedback line; an unrecognised command that prints
+ * vanilla-identical feedback (a plugin command, `execute … run …`) could still collide.
  */
 export function parsePlayerCommand(line: string): PlayerCommandTarget | null {
   const words = line.trim().replace(/^\//, "").split(/\s+/);
   const cmd = (words[0] ?? "").toLowerCase().replace(/^minecraft:/, "");
-  const name = (w: string | undefined) => (w !== undefined && isValidPlayerName(w) ? w.toLowerCase() : null);
-  let action: PlayerCommandTarget["action"] | null = null;
-  let target: string | null = null;
+  const ANY = PLAYER_COMMAND_ANY_TARGET;
   switch (cmd) {
     case "op":
     case "deop":
     case "ban":
     case "pardon":
     case "kick":
-      action = cmd;
-      target = name(words[1]);
-      break;
+      return { action: cmd, target: plainName(words[1]) ?? ANY };
     case "whitelist": {
       const sub = (words[1] ?? "").toLowerCase();
-      if (sub === "add" || sub === "remove") {
-        action = sub === "add" ? "whitelist.add" : "whitelist.remove";
-        target = name(words[2]);
-      }
-      break;
+      if (sub !== "add" && sub !== "remove") return null;
+      return { action: sub === "add" ? "whitelist.add" : "whitelist.remove", target: plainName(words[2]) ?? ANY };
     }
     case "ban-ip":
     case "pardon-ip":
-      action = cmd;
-      target = words[1] === undefined ? null : (normalizeIp(words[1]) ?? (cmd === "ban-ip" ? name(words[1]) : null));
-      break;
+      return { action: cmd, target: (words[1] === undefined ? null : normalizeIp(words[1])) ?? ANY };
+    default:
+      return null;
   }
-  return action !== null && target !== null ? { action, target } : null;
 }
 
 /** Which builders apply to a server software (Velocity has no built-in ban/whitelist/op). */

@@ -46,9 +46,25 @@ describe("#4 round 3: parsePlayerCommand", () => {
     expect(parsePlayerCommand("whitelist add Steve")).toEqual({ action: "whitelist.add", target: "steve" });
     expect(parsePlayerCommand("whitelist remove Steve")).toEqual({ action: "whitelist.remove", target: "steve" });
     expect(parsePlayerCommand("ban-ip 203.0.113.7 spam")).toEqual({ action: "ban-ip", target: "203.0.113.7" });
-    expect(parsePlayerCommand("ban-ip Steve")).toEqual({ action: "ban-ip", target: "steve" });
+    expect(parsePlayerCommand("ban-ip Steve")).toEqual({ action: "ban-ip", target: "*" }); // resolves to the player's IP
     expect(parsePlayerCommand("pardon-ip 203.0.113.7")).toEqual({ action: "pardon-ip", target: "203.0.113.7" });
-    for (const other of ["say op Steve", "list", "whitelist on", "op @a", "op", "pardon-ip Steve", "lp user Steve permission set x", ""]) expect(parsePlayerCommand(other), other).toBeNull();
+    for (const other of ["say op Steve", "list", "whitelist on", "whitelist list", "execute as @a run op Steve", "lp user Steve permission set x", ""]) expect(parsePlayerCommand(other), other).toBeNull();
+  });
+
+  it("round 4: a recognised verb always yields its action; quoted names are unquoted, anything else is the wildcard", () => {
+    expect(parsePlayerCommand('op "Steve"')).toEqual({ action: "op", target: "steve" });
+    expect(parsePlayerCommand("kick 'Steve' bye")).toEqual({ action: "kick", target: "steve" });
+    expect(parsePlayerCommand('ban "Steve" griefing')).toEqual({ action: "ban", target: "steve" });
+    for (const [line, action] of [
+      ["kick @a", "kick"],
+      ["kick @a[name=Steve]", "kick"],
+      ["kick 8667ba71-b85a-4004-af54-457a9734eed7", "kick"],
+      ['op "Ste ve"', "op"],
+      ["op", "op"],
+      ["whitelist add @p", "whitelist.add"],
+      ["pardon-ip Steve", "pardon-ip"],
+      ["/minecraft:ban-ip Steve", "ban-ip"],
+    ] as const) expect(parsePlayerCommand(line), line).toEqual({ action, target: "*" });
   });
 });
 
@@ -107,6 +123,13 @@ describe("#8 Retry-After parsing", () => {
     expect(parseRetryAfter("Mon, 12 Oct 2026 12:05:00 GMT, 30", now)).toBe(300_000);
     expect(parseRetryAfter("10, Mon, 12 Oct 2026 12:00:20 GMT", now)).toBe(20_000);
     expect(parseRetryAfter("bogus, nonsense", now)).toBeNull();
+    // Round 4: only a day name is glued to the next piece, and only if the result is a date.
+    expect(parseRetryAfter("bogus, 120", now)).toBe(120_000);
+    expect(parseRetryAfter("Foo, 120", now)).toBe(120_000);
+    expect(parseRetryAfter("NotADay, 999999", now)).toBe(15 * 60_000);
+    expect(parseRetryAfter("Mon, 120", now)).toBe(120_000);
+    expect(parseRetryAfter("monday, 12-Oct-26 12:01:00 GMT, 30", now)).toBe(30_000); // not a valid date (case), pieces alone
+    expect(parseRetryAfter("Mon,, 12 Oct 2026 12:05:00 GMT", now)).toBeNull(); // malformed date
     expect(parseRetryAfter("+120", now)).toBeNull();
     expect(parseRetryAfter("12345678901234567890", now)).toBe(15 * 60_000);
   });
