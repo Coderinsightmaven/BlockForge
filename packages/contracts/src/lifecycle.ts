@@ -100,9 +100,17 @@ export function canStartOperation(
   state: ServerState,
   activeOperation: ServerOperation | null,
 ): boolean {
-  // `kill` is the escape hatch and may pre-empt a stuck stop.
-  if (activeOperation && !(op === "kill" && activeOperation === "stop")) return false;
+  // `kill` is the escape hatch and may pre-empt a stuck stop; on a running server stop/restart/kill may also
+  // pre-empt a plugin/mod change (it notices the lost lock, undoes its file changes and fails).
+  if (activeOperation && !(op === "kill" && activeOperation === "stop") && !preemptsExtensions(op, state, activeOperation)) return false;
   return OPERATION_ALLOWED_FROM[op].includes(state);
+}
+
+/** Power actions that may take the lock from an `extensions` operation (only while the server runs). */
+export const EXTENSIONS_PREEMPTED_BY: readonly ServerOperation[] = ["kill", "stop", "restart"];
+
+export function preemptsExtensions(op: ServerOperation, state: ServerState, activeOperation: ServerOperation | null): boolean {
+  return activeOperation === "extensions" && EXTENSIONS_PREEMPTED_BY.includes(op) && (state === "running" || state === "degraded");
 }
 
 /** Node connectivity as derived by the control plane from agent sessions and heartbeats. */

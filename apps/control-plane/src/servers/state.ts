@@ -1,5 +1,6 @@
 import { canStartOperation, canTransition, type ServerOperation, type ServerState } from "@blockforge/contracts";
-import { and, eq, isNull, lt } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, eq, sql } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { Db, DbOrTx } from "../db/client.js";
 import { jobs, servers } from "../db/schema/index.js";
@@ -77,57 +78,78 @@ export class ServerStateService {
   }
 
   /**
+   * The operation actually in progress: a lock still held by a job that already ended (its finalize
+   * failed or never ran) or an `extensions` lock without any holder (its job row was deleted) is stale
+   * and may be taken over.
+   */
+  private async liveOperation(tx: DbOrTx, row: ServerRow): Promise<ServerOperation | null> {
+    const active = (row.activeOperation as ServerOperation | null) ?? null;
+    if (!active) return null;
+    if (row.activeJobId) {
+      const [j] = await tx.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, row.activeJobId));
+      if (!j || (j.status !== "queued" && j.status !== "running")) return null;
+    } else if (active === "extensions" && !row.operationToken) return null;
+    return active;
+  }
+
+  /**
    * Takes the operation lock inside `tx` (row locked) and moves the server into the operation's
    * transitional state. Throws 409 INVALID_STATE when the state or a running operation forbids it.
+   * Stop/restart/kill on a running server may pre-empt an `extensions` operation (contracts
+   * `canStartOperation`); its holder notices the lost lock at its next re-check.
    */
   async begin(tx: DbOrTx, serverId: string, op: ServerOperation): Promise<{ row: ServerRow; from: ServerState; to: ServerState }> {
     const [row] = await tx.select().from(servers).where(eq(servers.id, serverId)).for("update").limit(1);
     if (!row) throw notFound("Server");
     const from = row.state as ServerState;
-    const active = (row.activeOperation as ServerOperation | null) ?? null;
+    const active = await this.liveOperation(tx, row);
     if (op === "delete" && from === "provisioning" && active) throw invalidState("The server is still being provisioned");
     if (!canStartOperation(op, from, active)) {
       throw invalidState(active ? `Another operation (${active}) is in progress` : `Cannot ${op} a server that is ${from}`, { state: from, activeOperation: active });
     }
     const to = transitionalStateFor(op, from);
+    const now = new Date(this.clock.now());
     await tx
       .update(servers)
-      .set({ activeOperation: op, state: to, updatedAt: new Date(this.clock.now()) })
+      .set({ activeOperation: op, activeJobId: null, operationToken: null, operationStartedAt: now, state: to, updatedAt: now })
       .where(eq(servers.id, serverId));
     return { row, from, to };
   }
 
   /**
-   * Takes the operation lock for `op` without a state change (`extensions`), inside `tx` (row locked).
-   * `jobId` null = a short synchronous change (released with `unlock`). A lock still held by a job that
-   * already ended (crash between its finalize and the release) is taken over. Throws 409 INVALID_STATE
-   * like `begin` while another operation runs or the state forbids it.
+   * Takes the operation lock for `op` without a state change (`extensions`), inside `tx` (row locked),
+   * for a synchronous holder: returns its token (release with `unlock(serverId, token)`). A job takes it
+   * the same way and then `attachJob`s itself in the same transaction (the token is cleared). Throws 409
+   * INVALID_STATE like `begin` while another operation runs or the state forbids it.
    */
-  async lock(tx: DbOrTx, serverId: string, op: Extract<ServerOperation, "extensions">, jobId: string | null): Promise<ServerRow> {
+  async lock(tx: DbOrTx, serverId: string, op: Extract<ServerOperation, "extensions">): Promise<string> {
     const [row] = await tx.select().from(servers).where(eq(servers.id, serverId)).for("update").limit(1);
     if (!row) throw notFound("Server");
     const from = row.state as ServerState;
-    let active = (row.activeOperation as ServerOperation | null) ?? null;
-    if (active === op && row.activeJobId && row.activeJobId !== jobId) {
-      const [j] = await tx.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, row.activeJobId));
-      if (!j || (j.status !== "queued" && j.status !== "running")) active = null;
-    }
-    if (active === op && jobId !== null && row.activeJobId === jobId) return row;
+    const active = await this.liveOperation(tx, row);
     if (!canStartOperation(op, from, active)) {
       throw invalidState(active ? `Another operation (${active}) is in progress` : `Cannot change plugins/mods of a server that is ${from}`, { state: from, activeOperation: active });
     }
-    await tx.update(servers).set({ activeOperation: op, activeJobId: jobId, updatedAt: new Date(this.clock.now()) }).where(eq(servers.id, serverId));
-    return row;
+    const token = randomUUID();
+    const now = new Date(this.clock.now());
+    await tx.update(servers).set({ activeOperation: op, activeJobId: null, operationToken: token, operationStartedAt: now, updatedAt: now }).where(eq(servers.id, serverId));
+    return token;
   }
 
-  /** Releases a synchronous (`jobId` null) `lock`. */
-  async unlock(serverId: string, op: Extract<ServerOperation, "extensions">): Promise<void> {
+  /** Releases a synchronous hold taken by `lock` (only its own: a pre-empting power action keeps its lock). */
+  async unlock(serverId: string, token: string): Promise<void> {
     const rows = await this.db
       .update(servers)
-      .set({ activeOperation: null, updatedAt: new Date(this.clock.now()) })
-      .where(and(eq(servers.id, serverId), eq(servers.activeOperation, op), isNull(servers.activeJobId)))
+      .set({ activeOperation: null, operationToken: null, operationStartedAt: null, updatedAt: new Date(this.clock.now()) })
+      .where(and(eq(servers.id, serverId), eq(servers.operationToken, token)))
       .returning({ id: servers.id });
     if (rows.length) this.notify(serverId);
+  }
+
+  /** True while the synchronous holder `token` still holds the lock (not pre-empted). */
+  async holdsToken(serverId: string, token: string): Promise<boolean> {
+    const [row] = await this.db.select({ token: servers.operationToken }).from(servers).where(eq(servers.id, serverId));
+    return row?.token === token;
   }
 
   /** True while `jobId` holds the server's operation lock for `op` (re-checked by long jobs at every step). */
@@ -137,28 +159,39 @@ export class ServerStateService {
   }
 
   /**
-   * Synchronous locks (no job) left behind by a crashed request are released after `olderThanMs`
-   * (a synchronous change takes seconds; a job's lock is released by its finalize).
+   * Releases `op` locks nobody holds any more: held by a job that already ended (or was deleted), or a
+   * synchronous hold older than `olderThanMs` (left behind by a crashed request; they take seconds).
    */
   async releaseStaleLocks(op: Extract<ServerOperation, "extensions">, olderThanMs: number): Promise<number> {
+    const cutoff = new Date(this.clock.now() - olderThanMs).toISOString();
     const rows = await this.db
       .update(servers)
-      .set({ activeOperation: null, updatedAt: new Date(this.clock.now()) })
-      .where(and(eq(servers.activeOperation, op), isNull(servers.activeJobId), lt(servers.updatedAt, new Date(this.clock.now() - olderThanMs))))
+      .set({ activeOperation: null, activeJobId: null, operationToken: null, operationStartedAt: null, updatedAt: new Date(this.clock.now()) })
+      .where(
+        and(
+          eq(servers.activeOperation, op),
+          sql`(
+            (${servers.activeJobId} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${jobs} j WHERE j.id = ${servers.activeJobId} AND j.status IN ('queued', 'running')))
+            OR (${servers.activeJobId} IS NULL AND ${servers.operationToken} IS NULL)
+            OR (${servers.activeJobId} IS NULL AND (${servers.operationStartedAt} IS NULL OR ${servers.operationStartedAt} < ${cutoff}::timestamptz))
+          )`,
+        ),
+      )
       .returning({ id: servers.id });
     for (const r of rows) this.notify(r.id);
     return rows.length;
   }
 
+  /** Records the job holding the lock taken in the same transaction (clears a synchronous token). */
   async attachJob(tx: DbOrTx, serverId: string, jobId: string): Promise<void> {
-    await tx.update(servers).set({ activeJobId: jobId }).where(eq(servers.id, serverId));
+    await tx.update(servers).set({ activeJobId: jobId, operationToken: null }).where(eq(servers.id, serverId));
   }
 
   /** Releases the lock if it is still held by `jobId` (a pre-empting kill may have taken it over). */
   async end(serverId: string, jobId: string): Promise<boolean> {
     const rows = await this.db
       .update(servers)
-      .set({ activeOperation: null, activeJobId: null, updatedAt: new Date(this.clock.now()) })
+      .set({ activeOperation: null, activeJobId: null, operationToken: null, operationStartedAt: null, updatedAt: new Date(this.clock.now()) })
       .where(and(eq(servers.id, serverId), eq(servers.activeJobId, jobId)))
       .returning({ id: servers.id });
     if (rows.length) this.notify(serverId);

@@ -1,5 +1,5 @@
 {
-  "id": "f26ddfe0-f4b8-4f3f-b372-33c2aa780258",
+  "id": "ee1cbafb-2937-4359-a281-be084a5e3157",
   "prevId": "8c276219-1e0c-4cd0-83d9-213cdf712456",
   "version": "7",
   "dialect": "postgresql",
@@ -3525,6 +3525,18 @@
         "active_job_id": {
           "name": "active_job_id",
           "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_token": {
+          "name": "operation_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_started_at": {
+          "name": "operation_started_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
