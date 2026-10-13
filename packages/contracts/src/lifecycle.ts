@@ -100,17 +100,26 @@ export function canStartOperation(
   state: ServerState,
   activeOperation: ServerOperation | null,
 ): boolean {
-  // `kill` is the escape hatch and may pre-empt a stuck stop; on a running server stop/restart/kill may also
-  // pre-empt a plugin/mod change (it notices the lost lock, undoes its file changes and fails).
+  // `kill` is the escape hatch and may pre-empt a stuck stop; stop/restart/kill of a running server and
+  // start/restart of a crashed one may also pre-empt a plugin/mod change (it notices the lost lock and fails).
   if (activeOperation && !(op === "kill" && activeOperation === "stop") && !preemptsExtensions(op, state, activeOperation)) return false;
   return OPERATION_ALLOWED_FROM[op].includes(state);
 }
 
-/** Power actions that may take the lock from an `extensions` operation (only while the server runs). */
+/** Power actions that may take the lock from an `extensions` operation: stop/restart/kill while the server runs. */
 export const EXTENSIONS_PREEMPTED_BY: readonly ServerOperation[] = ["kill", "stop", "restart"];
+/** …and start/restart of a server that crashed while the change ran. */
+export const EXTENSIONS_PREEMPTED_WHEN_CRASHED_BY: readonly ServerOperation[] = ["start", "restart"];
 
+/**
+ * Whether `op` may pre-empt a running `extensions` operation (the change then undoes itself only if it can
+ * take a new cleanup hold on a stopped/crashed server; otherwise it records what it left behind).
+ */
 export function preemptsExtensions(op: ServerOperation, state: ServerState, activeOperation: ServerOperation | null): boolean {
-  return activeOperation === "extensions" && EXTENSIONS_PREEMPTED_BY.includes(op) && (state === "running" || state === "degraded");
+  if (activeOperation !== "extensions") return false;
+  if (state === "running" || state === "degraded") return EXTENSIONS_PREEMPTED_BY.includes(op);
+  if (state === "crashed") return EXTENSIONS_PREEMPTED_WHEN_CRASHED_BY.includes(op);
+  return false;
 }
 
 /** Node connectivity as derived by the control plane from agent sessions and heartbeats. */

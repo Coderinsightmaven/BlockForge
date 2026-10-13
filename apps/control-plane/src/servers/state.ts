@@ -136,6 +136,27 @@ export class ServerStateService {
     return token;
   }
 
+  /** Lifecycle states in which a pre-empted plugin/mod change may still touch the files (nothing runs them). */
+  static readonly CLEANUP_STATES: readonly ServerState[] = ["stopped", "crashed"];
+
+  /**
+   * A cleanup hold for a plugin/mod change that lost its lock: an `extensions` hold (own token) taken only
+   * when no other operation holds the lock and the server is stopped or crashed. Null otherwise (the
+   * change must then leave the files alone).
+   */
+  async lockForCleanup(serverId: string): Promise<string | null> {
+    return this.db.transaction(async (tx) => {
+      const [row] = await tx.select().from(servers).where(eq(servers.id, serverId)).for("update").limit(1);
+      if (!row) return null;
+      if (await this.liveOperation(tx, row)) return null;
+      if (!ServerStateService.CLEANUP_STATES.includes(row.state as ServerState)) return null;
+      const token = randomUUID();
+      const now = new Date(this.clock.now());
+      await tx.update(servers).set({ activeOperation: "extensions", activeJobId: null, operationToken: token, operationStartedAt: now, updatedAt: now }).where(eq(servers.id, serverId));
+      return token;
+    });
+  }
+
   /** Releases a synchronous hold taken by `lock` (only its own: a pre-empting power action keeps its lock). */
   async unlock(serverId: string, token: string): Promise<void> {
     const rows = await this.db
@@ -173,7 +194,7 @@ export class ServerStateService {
           sql`(
             (${servers.activeJobId} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${jobs} j WHERE j.id = ${servers.activeJobId} AND j.status IN ('queued', 'running')))
             OR (${servers.activeJobId} IS NULL AND ${servers.operationToken} IS NULL)
-            OR (${servers.activeJobId} IS NULL AND (${servers.operationStartedAt} IS NULL OR ${servers.operationStartedAt} < ${cutoff}::timestamptz))
+            OR (${servers.activeJobId} IS NULL AND ${servers.operationToken} IS NOT NULL AND ${servers.operationStartedAt} < ${cutoff}::timestamptz)
           )`,
         ),
       )
