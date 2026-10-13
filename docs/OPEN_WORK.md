@@ -67,8 +67,9 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - Player sessions and live join/leave with a real Minecraft client (no client on the LAN test so far).
 - Velocity proxy sessions; pre-1.13 `list` output.
 - Zip64 jars through the real agent (unit-tested in the agent only).
-- Upload completion with `replaceExisting` / `allowIncompatible`, and a real Modrinth update apply (needs an
-  outdated plugin installed first).
+- Upload completion with `replaceExisting` / `allowIncompatible`.
+- ~~A real Modrinth update apply~~ — done 2026-10-13: Chunky 1.4.40 → 1.5.3 through `POST …/extensions/updates/apply`
+  (`scripts/e2e/e2e_ext_updates.py`); see "Phase 4b sign-off re-run" in `docs/development/test-node.md`.
 
 ### 1.4 Cross-model re-review rounds (policy: fixes of high/major findings get a second look)
 - Control-plane fixes for 1.1 → Grok round 2.
@@ -79,8 +80,8 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - Reviews are launched with T3 `delegate_task`, which only works on user-initiated turns. Queue them otherwise.
 
 ### 1.5 Sign-off
-After 1.1–1.4: re-run `.data/e2e_extensions.py`, `.data/e2e_ext_updates.py`, `.data/e2e_players.py` and
-`.data/e2e_players_stopped.py` against the test node. Record the evidence, mark the Plugins/mods and Players checklist
+After 1.1–1.4: re-run `scripts/e2e/e2e_extensions.py`, `scripts/e2e/e2e_ext_updates.py`, `scripts/e2e/e2e_players.py` and
+`scripts/e2e/e2e_players_stopped.py` against the test node. Record the evidence, mark the Plugins/mods and Players checklist
 lines `[x]`, and move "Current focus" to Phase 5.
 
 ## 2. Remaining Phase 3–4 features
@@ -182,8 +183,11 @@ replace the note with the concrete gap. Affected lines:
   `cliPluginsExtraDirs: ["/opt/homebrew/lib/docker/cli-plugins"]` in `~/.docker/config.json`). Two things did not come
   across from the Windows checkout because they were never committed: the gitignored `.data/` directory, including
   the e2e scripts named in 1.5 (`.data/e2e_*.py`), and the minecraft log fixtures (recaptured, see 5.2). The e2e
-  scripts must be rewritten, and this time committed (e.g. under `scripts/e2e/`), before sign-off. The
-  `scripts/dev-*.ps1` helpers are PowerShell; run them with `pwsh` or add shell equivalents.
+  scripts were rewritten and committed under `scripts/e2e/` (see its README). `scripts/dev-up.sh --tunnel` /
+  `scripts/dev-down.sh` are the macOS/Linux equivalents of the `.ps1` helpers; `dev-up.sh` uses node port 18081 by
+  default (`BF_TUNNEL_PORT`), since the Windows workstation may still hold 18080; `dev-down.sh` only signals processes
+  it can verify as this checkout's (command line + working directory). The test-node agent was re-enrolled fresh against the Mac control
+  plane (old identity backed up on the node in `~/blockforge-agent-identity-windows-20261013`).
 - **Start and stop:** `scripts/dev-up.ps1 -Tunnel` starts the control plane and the reverse tunnel to the test node;
   `scripts/dev-down.ps1` stops them, together with the web dev server. Start the web dev server manually:
   `npx vite --port 5173 --strictPort` in `apps/web`, with its pid in `.data/web.pid`.
