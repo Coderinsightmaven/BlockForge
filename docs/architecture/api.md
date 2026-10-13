@@ -277,7 +277,8 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   runs. On a `running`/`degraded` server **stop, restart and kill pre-empt** the change, and so do start
   and restart of a server that crashed meanwhile (contracts `canStartOperation`). The pre-empted change notices the
   lost lock at its next re-check and may then touch plugin/mod files only under a new **cleanup hold** (an
-  `extensions` hold taken only when no other operation holds the server and it is `stopped`/`crashed`): with it
+  `extensions` hold taken only when no other operation holds the server and it is `stopped` — never `crashed`, which the
+  agent's restart policy may restart on its own; re-checked before every rename/delete): with it
   the undo runs and the job fails with `LOCK_LOST` (a synchronous change answers 409 `preempted`); without it no
   file is touched, the failed history row records every kept file (`keptPath` + digest) and every file the change
   wrote (path + SHA-512), and the job fails with `PREEMPTED_UNDO_SKIPPED` (409 `preempted_undo_skipped`). An undo

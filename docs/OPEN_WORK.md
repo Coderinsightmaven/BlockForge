@@ -19,8 +19,14 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - **High 3 — fixed:** file-changing extension work holds `servers.active_operation = 'extensions'` (new additive
   `ServerOperation` value, migration 0006), re-checked at every step; backup/restore/reinstall/delete get the usual 409;
   stop/restart/kill pre-empt it on a running server (the change undoes itself).
+- **Known gap (from review round 4, not fixed):** an extension job that still holds its own `extensions` lock keeps
+  changing plugin/mod files after the workload crashed, even when the agent's on-failure restart policy restarts it
+  (the reconciler follows crashed → starting → running without touching the lock). Proposed: a job notes the
+  workload state it started under and stops file operations (fenced undo) once the server is neither stopped nor
+  running in the same run it started with.
 - **Round 2 (Grok) on these fixes — fixed:** blocker B1 (failed finalize pinned the lock), majors 2–5 (pre-emption,
-  journaled digests, kept files always recorded, verify-after-move) and minors 6–11; see the review record.
+  journaled digests, kept files always recorded, verify-after-move) and minors 6–11; rounds 3–4 (fenced undo on
+  stopped servers only, resumable undo records and cleanup holds); see the review record.
 - **High 4:** player action feedback accepts target-less failure lines from other commands. Require the target, else 504
   `no_feedback`.
 - **Major 5 — fixed:** apply is idempotent (job-derived history ids and keep names, a checkpointed journal, history
