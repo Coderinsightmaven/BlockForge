@@ -2,6 +2,7 @@ import { ModrinthInstallPlan, type ModrinthPlannedFile } from "@blockforge/contr
 import { checkModrinthUpdates, fromContractPlanRequest, planModrinthInstall, primaryJarFile, toContractInstallPlan, type InstalledExtensionRef } from "@blockforge/minecraft";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
+import type { Tx } from "../db/client.js";
 import { extensionHistory, installedExtensions, servers } from "../db/schema/index.js";
 import { JobError, type JobDefinition, type StepContext } from "../jobs/types.js";
 import {
@@ -27,6 +28,7 @@ import {
   KeptFileChangedError,
   placeVerified,
   pushUndo,
+  recordedCleanupTokens,
   restoreKept,
   sha512Of,
   stableId,
@@ -67,6 +69,31 @@ function fileCtx<I>(ctx: StepContext<I>, serverId: string, nodeId: string): File
   return { serverId, nodeId, jobId: ctx.jobId, signal: ctx.signal, log: (l, m) => ctx.log(l, m) };
 }
 
+/**
+ * Completes a step: `set` and the removal of `clear` are applied to the state inside the completing
+ * transaction (with `fn`'s writes); if that commit fails, the in-memory state is put back (the runner
+ * persists it), so the journal and undo record are never lost apart from the step's completion.
+ */
+async function completeStep<I>(ctx: StepContext<I>, clear: string[], set: Record<string, unknown>, fn?: (tx: Tx) => Promise<void>): Promise<void> {
+  const saved = Object.fromEntries([...clear, ...Object.keys(set)].map((k) => [k, ctx.state[k]]));
+  try {
+    await ctx.checkpoint(
+      async (tx) => {
+        for (const k of clear) delete ctx.state[k];
+        Object.assign(ctx.state, set);
+        if (fn) await fn(tx);
+      },
+      { completeStep: true },
+    );
+  } catch (err) {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete ctx.state[k];
+      else ctx.state[k] = v;
+    }
+    throw err;
+  }
+}
+
 /** Undo record `key` in `ctx.state.undo`, checkpointed on every change (an interrupted undo is resumed). */
 function undoStoreOf<I>(ctx: StepContext<I>, key: string): UndoStore {
   const all = ((ctx.state.undo as Record<string, UndoLog> | undefined) ?? {}) as Record<string, UndoLog>;
@@ -100,7 +127,15 @@ async function rescan<I>(d: ExtensionDeps, ctx: StepContext<I>, serverId: string
 }
 
 export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[] {
-  const finalizeLock = async (f: { input: { serverId: string }; jobId: string; status: string; error: { message: string } | null }) => {
+  const finalizeLock = async (f: { input: { serverId: string }; jobId: string; status: string; error: { message: string } | null; state: Record<string, unknown> }) => {
+    // A cleanup hold the job recorded and did not release (crash, failure mid-undo) is released here.
+    for (const token of recordedCleanupTokens(f.state)) {
+      try {
+        await d.state.unlock(f.input.serverId, token);
+      } catch (err) {
+        d.logger.error({ err, jobId: f.jobId }, "releasing a cleanup hold failed");
+      }
+    }
     try {
       if (f.status !== "succeeded") {
         const [s] = await d.db.select({ id: servers.id }).from(servers).where(eq(servers.id, f.input.serverId));
@@ -175,12 +210,10 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
             undo: undoStoreOf(ctx, "install"),
             holdsLock: () => d.state.holds(s.id, "extensions", ctx.jobId),
           });
-          ctx.state.entries = r.entries;
-          delete ctx.state.journal;
-          delete ctx.state.undo;
           await ctx.log("info", `Installed ${ctx.input.plan.files.length} file(s)${restartRequired(s.state) ? "; they take effect at the next restart" : ""}`);
-          // History, state and step success in one transaction (nothing fallible after it): a resumed job never applies twice.
-          await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx), { completeStep: true });
+          // History, state (journal and undo record cleared) and step success in one transaction: a resumed job
+          // never applies twice, and a failed commit keeps the undo record.
+          await completeStep(ctx, ["journal", "undo"], { entries: r.entries }, r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx));
         },
       },
       {
@@ -335,19 +368,13 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
           const store = undoStoreOf(ctx, "rollback");
           const finish = async (p: PendingEntry | null) => {
             ctx.state.restoredPath = entry.from?.path ?? null;
-            ctx.state.restored = entry.from ?? null;
-            ctx.state.entryId = id;
-            delete ctx.state.rb;
-            delete (ctx.state.undo as Record<string, unknown> | undefined)?.rollback;
             await ctx.log("info", entry.from ? `Restored ${entry.from.path}` : `Removed ${entry.to?.path ?? entry.path}`);
-            // History, the consumed kept file and step success in one transaction (never applied twice; nothing fallible after it).
-            await ctx.checkpoint(
-              async (tx) => {
-                if (p) await writeHistory(d, s.id, [p], { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
-                if (fromKeep) await tx.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, entry.id));
-              },
-              { completeStep: true },
-            );
+            // History, the consumed kept file and step success in one transaction (never applied twice; nothing
+            // fallible after it); the progress and undo records are cleared in that same commit.
+            await completeStep(ctx, ["rb", "undo"], { restored: entry.from ?? null, entryId: id }, async (tx) => {
+              if (p) await writeHistory(d, s.id, [p], { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
+              if (fromKeep) await tx.update(extensionHistory).set({ keptPath: null, keptSha512: null, keptUntil: null }).where(eq(extensionHistory.id, entry.id));
+            });
           };
           // Idempotency (#5): an interrupted attempt that already recorded its history is not re-run.
           const [prior] = await d.db.select().from(extensionHistory).where(eq(extensionHistory.id, id));

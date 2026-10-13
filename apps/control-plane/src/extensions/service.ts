@@ -275,7 +275,12 @@ export class ExtensionsService {
       if (await exists(this.d, c, to).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)))) throw conflict(`${to} already exists`, { reason: "exists" });
       if (!(await held())) throw preempted();
       // Hashed first so a pre-empted toggle can be undone verifiably.
+      // A file that cannot be hashed is not renamed (its rename could not be undone verifiably).
       const sha = await sha512Of(this.d, c, r.path).catch((err: unknown) => Promise.reject(commandErrorToHttp(err)));
+      if (!sha) {
+        if (!(await exists(this.d, c, r.path).catch(() => true))) throw notFound("Extension file");
+        throw conflict(`${r.path} could not be hashed; nothing was renamed`, { reason: "hash_failed" });
+      }
       try {
         await this.d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: r.path, to }, agentOpts(c));
       } catch (err) {
@@ -287,8 +292,7 @@ export class ExtensionsService {
       if (!(await held())) {
         const store = memoryUndo();
         await upsertEntry(store, entry);
-        if (sha) await pushUndo(store, { kind: "restore", kept: to, sha512: sha, path: r.path });
-        else store.log.notes.push(`${to} could not be hashed, so it is not renamed back`);
+        await pushUndo(store, { kind: "restore", kept: to, sha512: sha, path: r.path, entryId: entry.id });
         return this.preemptedSync(access, actor, c, store, held);
       }
       const filename = to.slice(to.indexOf("/") + 1);

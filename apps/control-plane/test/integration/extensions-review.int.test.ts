@@ -469,6 +469,7 @@ describe("Phase 4b review round 2 (Grok)", () => {
     for (const action of ["kill", "stop"] as const) {
       let power: string | null = null;
       let backupDuring = 0;
+      let duringCleanup: { server: Record<string, unknown>; start: number; backup: number } | null = null;
       node.sim.options = {
         before: {
           // While the download runs (the original jar is already kept): backup stays blocked, the power action
@@ -480,12 +481,23 @@ describe("Phase 4b review round 2 (Grok)", () => {
             power = r.json().jobId as string;
             expect((await waitJob(owner, power!)).status).toBe("succeeded");
           },
+          // The cleanup undo moves the kept jar back: it runs under its own `extensions` hold (no job id), and
+          // start/backup are refused until it ends.
+          "fs.rename": async (p) => {
+            if (!power || duringCleanup || !String(p.from).startsWith(KEPT)) return;
+            duringCleanup = {
+              server: (await owner.get(`/servers/${id}`)).json(),
+              start: (await owner.post(`/servers/${id}/actions`, { action: "start" })).statusCode,
+              backup: (await owner.post(`/servers/${id}/backups`, {})).statusCode,
+            };
+          },
         },
       };
       const job = await install(owner, id, "gammapl");
       const ej = await waitJob(owner, job);
       node.sim.options = {};
       expect(backupDuring).toBe(409);
+      expect(duringCleanup).toMatchObject({ server: { activeOperation: "extensions", activeJobId: null, state: "stopped" }, start: 409, backup: 409 });
       expect(ej.status).toBe("failed");
       expect(ej.error).toMatchObject({ code: "LOCK_LOST" });
       expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
@@ -902,5 +914,188 @@ describe("Phase 4b review round 2 (Grok)", () => {
     expect((await waitJob(owner, job)).status).toBe("succeeded");
     node.sim.options = {};
     expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ state: "crashed", activeOperation: null });
+  });
+
+  it("round 4: no cleanup on a crashed server (the agent's restart policy may restart it): undo skipped, no file touched", async () => {
+    const { owner, node, up } = await boot();
+    const id = await runningServer(owner);
+    const original = pluginJar("Gamma", "0.9-local");
+    node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+    await scanned(owner, id);
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+    let mark = 0;
+    node.sim.options = {
+      before: {
+        "artifact.fetch": async () => {
+          // Kill pre-empts; then the server is reported crashed (lock free) when the download returns.
+          const k = await owner.post(`/servers/${id}/actions`, { action: "kill" });
+          expect((await waitJob(owner, k.json().jobId)).status).toBe("succeeded");
+          await testPool().query("UPDATE servers SET state = 'crashed' WHERE id = $1", [id]);
+          mark = node.agent.commands.length;
+        },
+      },
+    };
+    const job = await install(owner, id, "gammapl");
+    const ej = await waitJob(owner, job);
+    node.sim.options = {};
+    expect(ej.status).toBe("failed");
+    expect(ej.error).toMatchObject({ code: "PREEMPTED_UNDO_SKIPPED" });
+    expect(fileOps(node, mark)).toEqual([]);
+    expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null, state: "crashed" });
+    const [kept] = keptFiles(node, id);
+    const rows = (await testPool().query("SELECT status, kept_path, kept_sha512, error FROM extension_history WHERE job_id = $1", [job])).rows;
+    expect(rows).toEqual([{ status: "failed", kept_path: kept, kept_sha512: sha512(original), error: expect.stringContaining("no file was touched") }]);
+  });
+
+  describe("round 4: resumed undo records", () => {
+    /** A failed install job whose undo record says `started`, as a crash leaves it; `steps`/`done` as given. */
+    async function crashedUndo(t: TestApp, owner: ApiClient, node: SimNodeHandle, up: FakeUpstreams, id: string, undo: (ids: { entryId: string; keptPath: string }) => Record<string, unknown>) {
+      const gamma = up.projects.get("GammaPl")!.versions[0]!;
+      node.sim.artifacts.set(gamma.url, Buffer.from("tampered on the CDN"));
+      const jobId = await install(owner, id, "gammapl");
+      expect((await waitJob(owner, jobId)).status).toBe("failed");
+      const entryId = stableId(jobId, "apply:plugins/Gamma-1.0.jar");
+      const keptPath = `${KEPT}${entryId}.jar`;
+      await crashInto(t, id, jobId, { undo: { install: { entries: [], started: true, error: { code: "CHECKSUM_MISMATCH", message: "install: sha512 mismatch" }, done: [], failed: [], notes: [], ...undo({ entryId, keptPath }) } } });
+      return { jobId, entryId, keptPath };
+    }
+    const entryOf = (entryId: string, keptPath: string, sha: string) => ({ id: entryId, action: "update", extensionId: null, extensionName: "Gamma", path: "plugins/Gamma-1.0.jar", from: null, to: null, keptPath, keptSha512: sha });
+
+    it("a crash after the cleanup hold committed: the job re-adopts its token, finishes the undo and releases it", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      const original = pluginJar("Gamma", "0.9-local");
+      node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      for (const variant of ["hold committed", "token recorded, hold not committed"] as const) {
+        const token = "00000000-0000-4000-8000-0000000c1ea0";
+        const { jobId, keptPath } = await crashedUndo(t, owner, node, up, id, ({ entryId, keptPath }) => ({
+          steps: [{ kind: "restore", kept: keptPath, sha512: sha512(original), path: "plugins/Gamma-1.0.jar", entryId }],
+          entries: [entryOf(entryId, keptPath, sha512(original))],
+          cleanupToken: token,
+        }));
+        node.sim.files(id).delete("plugins/Gamma-1.0.jar");
+        node.sim.put(id, keptPath, original);
+        if (variant === "hold committed") await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, operation_token = $2, operation_started_at = now() WHERE id = $1", [id, token]);
+        else await testPool().query("UPDATE servers SET active_operation = NULL, active_job_id = NULL WHERE id = $1", [id]);
+        // Start is blocked by the leaked hold until the job resumes.
+        if (variant === "hold committed") expect((await owner.post(`/servers/${id}/actions`, { action: "start" })).statusCode).toBe(409);
+        await t.ctx.jobs.start();
+        const row = await t.ctx.jobs.waitForCompletion(jobId);
+        expect(row.status, variant).toBe("failed");
+        expect(row.error, variant).toMatchObject({ code: "CHECKSUM_MISMATCH" });
+        expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original), variant).toBe(true);
+        expect(node.sim.read(id, keptPath), variant).toBeNull();
+        const rows = (await testPool().query("SELECT status, kept_path FROM extension_history WHERE job_id = $1", [jobId])).rows;
+        expect(rows, variant).toEqual([{ status: "failed", kept_path: null }]);
+        expect((await owner.get(`/servers/${id}`)).json(), variant).toMatchObject({ activeOperation: null, activeJobId: null });
+        const start = await owner.post(`/servers/${id}/actions`, { action: "start" });
+        expect((await waitJob(owner, start.json().jobId)).status, variant).toBe("succeeded");
+        const stop = await owner.post(`/servers/${id}/actions`, { action: "stop" });
+        expect((await waitJob(owner, stop.json().jobId)).status).toBe("succeeded");
+        await scanned(owner, id);
+      }
+    });
+
+    it("finalize releases a recorded cleanup hold the job never got to release", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const token = "00000000-0000-4000-8000-0000000c1ea1";
+      const { jobId } = await crashedUndo(t, owner, node, up, id, () => ({ steps: [], cleanupToken: token }));
+      // The resumed undo finds a running server: the hold cannot be re-adopted (it is released, nothing touched).
+      await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, operation_token = $2, operation_started_at = now(), state = 'running' WHERE id = $1", [id, token]);
+      await t.ctx.jobs.start();
+      expect((await t.ctx.jobs.waitForCompletion(jobId)).status).toBe("failed");
+      expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+    });
+
+    it("crash between the quarantine rename and the delete: the resumed undo deletes the quarantined file", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const written = Buffer.from("WRITTEN-BY-THE-JOB");
+      const quarantine = ".blockforge/extensions/fetch/0000-quarantined.delete";
+      const { jobId } = await crashedUndo(t, owner, node, up, id, () => ({ steps: [{ kind: "delete", path: "plugins/Gamma-1.0.jar", sha512: sha512(written), quarantine }] }));
+      node.sim.put(id, quarantine, written);
+      await t.ctx.jobs.start();
+      const row = await t.ctx.jobs.waitForCompletion(jobId);
+      expect(row.status).toBe("failed");
+      expect(row.error).toMatchObject({ code: "CHECKSUM_MISMATCH", message: expect.not.stringContaining("undo:") });
+      expect(node.sim.read(id, quarantine)).toBeNull();
+      expect(node.sim.read(id, "plugins/Gamma-1.0.jar")).toBeNull();
+    });
+
+    it("FILE_ORPHANED: a file that changed in quarantine and cannot be put back is reported with its quarantine path", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const written = Buffer.from("WRITTEN-BY-THE-JOB");
+      const { jobId } = await crashedUndo(t, owner, node, up, id, () => ({ steps: [{ kind: "delete", path: "plugins/Gamma-1.0.jar", sha512: sha512(written) }] }));
+      node.sim.put(id, "plugins/Gamma-1.0.jar", written);
+      node.sim.options = {
+        before: {
+          // The file changes on its way into quarantine, and its old name is taken before it can go back.
+          "fs.rename": (p) => {
+            if (String(p.to).endsWith(".delete")) node.sim.put(id, "plugins/Gamma-1.0.jar", "CHANGED-IN-FLIGHT");
+          },
+          "fs.hash": (p) => {
+            const q = (p.paths as string[])[0]!;
+            if (q.endsWith(".delete") && node.sim.read(id, q) !== null && node.sim.read(id, "plugins/Gamma-1.0.jar") === null) node.sim.put(id, "plugins/Gamma-1.0.jar", "OCCUPIER");
+          },
+        },
+      };
+      await t.ctx.jobs.start();
+      const row = await t.ctx.jobs.waitForCompletion(jobId);
+      node.sim.options = {};
+      expect(row.status).toBe("failed");
+      const quarantined = [...node.sim.files(id).keys()].filter((k) => k.endsWith(".delete"));
+      expect(quarantined).toHaveLength(1);
+      expect(node.sim.read(id, quarantined[0]!)).toBe("CHANGED-IN-FLIGHT");
+      expect((row.error as { message: string }).message).toContain(`it is at ${quarantined[0]}`);
+      const { rows } = await testPool().query("SELECT error FROM extension_history WHERE job_id = $1", [jobId]);
+      expect(rows).toHaveLength(0); // no history entries recorded for this crafted record: the job error carries it
+    });
+
+    it("resume after a restore that completed but was not recorded: one failed row, jar in place, nothing left in the keep area", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      const original = pluginJar("Gamma", "0.9-local");
+      node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const { jobId, keptPath } = await crashedUndo(t, owner, node, up, id, ({ entryId, keptPath }) => ({
+        steps: [{ kind: "restore", kept: keptPath, sha512: sha512(original), path: "plugins/Gamma-1.0.jar", entryId }],
+        entries: [entryOf(entryId, keptPath, sha512(original))],
+      }));
+      // The rename already happened: the jar is at its place, the keep path is gone.
+      node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+      await t.ctx.jobs.start();
+      const row = await t.ctx.jobs.waitForCompletion(jobId);
+      expect(row.status).toBe("failed");
+      expect(row.error).toMatchObject({ code: "CHECKSUM_MISMATCH", message: expect.not.stringContaining("KEPT") });
+      expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
+      expect(node.sim.read(id, keptPath)).toBeNull();
+      const rows = (await testPool().query("SELECT status, kept_path FROM extension_history WHERE job_id = $1", [jobId])).rows;
+      expect(rows).toEqual([{ status: "failed", kept_path: null }]);
+    });
+  });
+
+  it("round 4: enable/disable refuses a file it cannot hash (nothing renamed)", async () => {
+    const { owner, node } = await boot();
+    const id = await paperServer(owner);
+    node.sim.put(id, "plugins/custom.jar", pluginJar("Custom", "1.0"));
+    const custom = (await scanned(owner, id)).items[0]!;
+    node.sim.options = { ioErrorPaths: ["plugins/custom.jar"] };
+    const r = await owner.patch(`/servers/${id}/extensions/${custom.id}`, { enabled: false });
+    node.sim.options = {};
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error.details).toMatchObject({ reason: "hash_failed" });
+    expect(node.sim.read(id, "plugins/custom.jar")).not.toBeNull();
+    expect(node.sim.read(id, "plugins/custom.jar.disabled")).toBeNull();
   });
 });

@@ -36,6 +36,16 @@ export interface FileCtx extends SendOpts {
   serverId: string;
   nodeId: string;
   log?: (level: JobLogLevel, message: string) => Promise<void>;
+  /** Runs immediately before every `fs.rename`/`fs.delete` of the undo helpers (the fence; throws to stop). */
+  beforeMutate?: () => Promise<void>;
+}
+
+/** Thrown by the undo fence: the change may no longer touch plugin/mod files. */
+export class FenceLostError extends JobError {
+  constructor() {
+    super("FENCE_LOST", "the hold on the server was lost (or the server is no longer stopped); no further file was touched");
+    this.name = "FenceLostError";
+  }
 }
 
 /**
@@ -194,6 +204,7 @@ export async function placeVerified(d: ExtensionDeps, c: FileCtx, from: string, 
   // `fs.rename` does not create parents (a fresh server may have no plugins/ or mods/ yet).
   const dir = to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
   if (dir) await ensureDir(d.gateway, c.nodeId, c.serverId, dir, c);
+  await c.beforeMutate?.();
   try {
     await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from, to }, agentOpts(c));
   } catch (err) {
@@ -202,8 +213,10 @@ export async function placeVerified(d: ExtensionDeps, c: FileCtx, from: string, 
   }
   if ((await sha512Of(d, c, to)) === sha512) return;
   try {
+    await c.beforeMutate?.();
     await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: to, to: from }, agentOpts(c));
   } catch (e) {
+    if (e instanceof FenceLostError) throw e;
     throw new PlacementStuckError(to, from, (e as Error).message);
   }
   throw new JobError("FILE_CHANGED", `${from} changed while it was being moved to ${to}; it was moved back`);
@@ -227,6 +240,8 @@ export class PlacementStuckError extends JobError {
  */
 export async function restoreKept(d: ExtensionDeps, c: FileCtx, kept: string, expectedSha512: string | null, to: string): Promise<void> {
   const actual = await sha512Of(d, c, kept);
+  // Already done (a crash after the move, before it was recorded): the kept file is gone and `to` has its digest.
+  if (actual === null && expectedSha512 && !(await exists(d, c, kept)) && (await sha512Of(d, c, to)) === expectedSha512) return;
   if (!expectedSha512 || actual !== expectedSha512) throw new KeptFileChangedError(kept, to);
   try {
     await placeVerified(d, c, kept, to, expectedSha512);
@@ -238,24 +253,33 @@ export async function restoreKept(d: ExtensionDeps, c: FileCtx, kept: string, ex
 
 /**
  * Deletes a file this job wrote, only while it still has the digest it was written with: it is moved to
- * a private name first and verified there (else put back and refused).
+ * the quarantine path `quarantine` (journaled by the caller before this call) first and verified there
+ * (else put back and refused). Resumable: a file already in quarantine with the digest is just deleted.
  */
-export async function deleteCreated(d: ExtensionDeps, c: FileCtx, path: string, sha512: string): Promise<void> {
+export async function deleteCreated(d: ExtensionDeps, c: FileCtx, path: string, sha512: string, quarantine = `${FETCH_DIR}/${randomUUID()}.delete`): Promise<void> {
+  if ((await sha512Of(d, c, quarantine)) === sha512) {
+    await c.beforeMutate?.();
+    await deleteFile(d, c, quarantine);
+    return;
+  }
   const actual = await sha512Of(d, c, path);
   if (actual === null) return;
   if (actual !== sha512) throw new JobError("FILE_CHANGED", `${path} changed after it was written; it was not deleted`);
   await ensureDir(d.gateway, c.nodeId, c.serverId, FETCH_DIR, c);
-  const doomed = `${FETCH_DIR}/${randomUUID()}.delete`;
-  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: doomed }, agentOpts(c));
-  if ((await sha512Of(d, c, doomed)) !== sha512) {
+  await c.beforeMutate?.();
+  await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: quarantine }, agentOpts(c));
+  if ((await sha512Of(d, c, quarantine)) !== sha512) {
     try {
-      await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: doomed, to: path }, agentOpts(c));
+      await c.beforeMutate?.();
+      await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: quarantine, to: path }, agentOpts(c));
     } catch (e) {
-      throw new JobError("FILE_ORPHANED", `${path} changed while it was being removed and could not be put back (${(e as Error).message}); it is at ${doomed}`);
+      if (e instanceof FenceLostError) throw e;
+      throw new JobError("FILE_ORPHANED", `${path} changed while it was being removed and could not be put back (${(e as Error).message}); it is at ${quarantine}`);
     }
     throw new JobError("FILE_CHANGED", `${path} changed while it was being removed; it was put back, not deleted`);
   }
-  await deleteFile(d, c, doomed);
+  await c.beforeMutate?.();
+  await deleteFile(d, c, quarantine);
 }
 
 /** `artifact.fetch` of a Modrinth file (CDN host re-checked, SHA-512 verified by the agent). */
@@ -364,7 +388,7 @@ export async function writeHistory(
  * One reversible file operation: `delete` removes a file this change wrote (while it has `sha512`),
  * `restore` moves `kept` back to `path` (while it has `sha512`; also used to move a placed file back).
  */
-export type UndoStep = { kind: "delete"; path: string; sha512: string } | { kind: "restore"; kept: string; sha512: string; path: string; entryId?: string };
+export type UndoStep = { kind: "delete"; path: string; sha512: string; quarantine?: string } | { kind: "restore"; kept: string; sha512: string; path: string; entryId?: string };
 
 /**
  * The durable undo record of one change: every reversible step from the moment it happened, the history
@@ -380,6 +404,8 @@ export interface UndoLog {
   done: number[];
   failed: number[];
   notes: string[];
+  /** Token of the cleanup hold, recorded before it is taken (re-adopted after a crash, released by finalize). */
+  cleanupToken?: string | null;
 }
 
 export interface UndoStore {
@@ -395,6 +421,14 @@ export function memoryUndo(): UndoStore {
 }
 
 const sameStep = (a: UndoStep, b: UndoStep) => a.kind === b.kind && a.path === b.path && a.sha512 === b.sha512 && (a.kind !== "restore" || (b.kind === "restore" && a.kept === b.kept));
+
+/** Cleanup hold tokens recorded in a job's undo records (`ctx.state.undo`), for finalize to release. */
+export function recordedCleanupTokens(state: Record<string, unknown>): string[] {
+  const all = (state.undo as Record<string, UndoLog> | undefined) ?? {};
+  return Object.values(all)
+    .map((l) => l?.cleanupToken)
+    .filter((t): t is string => typeof t === "string");
+}
 
 /** Records a step (once) and persists the record. */
 export async function pushUndo(store: UndoStore, step: UndoStep): Promise<void> {
@@ -413,36 +447,62 @@ export async function upsertEntry(store: UndoStore, entry: PendingEntry): Promis
   await store.save();
 }
 
-async function runStep(d: ExtensionDeps, c: FileCtx, s: UndoStep): Promise<void> {
-  if (s.kind === "delete") await deleteCreated(d, c, s.path, s.sha512);
-  else await restoreKept(d, c, s.kept, s.sha512, s.path);
+async function runStep(d: ExtensionDeps, c: FileCtx, store: UndoStore, s: UndoStep): Promise<void> {
+  if (s.kind === "delete") {
+    if (!s.quarantine) {
+      // Journaled before the rename: a crash between the rename and the delete is resumed from here.
+      s.quarantine = `${FETCH_DIR}/${randomUUID()}.delete`;
+      await store.save();
+    }
+    await deleteCreated(d, c, s.path, s.sha512, s.quarantine);
+  } else await restoreKept(d, c, s.kept, s.sha512, s.path);
 }
+
+const describeStep = (s: UndoStep) => (s.kind === "delete" ? `removed ${s.path}` : `moved ${s.kept} back to ${s.path}`);
 
 /**
  * Runs the recorded undo — fenced. While the change still holds its lock (`stillHeld`) it undoes under
- * it; after a pre-emption it may only touch plugin/mod files under a new cleanup hold (`lockForCleanup`:
- * no other operation, server stopped or crashed). Without one — or if the hold is lost midway — nothing
- * (more) is touched and the result is `skipped`. Steps run newest first, once each (progress persisted).
+ * it; otherwise (pre-empted before or during the undo) it may only touch plugin/mod files under a cleanup
+ * hold (`lockForCleanup`: no other operation, server stopped; the token is recorded first so a crash can
+ * re-adopt it). The fence is re-checked immediately before every rename/delete; when it fails nothing more
+ * is touched and the result is `skipped`. Steps run newest first, once each (progress persisted).
  */
 export async function fencedUndo(d: ExtensionDeps, c: FileCtx, store: UndoStore, stillHeld: () => Promise<boolean>): Promise<{ skipped: boolean; preempted: boolean }> {
   const log = store.log;
-  let held = stillHeld;
   let token: string | null = null;
   let preempted = false;
-  if (!(await stillHeld())) {
+  const takeCleanup = async (): Promise<boolean> => {
     preempted = true;
-    token = await d.state.lockForCleanup(c.serverId);
-    if (!token) return { skipped: true, preempted };
-    const t = token;
-    held = () => d.state.holdsToken(c.serverId, t);
-  }
+    if (!log.cleanupToken) {
+      log.cleanupToken = randomUUID();
+      await store.save();
+    }
+    if (await d.state.lockForCleanup(c.serverId, log.cleanupToken)) {
+      token = log.cleanupToken;
+      return true;
+    }
+    log.cleanupToken = null;
+    await store.save();
+    return false;
+  };
+  const fence = async (): Promise<boolean> => (token ? d.state.cleanupHeld(c.serverId, token) : stillHeld());
+  const fenced: FileCtx = {
+    ...c,
+    beforeMutate: async () => {
+      if (!(await fence())) throw new FenceLostError();
+    },
+  };
   try {
+    // An interrupted cleanup (recorded token) or a lost lock: work only under a cleanup hold.
+    if ((log.cleanupToken || !(await stillHeld())) && !(await takeCleanup())) return { skipped: true, preempted };
     for (let i = log.steps.length - 1; i >= 0; i--) {
       if (log.done.includes(i)) continue;
-      if (!(await held())) return { skipped: true, preempted: true };
+      // The job lost its own lock between steps: switch to a cleanup hold (stopped servers only).
+      if (!(await fence()) && (token || !(await takeCleanup()))) return { skipped: true, preempted: true };
       try {
-        await runStep(d, c, log.steps[i]!);
+        await runStep(d, fenced, store, log.steps[i]!);
       } catch (e) {
+        if (e instanceof FenceLostError) return { skipped: true, preempted: true };
         log.failed.push(i);
         log.notes.push((e as Error).message);
         await c.log?.("error", `Undo failed for ${log.steps[i]!.path}: ${(e as Error).message}`);
@@ -452,30 +512,37 @@ export async function fencedUndo(d: ExtensionDeps, c: FileCtx, store: UndoStore,
     }
     return { skipped: false, preempted };
   } finally {
-    if (token) await d.state.unlock(c.serverId, token);
+    if (token) {
+      await d.state.unlock(c.serverId, token);
+      log.cleanupToken = null;
+      await store.save();
+    }
   }
 }
 
 /**
  * Turns a fenced undo's outcome into the failure record: entries whose kept file did not go back keep
- * `keptPath`/`keptSha512`; when the undo was skipped the error lists every kept file and every file the
- * change wrote (path + SHA-512) so an operator can put things right from the history.
+ * `keptPath`/`keptSha512`; when the undo was skipped the error lists exactly which undo steps ran, every
+ * kept file and every file the change wrote (path + SHA-512) so an operator can put things right.
  */
 export function describeUndo(log: UndoLog, outcome: { skipped: boolean }): { message: string; code: string } {
   const error = log.error ?? { code: "FAILED", message: "the change failed" };
   const notDone = (i: number) => !log.done.includes(i) || log.failed.includes(i);
   log.steps.forEach((s, i) => {
-    if (s.kind === "restore" && s.entryId && notDone(i)) {
+    if (s.kind === "restore" && s.entryId) {
       const e = log.entries.find((x) => x.id === s.entryId);
-      if (e) e.leftInKeep = true;
+      if (e && notDone(i)) e.leftInKeep = true;
+      else if (e && s.kept === e.keptPath) e.leftInKeep = false;
     }
   });
   if (outcome.skipped) {
+    const ran = log.steps.filter((_, i) => !notDone(i)).map(describeStep);
     const left = log.steps.filter((_, i) => notDone(i));
     const kept = left.filter((s) => s.kind === "restore").map((s) => `${(s as { kept: string }).kept} (was ${s.path}, sha512 ${s.sha512})`);
-    const written = left.filter((s) => s.kind === "delete").map((s) => `${s.path} (sha512 ${s.sha512})`);
+    const written = left.filter((s) => s.kind === "delete").map((s) => `${s.path} (sha512 ${s.sha512}${(s as { quarantine?: string }).quarantine ? `, possibly at ${(s as { quarantine?: string }).quarantine}` : ""})`);
     const message =
-      `${error.message}; undo skipped: another operation holds the server or it is not stopped, so no file was touched` +
+      `${error.message}; undo skipped: another operation holds the server or it is not stopped, so ` +
+      (ran.length ? `only these undo steps ran: ${ran.join(", ")}` : "no file was touched") +
       (kept.length ? `; kept files: ${kept.join(", ")}` : "") +
       (written.length ? `; files written by this change: ${written.join(", ")}` : "") +
       (log.notes.length ? `; undo: ${log.notes.join("; ")}` : "");
