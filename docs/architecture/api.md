@@ -270,7 +270,12 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   routes (same 24 h replay, 409 `CONFLICT` with `details.reason` `in_progress` / `key_reused`). Upload
   completion is idempotent per `uploadId` once it has succeeded (refusals may be retried with other flags). One extension job per server at a time (409 `CONFLICT`,
   `details.reason: "extension_job_running"`); none while the server is provisioning, reinstalling, restoring,
-  migrating or deleting (409 `INVALID_STATE`).
+  migrating or deleting (409 `INVALID_STATE`). Everything that changes the server's files (install, apply updates,
+  rollback jobs; enable/disable, remove, upload completion) holds the server operation lock as
+  `activeOperation: "extensions"` (no state change) for its whole duration: backup, restore, reinstall, delete and
+  power actions answer the usual 409 `INVALID_STATE` meanwhile, and no extension change starts while another
+  operation runs. Undo and rollback move a kept jar back only while its SHA-512 is still the one taken right after
+  it was kept, never overwrite an existing file and delete only files the job wrote.
 * **`restartRequired`** is true whenever the server is not `stopped`/`crashed`: plugins and mods load only at
   start; BlockForge never hot-reloads (`/reload`) and never restarts the server on its own.
 * **Uploads.** `POST …/uploads` (refused with 422 `uploads_disabled` when `extensions.uploads.allowed` is false)
