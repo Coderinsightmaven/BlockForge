@@ -69,8 +69,8 @@ describe.each(formats)("captured %s console lines", (_name, lines) => {
     expect(parseWhitelistListOutput(lines)).toEqual({ format: "vanilla", players: [], skipped: 0 });
     const fb = lines.map((l) => parseCommandFeedback(l)).filter((x) => x !== null);
     expect(fb).toEqual([
-      { action: "player", ok: false, message: "That player does not exist" },
-      { action: "player", ok: false, message: "No player was found" },
+      { action: "player", ok: false, target: null, message: "That player does not exist" },
+      { action: "player", ok: false, target: null, message: "No player was found" },
     ]);
   });
 

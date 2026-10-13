@@ -67,6 +67,14 @@ export function sanitizeAgentError(e: { code: string; message: string; retryable
   return { code: e.code, message, retryable: e.retryable, ...(details !== undefined ? { details } : {}) };
 }
 
+/**
+ * Where a command failed: `not_sent` — refused by the control plane before the frame went out (the
+ * agent never saw it); `agent_error` — the agent answered with an error result; `bad_result` — the
+ * agent answered ok but the result violates the contract (the handler ran). Undefined: in flight
+ * (timeout, disconnect, cancel after dispatch) — the agent may or may not have executed it.
+ */
+export type AgentErrorStage = "not_sent" | "agent_error" | "bad_result";
+
 /** Error from a command dispatch: agent error codes plus gateway-side conditions. */
 export class AgentCommandError extends Error {
   constructor(
@@ -74,6 +82,7 @@ export class AgentCommandError extends Error {
     message: string,
     readonly retryable: boolean,
     readonly details?: unknown,
+    readonly stage?: AgentErrorStage,
   ) {
     super(message);
     this.name = "AgentCommandError";
@@ -187,6 +196,12 @@ export interface GatewayEvents {
   sessionReady: [nodeId: string];
   sessionClosed: [nodeId: string];
   nodeMetrics: [nodeId: string];
+  /**
+   * A line is about to be typed into a workload's console (`workload.console`, any sender: console
+   * route, scheduled commands, backups, player actions). Lets the player actions tell whether another
+   * command may be answering on the same console.
+   */
+  consoleCommand: [serverId: string, commandId: string, line: string];
 }
 
 export interface GatewayDeps {
@@ -548,7 +563,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
       if (!parsed.success) {
         const error = { code: "VALIDATION_FAILED", message: "agent returned a result that does not match the contract", retryable: false };
         await this.persistOutcome(frame.id, "failed", error);
-        pending.reject(new AgentCommandError(error.code, error.message, false, zodDetails(parsed.error)));
+        pending.reject(new AgentCommandError(error.code, error.message, false, zodDetails(parsed.error), "bad_result"));
         return;
       }
       await this.persistOutcome(frame.id, "succeeded", null);
@@ -556,7 +571,7 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     } else {
       const e = sanitizeAgentError(frame.error);
       await this.persistOutcome(frame.id, e.code === "COMMAND_REJECTED" ? "rejected" : "failed", e);
-      pending.reject(new AgentCommandError(e.code, e.message, e.retryable, e.details));
+      pending.reject(new AgentCommandError(e.code, e.message, e.retryable, e.details, "agent_error"));
     }
   }
 
@@ -692,18 +707,18 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     opts: SendOptions = {},
   ): Promise<CommandResult<T>> {
     const rt = this.tracker.get(nodeId);
-    if (!rt) throw new AgentCommandError("NOT_FOUND", "unknown node", false);
+    if (!rt) throw new AgentCommandError("NOT_FOUND", "unknown node", false, undefined, "not_sent");
     if (rt.status === "revoked" || rt.status === "disabled") {
-      throw new AgentCommandError("NODE_UNAVAILABLE", `node is ${rt.status}`, false);
+      throw new AgentCommandError("NODE_UNAVAILABLE", `node is ${rt.status}`, false, undefined, "not_sent");
     }
     if (rt.status === "pending" && type !== "node.facts") {
-      throw new AgentCommandError("NODE_UNAVAILABLE", "node is awaiting approval; only node.facts is allowed", false);
+      throw new AgentCommandError("NODE_UNAVAILABLE", "node is awaiting approval; only node.facts is allowed", false, undefined, "not_sent");
     }
     const session = this.sessions.get(nodeId);
-    if (!session?.ready || session.closing) throw new AgentCommandError("NODE_UNAVAILABLE", "node is not connected", true);
+    if (!session?.ready || session.closing) throw new AgentCommandError("NODE_UNAVAILABLE", "node is not connected", true, undefined, "not_sent");
     const parsed = AGENT_COMMANDS[type].payload.safeParse(payload);
     if (!parsed.success) {
-      throw new AgentCommandError("VALIDATION_FAILED", "invalid command payload", false, zodDetails(parsed.error));
+      throw new AgentCommandError("VALIDATION_FAILED", "invalid command payload", false, zodDetails(parsed.error), "not_sent");
     }
     // The signed lifetime (how long the agent may start executing it) is capped at 15 min; the result
     // wait may be longer for commands that run long once started (install containers).
@@ -723,13 +738,17 @@ export class AgentGateway extends EventEmitter<GatewayEvents> {
     });
     if (opts.signal?.aborted) {
       await this.persistOutcome(cmd.id, "failed", { code: "CANCELLED", message: "cancelled before dispatch", retryable: false });
-      throw new AgentCommandError("CANCELLED", "command cancelled", false);
+      throw new AgentCommandError("CANCELLED", "command cancelled", false, undefined, "not_sent");
+    }
+    if (type === "workload.console") {
+      const c = parsed.data as CommandPayload<"workload.console">;
+      this.emit("consoleCommand", c.workloadId, cmd.id, c.line);
     }
 
     return new Promise<CommandResult<T>>((resolve, reject) => {
       if (session.closed || session.closing) {
         void this.persistOutcome(cmd.id, "failed", { code: "DISCONNECTED", message: "node disconnected", retryable: true });
-        reject(new AgentCommandError("NODE_UNAVAILABLE", "node disconnected", true));
+        reject(new AgentCommandError("NODE_UNAVAILABLE", "node disconnected", true, undefined, "not_sent"));
         return;
       }
       const onAbort = () => {

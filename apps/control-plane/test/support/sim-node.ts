@@ -58,6 +58,8 @@ export interface SimOptions {
   ioErrorPaths?: string[];
   /** Raw console lines the server prints in answer to an exact command line (`list uuids`, `op Steve`, …). */
   consoleReplies?: Record<string, string[]>;
+  /** Delay before `consoleReplies` are printed (default 5 ms; per command line or for all); lets tests overlap concurrent commands. */
+  consoleReplyDelayMs?: number | Record<string, number>;
   /** Offset of the agent's clock in console line timestamps (clock skew between node and control plane). */
   clockSkewMs?: number;
   /** What `workload.logs.tail` returns (the agent's ring buffer / Docker logs). */
@@ -348,7 +350,7 @@ export class SimNode {
       const out = (msg: string) =>
         this.agent.trySend({ t: "logs", workloadId: id, lines: [{ ts: Date.now() + (this.options.clockSkewMs ?? 0), stream: "stdout", line: `[12:00:00 INFO]: ${msg}` }] });
       const replies = this.options.consoleReplies?.[line];
-      if (replies?.length) setTimeout(() => this.agent.trySend({ t: "logs", workloadId: id, lines: replies.map((l) => ({ ts: Date.now(), stream: "stdout", line: l })) }), 5);
+      if (replies?.length) setTimeout(() => this.agent.trySend({ t: "logs", workloadId: id, lines: replies.map((l) => ({ ts: Date.now(), stream: "stdout", line: l })) }), (typeof this.options.consoleReplyDelayMs === "number" ? this.options.consoleReplyDelayMs : this.options.consoleReplyDelayMs?.[line]) ?? 5);
       if (line === "save-off" && this.options.saveOffConfirm !== false) setTimeout(() => out("Automatic saving is now disabled"), 5);
       if (line === "save-on" && this.options.saveOnConfirm !== false) setTimeout(() => out("Automatic saving is now enabled"), 5);
       if (line === "save-all flush") {

@@ -66,6 +66,61 @@ export const playerCommands = {
 
 export type PlayerCommandName = keyof typeof playerCommands;
 
+/** The (action, target) a console command line acts on, in the terms of `CommandFeedback`. */
+export interface PlayerCommandTarget {
+  action: Extract<CommandFeedback, { ok: true }>["action"];
+  /**
+   * Lowercase player name, the normalised IP for `ban-ip`/`pardon-ip` with a literal address, or
+   * `PLAYER_COMMAND_ANY_TARGET` when the feedback could name anyone (selectors, UUIDs, `ban-ip <name>`
+   * — vanilla resolves an online player's name to their IP —, missing or unparsable arguments).
+   */
+  target: string;
+}
+
+/** Target wildcard of `parsePlayerCommand`: the command's feedback may name any player or address. */
+export const PLAYER_COMMAND_ANY_TARGET = "*";
+
+/** A Brigadier word or quoted string (`"Steve"`, `'Steve'`) holding a valid player name, lowercased; else null. */
+function plainName(w: string | undefined): string | null {
+  if (w === undefined) return null;
+  const q = /^(["'])(.*)\1$/.exec(w);
+  const v = q ? q[2]! : w;
+  return isValidPlayerName(v) ? v.toLowerCase() : null;
+}
+
+/**
+ * Recognises a vanilla player command typed into the console (`op Steve`, `/minecraft:ban Steve x`,
+ * `whitelist add Steve`, `ban-ip 1.2.3.4`, …): whenever the verb (after an optional `/` and
+ * `minecraft:`, case-insensitive) is a player action, the action is returned, with the canonical
+ * target or `PLAYER_COMMAND_ANY_TARGET` (see `PlayerCommandTarget.target`). Null for every other
+ * command (`say`, `list`, `whitelist on`, plugin commands, `execute … run op …`). Used to tell whether
+ * two console commands could print the same feedback line; an unrecognised command that prints
+ * vanilla-identical feedback (a plugin command, `execute … run …`) could still collide.
+ */
+export function parsePlayerCommand(line: string): PlayerCommandTarget | null {
+  const words = line.trim().replace(/^\//, "").split(/\s+/);
+  const cmd = (words[0] ?? "").toLowerCase().replace(/^minecraft:/, "");
+  const ANY = PLAYER_COMMAND_ANY_TARGET;
+  switch (cmd) {
+    case "op":
+    case "deop":
+    case "ban":
+    case "pardon":
+    case "kick":
+      return { action: cmd, target: plainName(words[1]) ?? ANY };
+    case "whitelist": {
+      const sub = (words[1] ?? "").toLowerCase();
+      if (sub !== "add" && sub !== "remove") return null;
+      return { action: sub === "add" ? "whitelist.add" : "whitelist.remove", target: plainName(words[2]) ?? ANY };
+    }
+    case "ban-ip":
+    case "pardon-ip":
+      return { action: cmd, target: (words[1] === undefined ? null : normalizeIp(words[1])) ?? ANY };
+    default:
+      return null;
+  }
+}
+
 /** Which builders apply to a server software (Velocity has no built-in ban/whitelist/op). */
 export function supportedPlayerCommands(software: ServerSoftware): PlayerCommandName[] {
   if (software === "velocity") return ["glistAll"];
@@ -223,7 +278,19 @@ export type CommandFeedback =
       /** The server message (untrusted console text, prefix removed). */
       message: string;
     }
-  | { action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "player"; ok: false; message: string };
+  | {
+      action: "whitelist.add" | "whitelist.remove" | "op" | "deop" | "ban" | "pardon" | "ban-ip" | "pardon-ip" | "kick" | "player";
+      ok: false;
+      /**
+       * The player the failure names (1.12.2 `Could not op %s` …), or null when the message names
+       * nobody (26.3 `Nothing changed. The player is already an operator`, `No player was found`, …).
+       * A target-less failure cannot be attributed to one command: callers must only accept it when
+       * no other command can be answering on that console at the same time, and never in preference
+       * to a later line that names the target (a batch of commands may print both).
+       */
+      target: string | null;
+      message: string;
+    };
 
 type Rule = [RegExp, (m: RegExpExecArray, msg: string) => CommandFeedback | null];
 
@@ -236,34 +303,55 @@ const ok = (action: Extract<CommandFeedback, { ok: true }>["action"], target: st
   }
   return isValidPlayerName(target) ? { action, ok: true, target, reason, message: "" } : null;
 };
-const fail = (action: Extract<CommandFeedback, { ok: false }>["action"]) => (_m: RegExpExecArray, msg: string): CommandFeedback => ({ action, ok: false, message: msg });
+/**
+ * Failure feedback. When the message names a player (capture group 1, 1.12.2 wording) it must be a
+ * valid player name (otherwise the line is not recognised); messages without a name have `target: null`.
+ */
+const fail =
+  (action: Extract<CommandFeedback, { ok: false }>["action"]) =>
+  (m: RegExpExecArray, msg: string): CommandFeedback | null => {
+    const named = m[1];
+    if (named === undefined) return { action, ok: false, target: null, message: msg };
+    return isValidPlayerName(named) ? { action, ok: false, target: named, message: msg } : null;
+  };
 
-/** Success/failure strings of 26.3 (`en_us.json`) and 1.12.2 (`en_us.lang`). */
+/**
+ * Success/failure strings of 26.3 (`en_us.json`) and 1.12.2 (`en_us.lang`). Successes always name
+ * their target; failures name it only in the 1.12.2 wording (capture group 1 of a failure rule).
+ */
 const FEEDBACK: Rule[] = [
   [/^Added (\S+) to the whitelist$/, (m) => ok("whitelist.add", m[1]!)],
   [/^Removed (\S+) from the whitelist$/, (m) => ok("whitelist.remove", m[1]!)],
-  [/^(?:Player is already whitelisted|Could not add \S+ to the whitelist)$/, fail("whitelist.add")],
-  [/^(?:Player is not whitelisted|Could not remove \S+ from the whitelist)$/, fail("whitelist.remove")],
+  [/^(?:Player is already whitelisted|Could not add (\S+) to the whitelist)$/, fail("whitelist.add")],
+  [/^(?:Player is not whitelisted|Could not remove (\S+) from the whitelist)$/, fail("whitelist.remove")],
   [/^(?:Made (\S+) a server operator|Opped (\S+))$/, (m) => ok("op", (m[1] ?? m[2])!)],
   [/^(?:Made (\S+) no longer a server operator|De-opped (\S+))$/, (m) => ok("deop", (m[1] ?? m[2])!)],
-  [/^(?:Nothing changed\. The player is already an operator|Could not op \S+)$/, fail("op")],
-  [/^(?:Nothing changed\. The player is not an operator|Could not de-op \S+)$/, fail("deop")],
+  [/^(?:Nothing changed\. The player is already an operator|Could not op (\S+))$/, fail("op")],
+  [/^(?:Nothing changed\. The player is not an operator|Could not de-op (\S+))$/, fail("deop")],
   [/^Banned IP (\S+): (.*)$/, (m) => ok("ban-ip", m[1]!, m[2]!)],
   [/^Banned IP address (\S+)(?: belonging to .*)?$/, (m) => ok("ban-ip", m[1]!)],
   [/^Banned (\S+): (.*)$/, (m) => ok("ban", m[1]!, m[2]!)],
   [/^Banned player (\S+)$/, (m) => ok("ban", m[1]!)],
-  [/^(?:Nothing changed\. The player is already banned|Could not ban player \S+)$/, fail("ban")],
+  [/^(?:Nothing changed\. The player is already banned|Could not ban player (\S+))$/, fail("ban")],
   [/^Unbanned IP(?: address)? (\S+)$/, (m) => ok("pardon-ip", m[1]!)],
   [/^Unbanned(?: player)? (\S+)$/, (m) => ok("pardon", m[1]!)],
-  [/^(?:Nothing changed\. The player isn't banned|Could not unban player \S+)$/, fail("pardon")],
+  [/^(?:Nothing changed\. The player isn't banned|Could not unban player (\S+))$/, fail("pardon")],
   [/^(?:Nothing changed\. That IP is already banned|Invalid IP address or unknown player|You have entered an invalid IP address or a player that is not online)$/, fail("ban-ip")],
   [/^(?:Nothing changed\. That IP isn't banned|Invalid IP address|You have entered an invalid IP address)$/, fail("pardon-ip")],
   [/^Kicked (\S+): (.*)$/, (m) => ok("kick", m[1]!, m[2]!)],
   [/^Kicked (\S+) from the game(?:: '(.*)')?$/, (m) => ok("kick", m[1]!, m[2] ?? null)],
+  // 26.3 `commands.kick.owner.failed` / `.singleplayer.failed` (integrated server only; target-less).
+  [/^(?:Cannot kick the server owner in a LAN game|Cannot kick in an offline singleplayer game)$/, fail("kick")],
   [/^(?:That player does not exist|No player was found)$/, fail("player")],
 ];
 
 /**
+ * Only feedback of commands typed into the server console is logged as such. A command a player
+ * (or an RCON client) runs is answered to that source only; on success the server additionally
+ * logs the op broadcast `chat.type.admin` "[%s: %s]" (e.g. `[Steve: Made Alex a server operator]`,
+ * 26.3: `System chat: [Steve: …]`), which does not match any rule here, and failures of such
+ * commands are not logged at all. Console feedback therefore always comes from a console command.
+ *
  * Interprets one console line printed in response to a player command; null if unrelated, not
  * attributable to the server (see `commandFeedbackMessage`), or when the captured target is not a
  * valid player name / IPv4 address (e.g. a forged `Made @a a server operator`).

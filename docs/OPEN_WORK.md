@@ -27,20 +27,26 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
 - **Round 2 (Grok) on these fixes — fixed:** blocker B1 (failed finalize pinned the lock), majors 2–5 (pre-emption,
   journaled digests, kept files always recorded, verify-after-move) and minors 6–11; rounds 3–4 (fenced undo on
   stopped servers only, resumable undo records and cleanup holds); see the review record.
-- **High 4:** player action feedback accepts target-less failure lines from other commands. Require the target, else 504
-  `no_feedback`.
+- ~~**High 4:** player action feedback accepts target-less failure lines from other commands.~~ Fixed (Grok round 2
+  design, rounds 3–6): a line naming the target decides at once unless a command of the same action that could name
+  that target overlapped ours (same target, or a wildcard: selectors, UUIDs, `ban-ip <name>`, invalid arguments make
+  every command of that action ambiguous for the 60 s linger — after a console `kick @a` every kick is a 504 for 60 s
+  by design); target-less lines only at the end of the window, when they are the
+  only feedback and no other console command was possibly answering during the wait (60 s for foreign sends, `save-all`
+  until saved); otherwise 504 `no_feedback`. Target-less 26.3 failures now take the full feedback window.
 - **Major 5 — fixed:** apply is idempotent (job-derived history ids and keep names, a checkpointed journal, history
   written in the step's completing transaction via the new `ctx.checkpoint`).
 - **Major 6 — fixed:** remove/upload-replace store the digest of the file actually kept.
 - **Medium 7 — fixed:** history stores the username; migration 0006 rewrites stored e-mail addresses.
-- **Medium 8:** Mojang 429 ignores `Retry-After`; no shared Mojang limiter. This touches `packages/minecraft` and the
-  control plane.
+- ~~**Medium 8:** Mojang 429 ignores `Retry-After`; no shared Mojang limiter.~~ Fixed: `Retry-After` (seconds or
+  HTTP-date, clamped to 15 min, 60 s fallback) and one process-wide `MojangRateLimiter` for every control-plane lookup
+  (re-checks block and window after every sleep, round 2).
 - **Low L1–L7:**
-  - realtime revocation lag (30 s);
+  - ~~realtime revocation lag (30 s)~~ fixed: role bindings re-read at delivery (1 s cache);
   - `fs.hash` batch length unchecked — fixed;
   - lock check-then-act in synchronous ops — fixed;
   - keep pruning without a prefix check — fixed;
-  - unaudited op/deop 403;
+  - ~~unaudited op/deop 403~~ fixed: audited as `authz.denied`;
   - the first scan hides `agent_outdated` — fixed;
   - `artifact.fetch` missing from the capability check — fixed.
 
@@ -49,8 +55,13 @@ All reproduced by the reviewer; fixed items are marked (tests in `extensions-rev
   `unknown` with a Modrinth ref; decide and align the code or the contract.
 - Two copies of the same plugin or mod (e.g. a file-manager copy) are not flagged. Add a compatibility problem;
   Paper refuses ambiguous plugin names.
-- Control-plane test "searches and shows projects … maps rate limits to 429" failed once in a full parallel run after
-  the rate-limiter change (7486da7). It passes in isolation. Make it deterministic (inject clock/sleep into the limiter).
+- ~~Control-plane test "searches and shows projects … maps rate limits to 429" failed once in a full parallel run after
+  the rate-limiter change (7486da7).~~ Fixed: the test injects the limiter clock/sleep (fixed clock, no real waits) and
+  now also asserts the exact 60 s window and that nothing slept; two full parallel runs green.
+- Control-plane test `schedules.int.test.ts` is flaky at a `*/5` minute boundary: `scheduler.tick` claims every due
+  row in the shared test database, so when the suite reaches that test on a 5-minute mark `tick()` sees schedules
+  from other cases (4 due rows instead of 1). Seen once in a full run (Grok review, 2026-10-13); passes on re-run.
+  Fix: inject the scheduler clock or scope `tick()` to the test's schedules.
 
 ### 1.3 Not yet verified live
 - Player sessions and live join/leave with a real Minecraft client (no client on the LAN test so far).

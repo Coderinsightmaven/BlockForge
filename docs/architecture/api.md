@@ -335,7 +335,17 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   UI may offer for the current software and state (empty for Velocity).
 * **Actions.** Running server → library console command (validated name/IPv4, sanitised single-line reason
   ≤ 200), sent with `workload.console`, then the server's own feedback line is awaited (≤ 5 s) →
-  `applied: "console"` with `feedback`. Stopped server → atomic JSON/properties edit with `ifMatchSha256`
+  `applied: "console"` with `feedback`. A line naming the requested target decides at once, unless another
+  console command of the same action that could name the same target overlapped ours (then 504): same target,
+  or a wildcard — selectors, UUIDs, `ban-ip <name>` or invalid arguments make every command of that action
+  ambiguous while they may still answer (60 s), so e.g. after a console `kick @a` every `kick` is a 504 for
+  60 s by design. Unrecognised commands (`say`, plugin commands, `execute … run …`) don't count. If the console
+  send itself fails, the agent error is returned — except that feedback attributed before an error that leaves
+  open whether the line was typed (timeout, disconnect, runtime error) is still the result. Lines that name
+  nobody (26.3 `Nothing changed. …`, `No player was found`, whitelist toggles) are only accepted at the end
+  of the window, when they are the only feedback seen and no other console command (console route,
+  schedules, backups' `save-all`, other player actions) was possibly answering meanwhile; otherwise 504
+  `no_feedback`. Stopped server → atomic JSON/properties edit with `ifMatchSha256`
   (UUID from Mojang in online mode, offline UUID otherwise) → `applied: "file"` with a fresh `overview`.
   Errors: `kick`/`whitelist-reload` on a stopped server, or `expiresAt`/`op.level`/`op.bypassesPlayerLimit`
   on a running one (vanilla commands cannot express them) → 409 `INVALID_STATE` (`details.reason`

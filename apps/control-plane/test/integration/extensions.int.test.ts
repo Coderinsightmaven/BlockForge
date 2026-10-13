@@ -43,8 +43,11 @@ const sha512 = (b: Buffer) => createHash("sha512").update(b).digest("hex");
  * `realTransport`: Modrinth/Mojang go through the production `createSafeFetch` + pinned HTTPS transport
  * to a local HTTPS server (test certificate, test-only override) that serves the same fake upstreams.
  */
-async function boot(opts: { env?: Record<string, string>; realTransport?: boolean } = {}) {
+async function boot(opts: { env?: Record<string, string>; realTransport?: boolean; limiterClock?: { now: number; slept: number[] } } = {}) {
   const up = new FakeUpstreams();
+  // Deterministic rate-limit windows: the limiter's clock only moves when the limiter sleeps.
+  const clock = opts.limiterClock;
+  const limiter = clock ? { limiter: { now: () => clock.now, sleep: async (ms: number) => void ((clock.now += ms), clock.slept.push(ms)) } } : {};
   const cat = catalogOptions();
   let https: HttpsUpstream | null = null;
   if (opts.realTransport) {
@@ -56,7 +59,7 @@ async function boot(opts: { env?: Record<string, string>; realTransport?: boolea
     catalog: cat.catalog,
     env: { SCHEDULER_INTERVAL_MS: "300000", ...(opts.env ?? {}) },
     serverJobs: { readyTimeoutMs: 10_000, slpWaitMs: 0 },
-    upstream: https ? { lookup: publicLookup, testOverride: https.override } : { fetchImpl: up.fetch, lookup: publicLookup },
+    upstream: https ? { lookup: publicLookup, testOverride: https.override, ...limiter } : { fetchImpl: up.fetch, lookup: publicLookup, ...limiter },
   });
   t = r.t;
   const node = await connectSimNode(r.t, r.owner, { agents });
@@ -216,7 +219,9 @@ describe("extension scans", () => {
 
 describe("Modrinth browsing and install plans", () => {
   it("searches and shows projects (recorded Modrinth fixtures), plans with dependencies and maps rate limits to 429", async () => {
-    const { owner, up } = await boot();
+    // Injected limiter clock/sleep: no wall-clock dependence (this test once failed in a loaded parallel run).
+    const limiterClock = { now: Date.parse("2026-10-12T12:00:00Z"), slept: [] as number[] };
+    const { owner, up } = await boot({ limiterClock });
     const id = await paperServer(owner);
     const s = await owner.get(`/servers/${id}/extensions/modrinth/search?query=luckperms&limit=5`);
     expect(s.statusCode, s.body).toBe(200);
@@ -263,6 +268,9 @@ describe("Modrinth browsing and install plans", () => {
     expect(limited.json().error).toMatchObject({ code: "RATE_LIMITED", details: { upstream: "modrinth", retryAfterMs: expect.any(Number), retryAfterSeconds: expect.any(Number) } });
     expect(limited.json().error.details.retryAfterMs).toBeGreaterThan(2000);
     expect(Number(limited.headers["retry-after"])).toBeGreaterThan(2);
+    // The window is exactly Modrinth's 60 s (fixed clock), and nothing waited for real.
+    expect(limited.json().error.details.retryAfterMs).toBe(60_000);
+    expect(limiterClock.slept).toEqual([]);
   });
 });
 
