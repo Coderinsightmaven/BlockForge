@@ -67,6 +67,11 @@ export const ServerOperation = z.enum([
   "restore",
   "migrate",
   "delete",
+  /**
+   * Plugin/mod changes (install, update, rollback, remove, enable/disable, upload) hold the operation lock
+   * while they touch the server's files, without changing the lifecycle state.
+   */
+  "extensions",
 ]);
 export type ServerOperation = z.infer<typeof ServerOperation>;
 
@@ -86,6 +91,8 @@ export const OPERATION_ALLOWED_FROM: Record<ServerOperation, readonly ServerStat
   migrate: ["stopped", "crashed"],
   /** `provisioning` only once its job is no longer active (e.g. an abandoned provision). */
   delete: ["stopped", "crashed", "provision_failed", "provisioning", "unreachable"],
+  /** No state change: the server keeps running (changes take effect at the next start). */
+  extensions: ["stopped", "crashed", "running", "degraded"],
 };
 
 export function canStartOperation(

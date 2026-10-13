@@ -481,7 +481,7 @@ export class ServersService {
   /** Takes the operation lock and enqueues the job in one transaction. */
   async startOperation(
     access: ServerAccess,
-    op: Exclude<ServerOperation, "provision" | "update" | "backup" | "restore" | "migrate">,
+    op: Exclude<ServerOperation, "provision" | "update" | "backup" | "restore" | "migrate" | "extensions">,
     input: Record<string, unknown>,
     actor: AuditActor,
   ): Promise<{ jobId: string }> {

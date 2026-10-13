@@ -43,6 +43,13 @@
       "when": 1791839819677,
       "tag": "0005_phase4b",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791850779068,
+      "tag": "0006_extensions_review",
+      "breakpoints": true
     }
   ]
 }

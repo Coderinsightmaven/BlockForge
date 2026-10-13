@@ -200,6 +200,13 @@ export class JobRunner {
             await this.updateStep(row.id, { message: redactString(message).slice(0, 1000) });
             await this.publishJob(jobId);
           },
+          checkpoint: async (fn, o = {}) => {
+            await withTransaction(this.db, async (tx) => {
+              if (fn) await fn(tx);
+              await tx.update(jobs).set({ state: toJsonSafe(state) ?? {} }).where(eq(jobs.id, jobId));
+              if (o.completeStep) await tx.update(jobSteps).set({ status: "succeeded", finishedAt: new Date(this.clock.now()) }).where(eq(jobSteps.id, row.id));
+            });
+          },
         };
         let outcome: void | typeof SKIP_STEP;
         try {

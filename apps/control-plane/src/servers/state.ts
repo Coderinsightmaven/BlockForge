@@ -1,8 +1,8 @@
 import { canStartOperation, canTransition, type ServerOperation, type ServerState } from "@blockforge/contracts";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, lt } from "drizzle-orm";
 import type { Logger } from "pino";
 import type { Db, DbOrTx } from "../db/client.js";
-import { servers } from "../db/schema/index.js";
+import { jobs, servers } from "../db/schema/index.js";
 import type { AfterCommit } from "../db/tx.js";
 import type { EventBus } from "../events/bus.js";
 import type { Clock } from "../lib/clock.js";
@@ -35,6 +35,9 @@ export function transitionalStateFor(op: ServerOperation, from: ServerState): Se
       return from === "running" || from === "degraded" ? "stopping" : "restoring";
     case "migrate":
       return "migrating";
+    case "extensions":
+      // Plugin/mod changes leave the lifecycle state alone.
+      return from;
   }
 }
 
@@ -92,6 +95,59 @@ export class ServerStateService {
       .set({ activeOperation: op, state: to, updatedAt: new Date(this.clock.now()) })
       .where(eq(servers.id, serverId));
     return { row, from, to };
+  }
+
+  /**
+   * Takes the operation lock for `op` without a state change (`extensions`), inside `tx` (row locked).
+   * `jobId` null = a short synchronous change (released with `unlock`). A lock still held by a job that
+   * already ended (crash between its finalize and the release) is taken over. Throws 409 INVALID_STATE
+   * like `begin` while another operation runs or the state forbids it.
+   */
+  async lock(tx: DbOrTx, serverId: string, op: Extract<ServerOperation, "extensions">, jobId: string | null): Promise<ServerRow> {
+    const [row] = await tx.select().from(servers).where(eq(servers.id, serverId)).for("update").limit(1);
+    if (!row) throw notFound("Server");
+    const from = row.state as ServerState;
+    let active = (row.activeOperation as ServerOperation | null) ?? null;
+    if (active === op && row.activeJobId && row.activeJobId !== jobId) {
+      const [j] = await tx.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, row.activeJobId));
+      if (!j || (j.status !== "queued" && j.status !== "running")) active = null;
+    }
+    if (active === op && jobId !== null && row.activeJobId === jobId) return row;
+    if (!canStartOperation(op, from, active)) {
+      throw invalidState(active ? `Another operation (${active}) is in progress` : `Cannot change plugins/mods of a server that is ${from}`, { state: from, activeOperation: active });
+    }
+    await tx.update(servers).set({ activeOperation: op, activeJobId: jobId, updatedAt: new Date(this.clock.now()) }).where(eq(servers.id, serverId));
+    return row;
+  }
+
+  /** Releases a synchronous (`jobId` null) `lock`. */
+  async unlock(serverId: string, op: Extract<ServerOperation, "extensions">): Promise<void> {
+    const rows = await this.db
+      .update(servers)
+      .set({ activeOperation: null, updatedAt: new Date(this.clock.now()) })
+      .where(and(eq(servers.id, serverId), eq(servers.activeOperation, op), isNull(servers.activeJobId)))
+      .returning({ id: servers.id });
+    if (rows.length) this.notify(serverId);
+  }
+
+  /** True while `jobId` holds the server's operation lock for `op` (re-checked by long jobs at every step). */
+  async holds(serverId: string, op: ServerOperation, jobId: string): Promise<boolean> {
+    const [row] = await this.db.select({ op: servers.activeOperation, job: servers.activeJobId }).from(servers).where(eq(servers.id, serverId));
+    return row?.op === op && row.job === jobId;
+  }
+
+  /**
+   * Synchronous locks (no job) left behind by a crashed request are released after `olderThanMs`
+   * (a synchronous change takes seconds; a job's lock is released by its finalize).
+   */
+  async releaseStaleLocks(op: Extract<ServerOperation, "extensions">, olderThanMs: number): Promise<number> {
+    const rows = await this.db
+      .update(servers)
+      .set({ activeOperation: null, updatedAt: new Date(this.clock.now()) })
+      .where(and(eq(servers.activeOperation, op), isNull(servers.activeJobId), lt(servers.updatedAt, new Date(this.clock.now() - olderThanMs))))
+      .returning({ id: servers.id });
+    for (const r of rows) this.notify(r.id);
+    return rows.length;
   }
 
   async attachJob(tx: DbOrTx, serverId: string, jobId: string): Promise<void> {

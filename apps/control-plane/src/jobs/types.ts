@@ -1,5 +1,6 @@
 import type { JobLogLine, Permission } from "@blockforge/contracts";
 import type { z } from "zod";
+import type { Tx } from "../db/client.js";
 
 export type JobLogLevel = JobLogLine["level"];
 
@@ -18,6 +19,12 @@ export interface StepContext<I> {
   log(level: JobLogLevel, message: string): Promise<void>;
   /** Short status message shown on the current step. */
   setMessage(message: string): Promise<void>;
+  /**
+   * Persists `state` in one transaction with `fn`'s writes; with `completeStep` the step is also marked
+   * succeeded in that transaction (call it last). A crash afterwards resumes from exactly this point, so a
+   * step's durable effects (e.g. history rows) are never written twice nor lost apart from its state.
+   */
+  checkpoint(fn?: (tx: Tx) => Promise<void>, opts?: { completeStep?: boolean }): Promise<void>;
 }
 
 /** Returned by a step that does not apply (recorded as `skipped`). */
