@@ -113,7 +113,7 @@ export const EXTENSIONS_PREEMPTED_WHEN_CRASHED_BY: readonly ServerOperation[] = 
 
 /**
  * Whether `op` may pre-empt a running `extensions` operation (the change then undoes itself only if it can
- * take a new cleanup hold on a stopped/crashed server; otherwise it records what it left behind).
+ * take a new cleanup hold on a stopped server (never a crashed one); otherwise it records what it left behind).
  */
 export function preemptsExtensions(op: ServerOperation, state: ServerState, activeOperation: ServerOperation | null): boolean {
   if (activeOperation !== "extensions") return false;

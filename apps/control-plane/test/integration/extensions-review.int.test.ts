@@ -1083,6 +1083,118 @@ describe("Phase 4b review round 2 (Grok)", () => {
       const rows = (await testPool().query("SELECT status, kept_path FROM extension_history WHERE job_id = $1", [jobId])).rows;
       expect(rows).toEqual([{ status: "failed", kept_path: null }]);
     });
+
+    it("round 4 minors: resume with mismatched quarantined bytes → FILE_ORPHANED (never counted as deleted)", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const quarantine = ".blockforge/extensions/fetch/0000-mismatch.delete";
+      const { jobId } = await crashedUndo(t, owner, node, up, id, () => ({ steps: [{ kind: "delete", path: "plugins/Gamma-1.0.jar", sha512: sha512("WRITTEN-BY-THE-JOB"), quarantine }] }));
+      node.sim.put(id, quarantine, "OTHER-BYTES");
+      await t.ctx.jobs.start();
+      const row = await t.ctx.jobs.waitForCompletion(jobId);
+      expect(row.status).toBe("failed");
+      expect((row.error as { message: string }).message).toContain(`it is left at ${quarantine}`);
+      expect(node.sim.read(id, quarantine)).toBe("OTHER-BYTES");
+    });
+
+    it("round 4 minors: a re-adopted hour-old cleanup hold survives the stale-hold sweep during the undo", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      const original = pluginJar("Gamma", "0.9-local");
+      node.sim.put(id, "plugins/Gamma-1.0.jar", original);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const token = "00000000-0000-4000-8000-0000000c1ea2";
+      const { jobId, keptPath } = await crashedUndo(t, owner, node, up, id, ({ entryId, keptPath }) => ({
+        steps: [{ kind: "restore", kept: keptPath, sha512: sha512(original), path: "plugins/Gamma-1.0.jar", entryId }],
+        entries: [entryOf(entryId, keptPath, sha512(original))],
+        cleanupToken: token,
+      }));
+      node.sim.files(id).delete("plugins/Gamma-1.0.jar");
+      node.sim.put(id, keptPath, original);
+      await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, operation_token = $2, operation_started_at = now() - interval '1 hour' WHERE id = $1", [id, token]);
+      let swept = false;
+      node.sim.options = {
+        before: {
+          // The sweep runs while the undo hashes the kept jar, i.e. between the fence check and the rename.
+          "fs.hash": async (p) => {
+            if (swept || !String((p.paths as string[])[0]).startsWith(KEPT)) return;
+            swept = true;
+            await t.tasks.maintenance!.runNow();
+          },
+        },
+      };
+      await t.ctx.jobs.start();
+      const row = await t.ctx.jobs.waitForCompletion(jobId);
+      node.sim.options = {};
+      expect(swept).toBe(true);
+      expect(row.error).toMatchObject({ code: "CHECKSUM_MISMATCH" });
+      expect(node.sim.files(id).get("plugins/Gamma-1.0.jar")!.data.equals(original)).toBe(true);
+      expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+    });
+
+    it("round 4 minors: finalize releases a cleanup token recorded in the job state even when the undo never ran", async () => {
+      const { t, owner, node, up } = await boot();
+      const id = await paperServer(owner);
+      await scanned(owner, id);
+      up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+      const token = "00000000-0000-4000-8000-0000000c1ea3";
+      const { jobId } = await crashedUndo(t, owner, node, up, id, () => ({ steps: [], started: false, error: null, cleanupToken: token }));
+      await testPool().query("UPDATE jobs SET status = 'queued' WHERE id = $1", [jobId]);
+      await testPool().query("UPDATE servers SET active_operation = 'extensions', active_job_id = NULL, operation_token = $2, operation_started_at = now() WHERE id = $1", [id, token]);
+      // Cancelled while queued: finalize runs without any step (and so without fencedUndo).
+      await t.ctx.jobs.cancel(jobId);
+      expect((await t.ctx.jobs.getRow(jobId))!.status).toBe("cancelled");
+      expect((await owner.get(`/servers/${id}`)).json()).toMatchObject({ activeOperation: null });
+    });
+  });
+
+  it("round 4 minors: failed history commits keep the progress records; a resumed update writes exactly one history row", async () => {
+    const { t, owner, node, up } = await boot();
+    const id = await paperServer(owner);
+    const v1 = up.projects.get("AlphaLib")!.versions[0]!;
+    node.sim.put(id, "plugins/AlphaLib-1.0.0.jar", v1.jar);
+    const alpha = (await scanned(owner, id)).items.find((x) => x.filename === "AlphaLib-1.0.0.jar")!;
+    const v2 = up.addVersion("AlphaLib", { id: "AlphaV20", number: "2.0.0", filename: "AlphaLib-2.0.0.jar", jar: pluginJar("AlphaLib", "2.0.0") });
+    up.addVersion("GammaPl", { id: "GammaV10", number: "1.0", filename: "Gamma-1.0.jar", jar: pluginJar("Gamma", "1.0") });
+    const pool = testPool();
+    await pool.query("CREATE OR REPLACE FUNCTION bf_test_fail_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$");
+    await pool.query("CREATE TRIGGER bf_test_fail_history BEFORE INSERT ON extension_history FOR EACH ROW EXECUTE FUNCTION bf_test_fail_history()");
+    let updateJob: string;
+    try {
+      // Install: the completing commit fails → the journal and undo record stay persisted.
+      const inst = await install(owner, id, "gammapl");
+      expect((await waitJob(owner, inst)).status).toBe("failed");
+      const { rows: st } = await pool.query("SELECT state FROM jobs WHERE id = $1", [inst]);
+      expect(Object.keys(st[0].state)).toEqual(expect.arrayContaining(["journal", "undo"]));
+      // Update: the history commit fails → the plan is not marked done.
+      const apply = await owner.post(`/servers/${id}/extensions/updates/apply`, { extensionIds: [alpha.id] });
+      updateJob = apply.json().jobId as string;
+      const uj = await waitJob(owner, updateJob);
+      expect(uj.status).toBe("failed");
+      expect(uj.error).toMatchObject({ code: "COMMIT_FAILED" });
+      const { rows: us } = await pool.query("SELECT state FROM jobs WHERE id = $1", [updateJob]);
+      expect(us[0].state.done ?? []).toEqual([]);
+      expect(us[0].state.results ?? []).toEqual([]);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS bf_test_fail_history ON extension_history");
+      await pool.query("DROP FUNCTION IF EXISTS bf_test_fail_history()");
+    }
+    // Resume the update (as after a crash): the plan is re-checked and its history written once.
+    await t.ctx.jobs.stop();
+    await pool.query("UPDATE jobs SET status = 'running', finished_at = NULL, result = NULL, error = NULL WHERE id = $1", [updateJob]);
+    await pool.query("UPDATE job_steps SET status = CASE WHEN key = 'plan' THEN 'succeeded' WHEN key = 'apply' THEN 'running' ELSE 'pending' END, finished_at = NULL WHERE job_id = $1", [updateJob]);
+    await pool.query("UPDATE servers SET active_operation = 'extensions', active_job_id = $2 WHERE id = $1", [id, updateJob]);
+    await pool.query("UPDATE extension_scans SET active_job_id = $2 WHERE server_id = $1", [id, updateJob]);
+    const fetched = node.sim.fetched.length;
+    await t.ctx.jobs.start();
+    expect((await t.ctx.jobs.waitForCompletion(updateJob)).status).toBe("succeeded");
+    expect(node.sim.fetched.length).toBe(fetched);
+    const { rows } = await pool.query("SELECT action, status FROM extension_history WHERE job_id = $1", [updateJob]);
+    expect(rows).toEqual([{ action: "update", status: "succeeded" }]);
+    expect(node.sim.files(id).get("plugins/AlphaLib-2.0.0.jar")!.data.equals(v2.jar)).toBe(true);
   });
 
   it("round 4: enable/disable refuses a file it cannot hash (nothing renamed)", async () => {

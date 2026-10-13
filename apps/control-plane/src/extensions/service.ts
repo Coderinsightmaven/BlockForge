@@ -161,7 +161,7 @@ export class ExtensionsService {
 
   /**
    * A synchronous change lost its hold (pre-emption or the stale-hold sweep): the fenced undo puts files back
-   * only under a new cleanup hold (no other operation, server stopped/crashed); otherwise nothing is touched
+   * only under a new cleanup hold (no other operation, server stopped — never crashed); otherwise nothing is touched
    * and a failed history row records every kept file and every file the change wrote. Always 409.
    */
   private async preemptedSync(access: ServerAccess, actor: AuditActor, c: FileCtx, store: UndoStore, held: () => Promise<boolean>): Promise<never> {

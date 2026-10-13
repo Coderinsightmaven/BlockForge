@@ -28,6 +28,12 @@ import {
  * the window between the first hash and the rename is detected after the fact and the move is undone
  * or refused; it is not prevented. An agent-side "rename if digest matches" would close that residual
  * window (possible later improvement; not part of the agent protocol today).
+ *
+ * Lock-check → RPC: the undo fence (`FileCtx.beforeMutate`) is checked immediately before each
+ * mkdir/rename/delete, but a pre-emption can still land between that check and the agent executing the
+ * command (one RPC wide). Forward changes (keepFile, enable/disable, upload placement) do not fence per
+ * RPC: they check the lock, hash, rename and re-check afterwards; a lost lock is then repaired by the
+ * fenced undo (or recorded in the failed history row when no cleanup hold can be taken).
  */
 
 export type HistoryActorFields = Pick<HistoryRow, "actorType" | "actorId" | "actorName">;
@@ -86,6 +92,17 @@ export async function hashFile(d: ExtensionDeps, c: FileCtx, path: string): Prom
   if (!f) return { ok: false, error: "PROTOCOL" };
   if (!f.ok) return { ok: false, error: f.error };
   return f.sha512 ? { ok: true, sha512: f.sha512 } : { ok: false, error: "NO_DIGEST" };
+}
+
+/**
+ * SHA-512 of one file, null only when it does not exist; any other hash failure (I/O error, not a regular
+ * file, …) throws, so it is never read as "already gone".
+ */
+export async function sha512OrAbsent(d: ExtensionDeps, c: FileCtx, path: string): Promise<string | null> {
+  const h = await hashFile(d, c, path);
+  if (h.ok) return h.sha512;
+  if (h.error === "NOT_FOUND") return null;
+  throw new HashFailedError(path, h.error);
 }
 
 /** SHA-512 of one file (null when it does not exist or cannot be hashed). */
@@ -203,6 +220,7 @@ export async function keepJournaled(
 export async function placeVerified(d: ExtensionDeps, c: FileCtx, from: string, to: string, sha512: string): Promise<void> {
   // `fs.rename` does not create parents (a fresh server may have no plugins/ or mods/ yet).
   const dir = to.includes("/") ? to.slice(0, to.lastIndexOf("/")) : "";
+  await c.beforeMutate?.();
   if (dir) await ensureDir(d.gateway, c.nodeId, c.serverId, dir, c);
   await c.beforeMutate?.();
   try {
@@ -257,14 +275,18 @@ export async function restoreKept(d: ExtensionDeps, c: FileCtx, kept: string, ex
  * (else put back and refused). Resumable: a file already in quarantine with the digest is just deleted.
  */
 export async function deleteCreated(d: ExtensionDeps, c: FileCtx, path: string, sha512: string, quarantine = `${FETCH_DIR}/${randomUUID()}.delete`): Promise<void> {
-  if ((await sha512Of(d, c, quarantine)) === sha512) {
+  const q = await sha512OrAbsent(d, c, quarantine);
+  if (q === sha512) {
     await c.beforeMutate?.();
     await deleteFile(d, c, quarantine);
     return;
   }
-  const actual = await sha512Of(d, c, path);
+  // A quarantined file with other bytes (it changed during an interrupted removal) is reported, never "done".
+  if (q !== null) throw new JobError("FILE_ORPHANED", `${path} was moved to ${quarantine} but the file there no longer has the written digest; it is left at ${quarantine}`);
+  const actual = await sha512OrAbsent(d, c, path);
   if (actual === null) return;
   if (actual !== sha512) throw new JobError("FILE_CHANGED", `${path} changed after it was written; it was not deleted`);
+  await c.beforeMutate?.();
   await ensureDir(d.gateway, c.nodeId, c.serverId, FETCH_DIR, c);
   await c.beforeMutate?.();
   await d.gateway.send(c.nodeId, "fs.rename", { workloadId: c.serverId, from: path, to: quarantine }, agentOpts(c));

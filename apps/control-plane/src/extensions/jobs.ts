@@ -309,11 +309,26 @@ export function extensionJobDefinitions(d: ExtensionDeps): JobDefinition<never>[
                 undo: undoStoreOf(ctx, `update:${k}`),
                 holdsLock: () => d.state.holds(s.id, "extensions", ctx.jobId),
               });
-              applied.push({ files: p.files, entries: r.entries });
-              results.push({ extensionId: p.extensionId, status: "updated", versionId: p.files.find((f) => f.reason === "requested")?.versionId ?? null, error: null });
-              done.push(k);
-              await ctx.checkpoint(r.recorded ? undefined : (tx) => writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx));
+              // History and progress commit together; a failed commit leaves the in-memory progress as it was
+              // (the runner persists it), so a resumed job re-checks this plan and writes its history once.
+              const ok = { extensionId: p.extensionId, status: "updated" as const, versionId: p.files.find((f) => f.reason === "requested")?.versionId ?? null, error: null };
+              try {
+                await ctx.checkpoint(async (tx) => {
+                  applied.push({ files: p.files, entries: r.entries });
+                  results.push(ok);
+                  done.push(k);
+                  if (!r.recorded) await writeHistory(d, s.id, r.entries, { actor, jobId: ctx.jobId, status: "succeeded" }, tx);
+                });
+              } catch (err) {
+                if (done.at(-1) === k) {
+                  done.pop();
+                  results.pop();
+                  applied.pop();
+                }
+                throw Object.assign(new JobError("COMMIT_FAILED", `recording the update of ${p.extensionId} failed: ${(err as Error).message}`), { commitFailure: true });
+              }
             } catch (err) {
+              if ((err as { commitFailure?: boolean }).commitFailure) throw err;
               // A pre-emption ends the whole job (the remaining plans are not started).
               if (err instanceof JobError && (err.code === "LOCK_LOST" || err.code === "PREEMPTED_UNDO_SKIPPED")) throw err;
               results.push({ extensionId: p.extensionId, status: "failed", versionId: null, error: (err as Error).message.slice(0, 1024) });

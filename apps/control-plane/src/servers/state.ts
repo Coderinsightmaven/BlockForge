@@ -156,7 +156,12 @@ export class ServerStateService {
       if (!row) return false;
       const stopped = ServerStateService.CLEANUP_STATES.includes(row.state as ServerState);
       if (row.activeOperation === "extensions" && row.operationToken === token) {
-        if (stopped) return true;
+        if (stopped) {
+          // Re-adopted: restart the stale-hold clock so the 30-min sweep cannot take it mid-undo.
+          const now = new Date(this.clock.now());
+          await tx.update(servers).set({ operationStartedAt: now, updatedAt: now }).where(eq(servers.id, serverId));
+          return true;
+        }
         await tx.update(servers).set({ activeOperation: null, operationToken: null, operationStartedAt: null, updatedAt: new Date(this.clock.now()) }).where(eq(servers.id, serverId));
         return false;
       }
