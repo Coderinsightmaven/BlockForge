@@ -89,3 +89,20 @@ round-2 code and pass on round 3. New tests: describe "Phase 4b review round 2 (
 Known gap (recorded in OPEN_WORK): an extension job that still holds its own lock keeps changing files after the
 workload crashed and the agent's restart policy brought it back (pre-existing).
 
+#### Round 4 minors (Grok: APPROVE WITH MINOR CHANGES) — fixed
+
+Grok verified both round-3 majors and all seven minors resolved (343/343; migration 0006 checked on Postgres 17.11
+with the columns present, absent and applied twice). Minors fixed:
+1. A quarantine file with non-matching bytes is `FILE_ORPHANED` (only an absent quarantine counts as done);
+   `sha512OrAbsent` throws on I/O and other hash errors instead of reading them as "gone". Test: "resume with
+   mismatched quarantined bytes → FILE_ORPHANED".
+2. Re-adopting a cleanup hold refreshes `operation_started_at` (the 30-min sweep cannot take it mid-undo). Test:
+   "a re-adopted hour-old cleanup hold survives the stale-hold sweep during the undo".
+3. The fence runs before `fs.mkdir` too (placeVerified, deleteCreated).
+4. Comments corrected to "stopped only" (contracts `preemptsExtensions`, service `preemptedSync`).
+5. Update history commits with its progress in one checkpoint and the in-memory progress is restored if that commit
+   fails. Test: "a failed commit of an update's history: the resumed job writes exactly one history row".
+Also tested: finalize releases a cleanup token recorded in the job state without the undo running; a failed
+completing commit keeps the journal and undo record persisted. Documented: the lock-check → RPC window (api.md, ops.ts)
+and that forward renames re-check after the move with the fenced undo as the repair path.
+

@@ -284,7 +284,9 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   wrote (path + SHA-512), and the job fails with `PREEMPTED_UNDO_SKIPPED` (409 `preempted_undo_skipped`). An undo
   interrupted by a control-plane restart is resumed the same way (never the apply). Every move of
   a jar is hashed before and verified after (`fs.rename` takes no expected digest, so a swap in between is
-  detected and undone/refused, not prevented): kept jars go back only while they have the digest taken when they
+  detected and undone/refused, not prevented; likewise the lock/fence is checked right before each agent command,
+  so a pre-emption can still land within that one RPC — forward changes re-check afterwards and the fenced undo
+  repairs or records what happened): kept jars go back only while they have the digest taken when they
   were kept, downloads land in `.blockforge/extensions/fetch/` and are renamed into place without overwriting,
   undo deletes only files the job wrote, and a changed staged upload is refused (409 `upload_changed`). A kept
   file that cannot be vouched for is never restored; its failed history row points at it (no digest) for
