@@ -172,6 +172,19 @@ export const DatabaseHostTestResult = z.object({
   /** Whether the session was encrypted (not whether the host was authenticated — see `DatabaseTlsMode`). */
   tls: z.boolean().nullable(),
   latencyMs: z.number().int().nonnegative().nullable(),
+  /**
+   * A proxy or load balancer (MaxScale, ProxySQL, HAProxy, …) seems to sit between the control plane and the
+   * database server: the connection id in the greeting differs from `CONNECTION_ID()`, or two sessions reached
+   * different servers. BlockForge then never sends `KILL QUERY` for an unanswered statement (it could hit an
+   * unrelated connection), so such outcomes stay unknown until reconciled. null = not determined (test failed).
+   */
+  proxyDetected: z.boolean().nullable(),
+  /**
+   * Global privileges the admin account seems to lack (from `information_schema.USER_PRIVILEGES`; privileges
+   * granted only through roles or only on some databases are not seen), e.g. `CREATE USER`, `GRANT OPTION`,
+   * `SELECT on mysql.user`. Empty when everything needed was found or the test failed.
+   */
+  missingPrivileges: z.array(z.string()),
 });
 export type DatabaseHostTestResult = z.infer<typeof DatabaseHostTestResult>;
 
@@ -264,9 +277,10 @@ export const DatabaseRemote = z
  * - `ready`: usable; the stored password is the account's password.
  * - `password_unknown`: the last rotation's outcome could not be determined (the host stopped answering and
  *   the statement could not be confirmed stopped) — the stored password may be wrong; rotate again.
- * - `cleanup_pending`: the database/account may (partly) exist on the host after a failed create or delete
- *   whose outcome is unknown; the control plane drops them by name and removes the entry automatically, or
- *   delete it to retry now.
+ * - `cleanup_pending`: the database/account may (partly) exist on the host after a failed create, a deletion
+ *   that got partway, or an operation whose outcome is unknown; the control plane drops them by name and removes
+ *   the entry automatically once a statement that may still be running on the host can no longer land (a safety
+ *   window of about a minute). Deleting it inside that window answers 409 `not_ready` with `retryAfterMs`.
  * Only `ready` (and `rotating`/`deleting`, while the stored password is still current) reveal the password.
  */
 export const ServerDatabaseStatus = z.enum(["creating", "ready", "rotating", "deleting", "password_unknown", "cleanup_pending"]);
@@ -305,6 +319,16 @@ export type CreateServerDatabaseRequest = z.input<typeof CreateServerDatabaseReq
 
 /** `GET /servers/:id/databases/:databaseId/password` (`servers.databases.view_password`, `Cache-Control: no-store`). */
 export const ServerDatabasePassword = z.object({ password: z.string() }).strict();
+
+/**
+ * `DELETE /servers/:id/databases/:databaseId?forget=true`: remove only BlockForge's record and leave the
+ * database and its account on the host (for a host that is permanently gone, so the host entry can be deleted).
+ * Requires `database_hosts.manage` (global) besides `servers.databases.delete`; audited as `server.database.forget`.
+ */
+export const DeleteServerDatabaseQuery = z
+  .object({ forget: z.enum(["true", "false"]).optional() })
+  .transform((q) => ({ forget: q.forget === "true" }));
+export type DeleteServerDatabaseQuery = z.output<typeof DeleteServerDatabaseQuery>;
 export type ServerDatabasePassword = z.infer<typeof ServerDatabasePassword>;
 
 /**
@@ -336,5 +360,7 @@ export const DatabaseErrorDetails = z.object({
   count: z.number().int().nonnegative().optional(),
   code: z.string().nullable().optional(),
   unknownOutcome: z.boolean().optional(),
+  /** `not_ready` while a `cleanup_pending` database is inside its safety window: when deleting may be retried. */
+  retryAfterMs: z.number().int().nonnegative().optional(),
 });
 export type DatabaseErrorDetails = z.infer<typeof DatabaseErrorDetails>;

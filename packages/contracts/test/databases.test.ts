@@ -5,6 +5,8 @@ import {
   CreateServerDatabaseRequest,
   DatabaseHost,
   DatabaseHostAddress,
+  DatabaseHostTestResult,
+  DeleteServerDatabaseQuery,
   normalizeDatabaseRemote,
   PemCertificate,
   SERVER_OWNER_PERMISSIONS,
@@ -171,5 +173,20 @@ describe("database permissions", () => {
     expect(BUILTIN_ROLES.infra_admin.permissions).toContain("database_hosts.manage");
     expect(BUILTIN_ROLES.infra_admin.permissions).not.toContain("servers.databases.view_password");
     expect(SERVER_OWNER_PERMISSIONS).not.toContain("database_hosts.manage");
+  });
+});
+
+describe("database route helpers", () => {
+  it("DeleteServerDatabaseQuery reads forget only from the literal 'true'", () => {
+    expect(DeleteServerDatabaseQuery.parse({})).toEqual({ forget: false });
+    expect(DeleteServerDatabaseQuery.parse({ forget: "true" })).toEqual({ forget: true });
+    expect(DeleteServerDatabaseQuery.parse({ forget: "false" })).toEqual({ forget: false });
+    expect(DeleteServerDatabaseQuery.safeParse({ forget: "1" }).success).toBe(false);
+  });
+
+  it("test results carry proxy detection and missing privileges", () => {
+    const ok = { ok: true, error: null, serverVersion: "11.4", tls: true, latencyMs: 3, proxyDetected: false, missingPrivileges: [] };
+    expect(DatabaseHostTestResult.safeParse(ok).success).toBe(true);
+    expect(DatabaseHostTestResult.safeParse({ ...ok, proxyDetected: undefined }).success).toBe(false);
   });
 });
