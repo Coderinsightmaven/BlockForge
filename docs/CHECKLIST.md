@@ -21,7 +21,7 @@ imported eggs, no panel migration, panel parity before Velocity networks. See `d
 - [x] Testing & review policy (`docs/development/workflow.md`)
 
 ## Phase 1 — Foundation
-- [x] pnpm/turbo monorepo, TS strict, lint/format, vitest
+- [x] pnpm/turbo monorepo, TS strict, lint/format, vitest — type checking and package emit with `tsc-rs` (TypeScript 7 port, exact pin; TypeScript 6 kept for tooling; see `docs/OPEN_WORK.md` §5.3)
 - [x] docker compose: Postgres 17, VictoriaMetrics — `infra/compose/docker-compose.dev.yml` (127.0.0.1:55432 / :58428)
 - [x] Control plane skeleton: config, pino logging w/ redaction, request IDs, error format, health endpoints, graceful shutdown — `apps/control-plane` (`buildApp` factory + `main.ts`); booted via `dev` and from `dist/`, `/healthz` + `/readyz` (DB, migrations, VictoriaMetrics) verified; shutdown closes agents with 1012 (integration test). SIGTERM handling itself only exercised through `app.close()` (Windows host).
 - [x] Drizzle schema + migrations (identity, nodes, servers, networks, jobs, audit, secrets, events) — all data-model.md tables incl. alerts/notifications, `agent_auth_jti`, `idempotency_keys`, `network_try_servers`/`forced_host_targets`; text+CHECK enums from contracts; advisory-locked migrator. `backups`/`backup_policies`/`schedules`/`schedule_runs` deferred to Phases 4/6 (no columns specified yet).

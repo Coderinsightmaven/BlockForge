@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "tsx watch --conditions=@blockforge/source src/main.ts",
     "start": "node dist/main.js",
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc-rs -p tsconfig.build.json",
+    "typecheck": "tsc-rs -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
     "db:generate": "node --conditions=@blockforge/source ./node_modules/drizzle-kit/bin.cjs generate",

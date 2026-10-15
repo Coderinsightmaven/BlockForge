@@ -5,3 +5,7 @@ packages:
 onlyBuiltDependencies:
   - "@node-rs/argon2"
   - esbuild
+# tsc-rs works without its postinstall (which only swaps the Node launcher for a direct exec of the
+# native binary, ~50 ms per run); not running third-party install code is worth more than that.
+ignoredBuiltDependencies:
+  - tsc-rs

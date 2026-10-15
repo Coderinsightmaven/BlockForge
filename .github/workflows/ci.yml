@@ -24,9 +24,15 @@ jobs:
       - name: Agent protocol fixtures are up to date
         run: node packages/contracts/scripts/gen-fixtures.mjs && git diff --exit-code packages/contracts/fixtures
       - run: pnpm typecheck
+      - name: TypeScript 6 type check (ESLint, vitest and editors still use TypeScript 6)
+        run: pnpm typecheck:ts6
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm build
+      - name: Emit parity (tsc-rs dist against TypeScript 6, scripts/ci/typescript6.mjs)
+        run: pnpm emit-parity
+      - name: Emit parity selftest (comparison and discovery cases)
+        run: node scripts/ci/typescript6.mjs selftest
       - name: Web route bundle budget (300 KiB gzip per route)
         run: pnpm --filter @blockforge/web bundle:check
 
