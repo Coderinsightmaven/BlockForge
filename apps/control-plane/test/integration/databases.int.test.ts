@@ -129,13 +129,17 @@ async function freezingProxy(
   target: Target,
   rule: (sql: string) => boolean,
   delay: { rule: (sql: string) => boolean; ms: number } | null = null,
-): Promise<{ port: number; open: () => number; frozen: () => number }> {
+  /** Rewrite the connection id in the server greeting, as proxies (MaxScale, ProxySQL) do. */
+  rewriteGreetingId = false,
+): Promise<{ port: number; open: () => number; frozen: () => number; statements: string[] }> {
   const clients = new Set<Socket>();
+  const statements: string[] = [];
   let frozenCount = 0;
   const srv = createServer((client) => {
     clients.add(client);
     const upstream = netConnect(target.port, target.host);
     let frozen = false;
+    let greeted = false;
     /** Answers to a statement matching `delay.rule` reach the client only after `delay.ms`. */
     let holdUntil = 0;
     client.on("error", () => undefined);
@@ -151,6 +155,7 @@ async function freezingProxy(
       if (frozen) return;
       // COM_QUERY: 3-byte length, sequence 0, command 0x03, statement text.
       const sql = chunk.length > 5 && chunk[3] === 0 && chunk[4] === 0x03 ? chunk.subarray(5).toString("utf8") : null;
+      if (sql !== null) statements.push(sql);
       if (sql !== null && rule(sql)) {
         frozen = true;
         frozenCount++;
@@ -161,6 +166,15 @@ async function freezingProxy(
     });
     upstream.on("data", (chunk: Buffer) => {
       if (frozen) return;
+      if (!greeted) {
+        greeted = true;
+        // Handshake v10: 4-byte packet header, protocol 0x0a, NUL-terminated version, 4-byte connection id.
+        if (rewriteGreetingId && chunk[4] === 0x0a) {
+          const at = chunk.indexOf(0, 5) + 1;
+          chunk = Buffer.from(chunk);
+          chunk.writeUInt32LE((chunk.readUInt32LE(at) + 700_000) >>> 0, at);
+        }
+      }
       const wait = holdUntil - Date.now();
       if (wait > 0) setTimeout(() => client.write(chunk), wait);
       else client.write(chunk);
@@ -168,7 +182,7 @@ async function freezingProxy(
   });
   await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
   hangers.push({ srv, sockets: clients });
-  return { port: (srv.address() as AddressInfo).port, open: () => clients.size, frozen: () => frozenCount };
+  return { port: (srv.address() as AddressInfo).port, open: () => clients.size, frozen: () => frozenCount, statements };
 }
 
 /** A root session holding `FLUSH TABLES WITH READ LOCK` (as backup tools do) until released. */
@@ -349,7 +363,7 @@ describe("database hosts (admin)", () => {
 
     // Test connection: preferred (MariaDB 11.4 offers TLS), disabled, required (not verified), verify_ca.
     const tested = DatabaseHostTestResult.parse((await owner.post(`/database-hosts/${host.id}/test`)).json());
-    expect(tested).toMatchObject({ ok: true, error: null, tls: true });
+    expect(tested).toMatchObject({ ok: true, error: null, tls: true, proxyDetected: false, missingPrivileges: [] });
     expect(tested.serverVersion).toMatch(MARIADB.version);
     const unsaved = (over: Record<string, unknown>) => owner.post("/database-hosts/test", { host: MARIADB.host, port: MARIADB.port, username: "root", password: adminPassword, ...over });
     expect((await unsaved({ tlsMode: "disabled" })).json()).toMatchObject({ ok: true, tls: false });
@@ -1084,28 +1098,174 @@ describe("database status and the maintenance sweep", () => {
     const { t, owner } = await boot({ cleanupDelayMs: 0 });
     await connectSimNode(t, owner, { agents });
     await createHost(owner, MARIADB);
-    const srv = await paperServer(owner, { databaseLimit: 4 });
-    const [a, b, c, d] = await Promise.all(["a", "b", "c", "d"].map(async (name) => ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name })).json())));
+    const srv = await paperServer(owner, { databaseLimit: 5 });
+    const [a, b, c, d, e] = await Promise.all(["a", "b", "c", "d", "e"].map(async (name) => ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name })).json())));
     const abandon = (id: string, operation: string, state: string) =>
       testPool().query("UPDATE server_databases SET operation = $2, operation_token = gen_random_uuid(), operation_started_at = now() - interval '1 hour', state = $3 WHERE id = $1", [id, operation, state]);
     await abandon(a!.id, "creating", "provisioning"); // crashed after the names were verified: host objects are ours
     await abandon(b!.id, "creating", "reserved"); // crashed before the host was asked: nothing of ours there
     await abandon(c!.id, "rotating", "ready");
     await abandon(d!.id, "deleting", "ready");
+    await abandon(e!.id, "deleting", "reserved"); // a deletion of a never-verified entry: never dropped by name
     expect(await status(owner.post(`/servers/${srv.id}/databases/${a!.id}/rotate-password`))).toBe("409 CONFLICT not_ready");
-    expect(await t.ctx.serverDatabases.sweep()).toEqual({ resolved: 4, cleaned: 2 });
+    expect(await t.ctx.serverDatabases.sweep()).toEqual({ resolved: 5, cleaned: 2 });
     expect((await listOf(owner, srv.id)).map((x) => [x.database, x.status])).toEqual([[c!.database, "password_unknown"]]);
     expect(await exists(MARIADB, a!)).toEqual({ database: false, account: false });
     expect(await exists(MARIADB, d!)).toEqual({ database: false, account: false });
     expect(await exists(MARIADB, b!)).toEqual({ database: true, account: true });
+    expect(await exists(MARIADB, e!)).toEqual({ database: true, account: true });
     expect(await status(owner.get(`/servers/${srv.id}/databases/${c!.id}/password`))).toBe("409 CONFLICT password_unknown");
     expect((await owner.post(`/servers/${srv.id}/databases/${c!.id}/rotate-password`)).statusCode).toBe(200);
     expect((await listOf(owner, srv.id))[0]!.status).toBe("ready");
     await (await asUser(MARIADB, c!, await passwordFor(owner, c!))).end();
     const { rows } = await testPool().query("SELECT actor_name, details FROM audit_events WHERE action = 'server.database.claim_takeover' ORDER BY id");
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(5);
     expect(rows.every((x) => x.actor_name === "database-sweep")).toBe(true);
   }, 60_000);
+
+  it("the sweep skips a host after its first failure, and shutdown never waits for a host that stopped answering", async () => {
+    const { t: app, owner } = await boot({ queryTimeoutMs: 60_000, sessionLimits: false, cleanupDelayMs: 0 });
+    await connectSimNode(app, owner, { agents });
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP DATABASE"));
+    const host = await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 4 });
+    const dbs: ServerDatabase[] = [];
+    for (const name of ["a", "b", "c", "d"]) dbs.push(ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name })).json()));
+    await testPool().query("UPDATE server_databases SET state = 'cleanup_pending', state_changed_at = now() - interval '1 hour' WHERE host_id = $1", [host.id]);
+
+    // A sweep runs into the frozen DROP (60 s statement timeout) …
+    const sweeping = app.tasks.databaseSweep!.runNow();
+    await poll(async () => proxy.frozen() === 1, 20_000, 50);
+    // … and shutdown does not wait for it: the statement is abandoned and its outcome recorded as unknown.
+    const t0 = Date.now();
+    await app.close();
+    t = null;
+    await sweeping;
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    expect(proxy.frozen()).toBe(1); // the other three rows of that host were not attempted
+    const { rows } = await testPool().query("SELECT state, operation FROM server_databases WHERE host_id = $1", [host.id]);
+    expect(rows).toHaveLength(4);
+    expect(rows.every((r) => r.state === "cleanup_pending" && r.operation === null)).toBe(true);
+    expect(proxy.statements.some((s) => s.startsWith("KILL"))).toBe(false);
+  }, 60_000);
+
+  it("one failing host costs one statement per sweep run; the other rows of that host wait for the next run", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false, cleanupDelayMs: 0 });
+    await connectSimNode(t, owner, { agents });
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP DATABASE"));
+    const host = await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 3 });
+    for (const name of ["a", "b", "c"]) expect((await owner.post(`/servers/${srv.id}/databases`, { name })).statusCode).toBe(201);
+    await testPool().query("UPDATE server_databases SET state = 'cleanup_pending', state_changed_at = now() - interval '1 hour' WHERE host_id = $1", [host.id]);
+    expect(await t.ctx.serverDatabases.sweep()).toEqual({ resolved: 0, cleaned: 0 });
+    expect(proxy.frozen()).toBe(1);
+    expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE state = 'cleanup_pending' AND operation IS NULL")).toBe(3);
+  }, 60_000);
+});
+
+describe("behind a proxy (greeting connection id rewritten)", () => {
+  it("never sends KILL; an unanswered rotation ends with an unknown outcome; test connection reports the proxy", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false });
+    await connectSimNode(t, owner, { agents });
+    const proxy = await freezingProxy(MARIADB, () => false, null, true);
+    const host = await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const tested = DatabaseHostTestResult.parse((await owner.post(`/database-hosts/${host.id}/test`)).json());
+    expect(tested).toMatchObject({ ok: true, proxyDetected: true });
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "proxied" })).json());
+    const unlock = await globalReadLock(MARIADB);
+    try {
+      const rot = await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`);
+      expect(rot.statusCode, rot.body).toBe(502);
+      expect(rot.json().error.details).toMatchObject({ reason: "host_error", code: "PROTOCOL_SEQUENCE_TIMEOUT", unknownOutcome: true });
+      expect((await listOf(owner, srv.id))[0]!.status).toBe("password_unknown");
+    } finally {
+      await unlock();
+    }
+    expect(proxy.statements.filter((s) => s.startsWith("KILL"))).toEqual([]);
+    // Rotating again reconciles it.
+    expect((await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`)).statusCode).toBe(200);
+    await (await asUser(MARIADB, db, await passwordFor(owner, db))).end();
+  }, 60_000);
+});
+
+describe("partial outcomes, the cleanup window, forget and privileges", () => {
+  it("a rotation that never sent ALTER USER stays ready with the old password", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false });
+    await connectSimNode(t, owner, { agents });
+    let selects = 0;
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("SELECT authentication_string") && selects++ === 0);
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "noalter" })).json());
+    const old = await passwordFor(owner, db);
+    const rot = await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`);
+    expect(rot.statusCode).toBe(502);
+    expect(rot.json().error.details.unknownOutcome).toBeUndefined();
+    expect(rot.json().error.message).toMatch(/password was not changed/);
+    expect(proxy.statements.some((s) => s.startsWith("ALTER USER"))).toBe(false);
+    expect((await listOf(owner, srv.id))[0]!.status).toBe("ready");
+    expect(await passwordFor(owner, db)).toBe(old);
+    await (await asUser(MARIADB, db, old)).end();
+  }, 60_000);
+
+  it("DROP USER failing after DROP DATABASE succeeded leaves cleanup_pending; deleting waits for the safety window", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false });
+    await connectSimNode(t, owner, { agents });
+    let dropUsers = 0;
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP USER") && dropUsers++ === 0);
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "half" })).json());
+    const del = await owner.delete(`/servers/${srv.id}/databases/${db.id}`);
+    expect(del.statusCode).toBe(502);
+    expect(del.json().error.message).toMatch(/partly deleted/);
+    expect(await exists(MARIADB, db)).toEqual({ database: false, account: true });
+    expect((await listOf(owner, srv.id))[0]!.status).toBe("cleanup_pending");
+    // Inside the safety window: refused with a retry hint.
+    const early = await owner.delete(`/servers/${srv.id}/databases/${db.id}`);
+    expect(early.statusCode).toBe(409);
+    expect(early.json().error.details).toMatchObject({ reason: "not_ready" });
+    expect(early.json().error.details.retryAfterMs).toBeGreaterThan(0);
+    // Once the window has passed, deleting finishes it.
+    await testPool().query("UPDATE server_databases SET state_changed_at = now() - interval '1 hour' WHERE id = $1", [db.id]);
+    expect((await owner.delete(`/servers/${srv.id}/databases/${db.id}`)).statusCode).toBe(204);
+    expect(await exists(MARIADB, db)).toEqual({ database: false, account: false });
+  }, 60_000);
+
+  it("forget (administrators only) removes the entry and leaves database and account on the host", async () => {
+    const { t, owner } = await boot();
+    await connectSimNode(t, owner, { agents });
+    const alice = await createUserClient(t, owner, "alice@example.com", []);
+    const host = await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { ownerId: await userId(alice), databaseLimit: 1 });
+    const db = ServerDatabase.parse((await alice.post(`/servers/${srv.id}/databases`, { name: "kept" })).json());
+    expect(await status(alice.delete(`/servers/${srv.id}/databases/${db.id}?forget=true`))).toBe("403 FORBIDDEN");
+    expect(await status(owner.delete(`/servers/${srv.id}/databases/${db.id}?forget=1`))).toBe("400 VALIDATION_FAILED");
+    expect(await status(owner.delete(`/database-hosts/${host.id}`))).toBe("409 CONFLICT has_databases");
+    expect((await owner.delete(`/servers/${srv.id}/databases/${db.id}?forget=true`)).statusCode).toBe(204);
+    expect(await listOf(alice, srv.id)).toEqual([]);
+    expect(await exists(MARIADB, db)).toEqual({ database: true, account: true });
+    const { rows } = await testPool().query("SELECT details FROM audit_events WHERE action = 'server.database.forget'");
+    expect(rows).toEqual([expect.objectContaining({ details: expect.objectContaining({ database: db.database, username: db.username, leftOnHost: true }) })]);
+    expect((await owner.delete(`/database-hosts/${host.id}`)).statusCode).toBe(204);
+  });
+
+  it("test connection reports missing privileges of the admin account", async () => {
+    const { owner } = await boot();
+    const r = await root(MARIADB);
+    const limited = "u00000000_privtest01";
+    const pw = "Limited-Passw0rd-for-tests";
+    await r.query(`CREATE USER \`${limited}\`@\`%\` IDENTIFIED BY '${pw}'`);
+    await r.query(`GRANT SELECT, CREATE ON *.* TO \`${limited}\`@\`%\``);
+    await r.end();
+    const res = await owner.post("/database-hosts/test", { host: MARIADB.host, port: MARIADB.port, username: limited, password: pw });
+    const result = DatabaseHostTestResult.parse(res.json());
+    expect(result.ok).toBe(true);
+    expect(result.missingPrivileges).toEqual(expect.arrayContaining(["CREATE USER", "DROP", "GRANT OPTION"]));
+    expect(result.missingPrivileges).not.toContain("SELECT");
+    expect(result.missingPrivileges).not.toContain("SELECT on mysql.user");
+  });
 });
 
 describe("server deletion", () => {
