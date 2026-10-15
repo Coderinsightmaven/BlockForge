@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "build": "tsc-rs -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "tsc-rs -p tsconfig.json --noEmit && tsc-rs -p tsconfig.node.json --noEmit",
     "lint": "eslint src vite.config.ts vitest.config.ts",
     "test": "vitest run",
     "bundle:check": "node scripts/bundle-budget.mjs"

@@ -22,6 +22,7 @@
     "@types/node": "^26.6.5",
     "eslint": "^10.12.0",
     "prettier": "^3.9.10",
+    "tsc-rs": "0.7.0",
     "turbo": "^2.11.7",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.71.1",
