@@ -32,6 +32,15 @@ pnpm -r test
 pnpm -r build
 cd services/node-agent && go vet ./... && go test ./...
 ```
+Type checking and the TypeScript emit of `build` use **`tsc-rs`**, a Rust port of the TypeScript 7
+compiler (root devDependency, pinned to an exact version; default checker count, not `--fast`, so the
+diagnostics do not depend on the machine's core count). `typescript` ~6.0.3 stays installed for ESLint
+(typescript-eslint), vitest, drizzle-kit and editors, so the editor and `pnpm typecheck` run different
+compiler versions. If tsc-rs reports something TypeScript 6 does not (or crashes), check the package
+with TypeScript 6 — `pnpm exec tsc -p tsconfig.json --noEmit`, or `pnpm exec tsc -p tsconfig.build.json`
+for the emit — and record the difference; never silence a TS 7 diagnostic with `any` or `@ts-ignore`.
+A fix must be valid for both compilers. Upgrades: `docs/OPEN_WORK.md` §5.3.
+
 Integration tests that need Postgres/VictoriaMetrics/Docker use `infra/compose/docker-compose.dev.yml`
 (`pnpm infra:up`). Tests that need real Minecraft containers are tagged and run with
 `pnpm test:integration`.

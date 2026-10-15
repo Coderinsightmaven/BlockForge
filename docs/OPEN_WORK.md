@@ -203,3 +203,27 @@ replace the note with the concrete gap. Affected lines:
 - **Modrinth/Mojang User-Agent contact:** `MODRINTH_CONTACT`, defaulting to the public URL.
 - **API keys:** migration 0004 revoked API keys created before migration 0003; operators recreate them.
 - **Agent deploy procedure:** see `docs/development/test-node.md` ("Deploying a new agent build").
+- **tsc-rs (adopted 2026-10-15) is experimental.** `typecheck`, the web build's check step and the package `build`
+  emit run `tsc-rs` 0.7.0, a Rust port of the native TypeScript 7 compiler pinned to microsoft/TypeScript
+  `fed0bf24149f` (7.1.0-dev; `tsc-rs --version` prints that, not the npm version). TypeScript 6.0.3 stays for ESLint,
+  vitest, drizzle-kit and editors.
+  - Watch: TS 7-only diagnostics show up in `pnpm typecheck` but not in the editor; README "Known problems" (TS6059 or
+    extra emitted files when a workspace package's sources are reachable both through `node_modules` and a direct
+    import; `tsc -b` ordering, which we do not use). Its postinstall is not run (`ignoredBuiltDependencies`): the
+    `.bin` shim starts Node (~50 ms) before exec'ing the native binary.
+  - Platforms: the lockfile carries all six `@tsc-rs/*` platform packages (pnpm records every optional platform
+    package whatever the host, so no `supportedArchitectures` is needed). The Linux binaries are static (no `libc`
+    constraint), so glibc and musl images both work. `pnpm install --frozen-lockfile` and `tsc-rs --version` were
+    checked in a linux/arm64 Debian trixie container; a full Linux type check and build is first exercised by CI
+    (ubuntu-latest, x64) and by the control-plane image build (amd64/arm64).
+  - Emit at adoption, compared with tsc 6: byte-identical to `typescript@7.1.0-dev.20261008.1` (same pin). Against
+    tsc 6 the JS differs only in `import X, {} from "m"` becoming `import X from "m"` (same bindings and module
+    evaluation); 23 of 99 `.d.ts` files differ only in the order of type-literal members and union constituents (equal
+    after sorting both); source maps omit `sourceRoot: ""` and map compiler-written code (parameter-property
+    assignments, default parameters, some `case` blocks) at coarser positions — 407 of 338,494 positions resolve to
+    another original line.
+  - Upgrade policy: keep the exact pin; bump deliberately, one version at a time. For each bump rerun `pnpm typecheck`
+    with both compilers (diagnostics must match tsc 6, or the difference is explained and fixed for both), emit with
+    tsc 6 and tsc-rs into separate directories and diff `dist`, and run the full quality gates. If tsc-rs misbehaves,
+    switch the affected scripts back to `tsc` (TypeScript 6) and record why. Revisit when TypeScript 7 is released
+    as stable: its own native `tsc` may replace tsc-rs.

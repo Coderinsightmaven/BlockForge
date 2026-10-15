@@ -25,8 +25,8 @@ restart until an owner exists.
 | Script | |
 |---|---|
 | `dev` | `tsx watch` on `src/main.ts` (workspace packages resolve to their TS sources) |
-| `build` / `start` | `tsc -p tsconfig.build.json` → `dist/`; `node dist/main.js` (needs `@blockforge/contracts` built) |
-| `typecheck` / `lint` | `tsc --noEmit` over src+test; root ESLint config |
+| `build` / `start` | `tsc-rs -p tsconfig.build.json` → `dist/`; `node dist/main.js` (needs `@blockforge/contracts` built) |
+| `typecheck` / `lint` | `tsc-rs --noEmit` over src+test (TypeScript 6 fallback: `pnpm exec tsc -p tsconfig.json --noEmit`); root ESLint config |
 | `test` | vitest: unit + integration (real Postgres `blockforge_test`, VictoriaMetrics and MinIO from `pnpm infra:up`; the MinIO TLS certificate is trusted via `NODE_EXTRA_CA_CERTS` in the global setup) |
 | `db:generate` | drizzle-kit generate (run with the `@blockforge/source` condition) after schema changes (keep the `CREATE EXTENSION citext` line at the top of `0000_init.sql`) |
 | `db:migrate` | apply migrations without starting the server |
