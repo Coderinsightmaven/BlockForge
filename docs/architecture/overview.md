@@ -62,6 +62,7 @@ Rationale is summarised here; a dedicated ADR file is added under `docs/architec
 | ADR-010 | Web: React 19 + Vite + Tailwind v4 + Radix-based shadcn-style components + TanStack Router/Query + uPlot + React Flow | Typed routing, cache-first server state, uPlot handles high-frequency series cheaply; React Flow for the topology editor. |
 | ADR-011 | Minecraft workloads run in hardened containers (non-root UID, `no-new-privileges`, all caps dropped, memory/CPU/pids limits, no Docker socket) using Eclipse Temurin JRE images selected by required Java major version | Isolation, reproducibility; Java version comes from Mojang's authoritative per-version metadata. |
 | ADR-012 | Logs: agent streams stdout of every managed workload (rate-limited) to the control plane; control plane keeps a bounded ring buffer per server and parses lifecycle/player events; history comes from on-disk log files | One pipeline drives console, readiness detection, crash detection and player events. |
+| ADR-013 | Per-server MySQL/MariaDB databases (Phase 5) are created by the control plane itself over `mysql2` (one short-lived admin connection per operation, no pool), not by agents | Database hosts are shared infrastructure reachable from the control plane; keeps agents free of database credentials. Statements take no parameters, so values are allowlist-validated and quoted at the point of use (`databases/sql.ts`). |
 
 ## 4. Module boundaries
 

@@ -82,6 +82,18 @@ may drop and recreate them. Shapes mirror `packages/contracts/src/api/extensions
 | `player_sessions` | `id, server_id → servers CASCADE, name, uuid null, joined_at, left_at null, leave_reason null (≤ 256, untrusted)` index(server_id, joined_at desc); index(server_id, lower(name)); partial index(server_id) where left_at is null | From console join/leave events; open sessions are closed on stop/crash/unreachable or when missing from `list`. Retention 90 days. Migration 0005. |
 | `settings['extensions.uploads']` | `ExtensionUploadSettings` `{allowed, requireMetadata}` (default `{true, true}`) | Generic `/settings/:key` route. |
 
+### Phase 5 additions (databases) — migration 0008
+Shapes mirror `packages/contracts/src/api/databases.ts`.
+
+| Table | Key columns | Notes |
+|-------|-------------|-------|
+| `database_hosts` | `id, name unique, host, port (1–65535, default 3306), public_host null, username, password_enc, node_id → nodes SET NULL null, max_databases null (≥ 0; null = unlimited), tls_mode (disabled/preferred/required, default preferred), tls_ca_certificate null (PEM), notes, created_at, updated_at` index(node_id) | `password_enc` = `SecretBox.encryptToString` (AES-256-GCM, AAD `database-host:<id>`), never returned. Deleting a host with databases is refused (409 and the FK below). |
+| `server_databases` | `id, server_id → servers CASCADE, host_id → database_hosts RESTRICT, database_name, username, remote (default '%'), password_enc, created_by → users SET NULL, created_at, password_rotated_at null` unique(host_id, database_name), unique(host_id, username), index(server_id) | CHECK constraints repeat the SQL allowlists: `database_name ~ '^s[0-9a-f]{8}_[a-z0-9_]{1,48}$'`, `username ~ '^u[0-9a-f]{8}_[a-z0-9]{10}$'`, `remote ~ '^[a-z0-9.%:/-]{1,60}$'`. `password_enc` AAD `server-database:<id>`. Server deletion drops the databases on their hosts first (best effort, audited); remaining rows cascade. |
+| `servers` (changes) | `+ database_limit integer default 0` (CHECK ≥ 0) | 0 = databases disabled for non-administrators. |
+
+The migration also widens `role_permissions_permission_check` with the new permissions (`database_hosts.manage`,
+`servers.databases.view|create|update|delete|view_password`).
+
 ## Networks (Velocity)
 
 | Table | Key columns | Notes |

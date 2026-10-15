@@ -100,7 +100,13 @@ focus moved to Phase 5. Not blocking and still open: the live-only gaps in 1.3 a
   limitations.
 
 ## 3. Later phases (see `docs/CHECKLIST.md` for details)
-- **Phase 5 — Databases & remaining parity:** MySQL/MariaDB database hosts; create/rotate/delete per-server databases.
+- **Phase 5 — Databases & remaining parity:** database hosts and per-server databases implemented (2026-10-15,
+  pending cross-model review and a live run). Open:
+  - independent review of the Phase 5 change (control plane SQL/grant handling, web password handling);
+  - live run: a real plugin (e.g. LuckPerms) on the test node connecting to a database created through the UI;
+  - the web Databases tab and Database hosts page against the real control plane (component tests only so far);
+  - Pterodactyl's per-database `max_connections` (`MAX_USER_CONNECTIONS`) is not implemented;
+  - admin view of all databases on a host (only the count is shown).
 - **Phase 6 — Velocity & networks:**
   - network creation wizard;
   - proxy provisioning (Fill API);

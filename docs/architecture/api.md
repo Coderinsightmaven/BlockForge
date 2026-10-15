@@ -13,6 +13,9 @@ pagination (`?limit=&cursor=` → `{items, nextCursor}`) unless noted. Timestamp
 
 Permission column = what the route checks (scope resolved from the target resource).
 
+**Rate limits.** Besides the auth/enrollment limits and the per-API-key limit, the database routes that reach a
+database host or reveal a password are limited to 60 requests/minute per client IP and route (429 `RATE_LIMITED`).
+
 **Idempotency.** Job-creating routes (`POST /servers`, `POST /servers/:id/actions`,
 `DELETE /servers/:id`, backup/restore/network-apply routes, extension install/apply-updates/scan/rollback) accept an optional
 `Idempotency-Key` header (1–128 printable chars). The key is scoped to the user and route;
@@ -146,7 +149,7 @@ expire after 2 hours. World upload at creation is not implemented yet (`world.mo
 | POST | `/servers` | `CreateServerRequest` → `{server: Server, jobId}` (202, idempotent) | servers.create on node/network (+ servers.admin for another owner) |
 | GET | `/servers/:id` | → `Server` | servers.view |
 | PATCH | `/servers/:id` | `UpdateServerSettingsRequest` → `Server` | servers.settings.edit |
-| PATCH | `/servers/:id/build` | `UpdateServerBuildRequest` → `{server, restartRequired}` | servers.admin |
+| PATCH | `/servers/:id/build` | `UpdateServerBuildRequest` → `{server, restartRequired}` (incl. `databaseLimit`, Phase 5) | servers.admin |
 | POST | `/servers/:id/suspend` · `/unsuspend` | → `Server` (suspend stops the server) | servers.admin |
 | POST | `/servers/:id/reinstall` | → `{jobId}` (idempotent; stopped/crashed/provision_failed only) | servers.reinstall |
 | DELETE | `/servers/:id` | `?deleteData=true` → `{jobId}` | servers.delete |
@@ -389,6 +392,70 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   `server.players` / `global.players` (`GET /metrics/range`); no extra route.
 * Realtime: `player.joined` / `player.left` on `server:<id>`, delivered only to subscribers holding
   `servers.players.view` on that server (per-event filter on top of the topic's `servers.view`).
+
+## Databases (Phase 5) — see `api/databases.ts`
+MySQL/MariaDB database hosts (admin) and per-server databases (Pterodactyl "Databases"). The control plane connects
+to the hosts itself with the host's admin account (`mysql2`, one short-lived connection per operation, 10 s connect
+/ 15 s statement timeout, no LOCAL INFILE, cleartext auth refused); agents are not involved.
+
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/database-hosts` | → `DatabaseHost[]` (not paginated) | database_hosts.manage (global) |
+| POST | `/database-hosts` | `CreateDatabaseHostRequest` → `DatabaseHost` (201) | database_hosts.manage |
+| GET | `/database-hosts/:id` | → `DatabaseHost` | database_hosts.manage |
+| PATCH | `/database-hosts/:id` | `UpdateDatabaseHostRequest` → `DatabaseHost` | database_hosts.manage |
+| DELETE | `/database-hosts/:id` | → 204; 409 `{reason: "has_databases", count}` while it has databases | database_hosts.manage |
+| POST | `/database-hosts/:id/test` | → `DatabaseHostTestResult` (saved settings) | database_hosts.manage, rate-limited |
+| POST | `/database-hosts/test` | `TestDatabaseHostRequest` → `DatabaseHostTestResult` (unsaved settings) | database_hosts.manage, rate-limited |
+| GET | `/servers/:id/databases` | → `ServerDatabase[]` (no passwords) | servers.databases.view |
+| POST | `/servers/:id/databases` | `CreateServerDatabaseRequest` `{name, remote?, hostId?}` → `ServerDatabase` (201) | servers.databases.create (+ database_hosts.manage for `hostId`), rate-limited |
+| GET | `/servers/:id/databases/:databaseId/password` | → `ServerDatabasePassword` (`Cache-Control: no-store`, audited) | servers.databases.view_password, rate-limited |
+| POST | `/servers/:id/databases/:databaseId/rotate-password` | → `ServerDatabase` | servers.databases.update, rate-limited |
+| DELETE | `/servers/:id/databases/:databaseId` | → 204 | servers.databases.delete, rate-limited |
+
+* **Host admin password** is write-only: never returned (`DatabaseHost` is strict), logged or audited (audit
+  records `passwordChanged`). Omitting it on PATCH keeps the stored one, **except** when a connection setting changes
+  (`host`, `port`, `username`, `tlsMode`, `tlsCaCertificate`): then it must be sent again (400, issue path
+  `password`), so a stored password is never sent to a different address or over a weaker channel. The same rule
+  applies to `POST /database-hosts/test` with `hostId` instead of `password`. Test results carry only fixed,
+  credential-free messages (`access denied for the admin user …`, `connection refused`, `TLS error: …`).
+* **TLS** (`tlsMode`): `disabled`; `preferred` (TLS when offered, certificate not verified, plain otherwise);
+  `required` (TLS or fail; without `tlsCaCertificate` the certificate is not verified, with it the chain must verify
+  against that CA — MySQL `VERIFY_CA`, the host name is not checked).
+* **Names.** Database `s<shortId>_<name>` (`name` = 1–48 of `[a-z0-9_]`, ≤ 58 chars in total), username
+  `u<shortId>_<10 random [a-z0-9]>` (20 chars), password 32 random chars of `[A-Za-z0-9-_.~]` (at least one of each
+  class, so `validate_password` MEDIUM accepts it). `remote` ("connections from", default `%`) is normalised by
+  `normalizeDatabaseRemote`: `%`, IPv4, `10.0.%`-style wildcards, CIDR (rewritten to the portable netmask form
+  `10.0.0.0/255.0.0.0`), address/netmask, host names (optionally `%.example.com`), IPv6.
+* **Statements** (`databases/sql.ts`): `CREATE DATABASE … utf8mb4`, `CREATE USER … IDENTIFIED BY …`,
+  `GRANT <Pterodactyl's 18 database privileges> ON \`db\`.* TO …` (never GRANT OPTION or anything global),
+  `ALTER USER … IDENTIFIED BY …`, `DROP DATABASE IF EXISTS`, `DROP USER IF EXISTS`. These statements take no `?`
+  parameters, so every identifier/value is re-validated against an allowlist regex right before it is backtick- or
+  single-quoted; nothing else reaches SQL. In the GRANT the `_` of the database name is escaped (`\_`), because `_`
+  is a wildcard in database-level grants (an unescaped grant on `s…_a_b` would also cover — and allow creating —
+  `s…_aXb`); on MySQL with `partial_revokes = ON` grant names are literal and the escape is omitted.
+* **Host choice** (no `hostId`): the first host with capacity (`maxDatabases`, null = unlimited) among hosts linked
+  to the server's node, then unlinked hosts, then hosts linked to other nodes (oldest first). None → 422
+  `PRECONDITION_FAILED` `{reason: "no_host"}`; an explicitly chosen full host → 409 `{reason: "host_full"}`.
+* **Limit** `Server.databaseLimit` (set with `PATCH /servers/:id/build`, default 0): 0 disables databases for
+  non-administrators (403 `{reason: "disabled"}`), at the limit 409 `{reason: "limit_reached", limit}`; holders of
+  `servers.admin` are not limited (as for backups). Concurrent creations are serialised per server. Lowering the
+  limit below the usage keeps the existing databases.
+* **Create** reserves the row (limits, host capacity, names) in one transaction, then creates database, user and
+  grant on the host. On failure it removes only what this request created (an existing database of the same name
+  → 409 `{reason: "name_taken"}` and is left untouched) and the row; host failures → 502 `UPSTREAM_ERROR`
+  `{reason: "host_error", code}`. Refused while the server is being deleted (409 `INVALID_STATE`).
+* **Rotate** updates the stored (encrypted) password and runs `ALTER USER` in one transaction: a host failure keeps
+  the old password everywhere (502). **Delete** drops database and user on the host, then the row (a host failure
+  keeps the row: retry).
+* **Server deletion** gets a `databases` step after the container is removed: every database of the server is
+  dropped on its host (one connection per host); what cannot be dropped is written to the job log as a warning and
+  audited (`server.database.delete`, `outcome: failed`, with host, database and username to drop by hand). The step
+  never fails the job; the rows go with the server.
+* **Audit**: `database_host.create|update|delete`, `server.database.create|rotate_password|delete` (also failed
+  attempts), `server.database.password.view` (every reveal). No password, hash or SQL statement is ever recorded.
+* **Rate limits**: 60 requests/minute per client IP and route on the routes that reach a host or reveal a password.
+* No realtime events: all mutations are synchronous; clients refetch the list after their own changes.
 
 ## Agent endpoints (agent auth, not cookie auth)
 `POST /agent/v1/enroll`, `GET /agent/v1/connect` (WS), `POST|GET /agent/v1/transfers/:id`,
