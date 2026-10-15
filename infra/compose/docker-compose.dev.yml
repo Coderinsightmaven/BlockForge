@@ -59,7 +59,36 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  # MySQL-compatible database hosts for the per-server databases feature (Phase 5). Tests connect as root
+  # (dev-only password) and create/drop throwaway databases and users. MariaDB 11.4 serves TLS with an
+  # auto-generated certificate; MySQL 8.4 uses caching_sha2_password with its generated certificate.
+  mariadb:
+    image: mariadb:11.4.13
+    environment:
+      MARIADB_ROOT_PASSWORD: blockforge-dev-only
+    ports: ["127.0.0.1:53306:3306"]
+    volumes: ["mariadbdata:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  mysql:
+    image: mysql:8.4.11
+    environment:
+      MYSQL_ROOT_PASSWORD: blockforge-dev-only
+      MYSQL_ROOT_HOST: "%"
+    ports: ["127.0.0.1:53307:3306"]
+    volumes: ["mysqldata:/var/lib/mysql"]
+    healthcheck:
+      # TCP only answers once initialisation has finished (the init server runs without networking).
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pblockforge-dev-only --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
 volumes:
   pgdata: {}
   vmdata: {}
   miniodata: {}
+  mariadbdata: {}
+  mysqldata: {}
