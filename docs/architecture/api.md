@@ -471,18 +471,23 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   if the statement cannot be confirmed stopped is the outcome unknown (502 with `unknownOutcome: true`) and the
   database's `status` says what happens next. The admin account therefore needs `SELECT` on `mysql.user` (and may
   kill its own threads, which needs no privilege).
-* **KILL only on a proven direct connection.** Every session records `CONNECTION_ID()` and the server's identity
-  (`@@server_id`, `@@hostname`, `@@port`, `VERSION()`, plus `@@server_uuid` on MySQL). `KILL` is sent — and a statement
-  counted as stopped — only when the original session's greeting id equals its `CONNECTION_ID()` and the fresh
-  connection reports the same server identity with its own greeting id equal to its `CONNECTION_ID()`. Behind a
-  proxy or load balancer (MaxScale, ProxySQL, HAProxy to several servers) that proof fails: nothing is killed (an id
-  could name an unrelated connection on another server) and the outcome stays unknown until reconciled. Test
-  connection reports this as `proxyDetected` (greeting id ≠ `CONNECTION_ID()`, or two sessions reaching different
-  servers); connect BlockForge directly to the database server where possible.
+* **KILL only for our own statement on a proven direct connection.** Every session statement carries a random
+  per-statement nonce comment (`/* bf:<nonce> */ …`, visible in `PROCESSLIST.INFO`), and every session records
+  `CONNECTION_ID()` and the server's identity (`@@server_id`, `@@hostname`, `@@port`, `VERSION()`, plus the server's
+  unique id: `@@server_uuid` on MySQL, `@@server_uid` on MariaDB 10.5.26 / 10.6.19 / 10.11.9 / 11.4.3 and later).
+  `KILL QUERY` is sent only when both connections are direct (greeting id = `CONNECTION_ID()`), report the same server
+  identity, and the process-list row of the recorded thread belongs to the admin user and shows the statement's nonce.
+  Without a KILL a statement counts as stopped only when the unique ids prove the same server and the thread is gone
+  or runs something else; on older MariaDB without `@@server_uid` only the nonce can prove it. Otherwise — a proxy or
+  load balancer (MaxScale, ProxySQL, HAProxy to several servers), an identity query the host refuses, a foreign thread —
+  nothing is killed and the outcome stays unknown until reconciled. Test connection reports `proxyDetected`
+  (greeting id ≠ `CONNECTION_ID()`, two sessions reaching different servers, or an unreadable identity); connect
+  BlockForge directly to the database server where possible.
 * **Shutdown** never waits for a host: before in-flight requests and background tasks are awaited the control plane
-  refuses new host connections, cancels the sweep and abandons running statements without `KILL` round trips; their
-  outcomes are recorded as unknown (`password_unknown` / `cleanup_pending`), and server-deletion jobs see `SHUTDOWN`
-  and are retried after the restart.
+  refuses new host connections, cancels the sweep, abandons running statements and destroys the connections of abort
+  procedures already in progress (a `KILL` waiting for a host that stopped answering); outcomes are recorded as unknown
+  (`password_unknown` / `cleanup_pending`), requests waiting on them answer 503 `{reason: "host_error", code:
+  "SHUTDOWN"}`, and server-deletion jobs see `SHUTDOWN` and are retried after the restart.
 * **Status** (`ServerDatabase.status`): `creating` / `rotating` / `deleting` while that operation runs; `ready`;
   `password_unknown` (a rotation's outcome could not be determined — the password route answers 409
   `{reason: "password_unknown"}`; rotating again fixes it); `cleanup_pending` (a failed create, a deletion that got
@@ -514,20 +519,33 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   "the database was not deleted"; retry); no answer and not confirmed stopped → `cleanup_pending` (502
   `unknownOutcome`); otherwise the host is inspected: both gone → deleted (204), both present → unchanged (502),
   anything else — e.g. `DROP USER` failed after the database was dropped — → `cleanup_pending` (502, "partly
-  deleted"; the sweep finishes the requested deletion).
+  deleted"; the sweep finishes the requested deletion); stopped but the host could not be inspected → `cleanup_pending`
+  (502, result `unchecked`).
 * **Forget** (`DELETE …?forget=true`, contracts `DeleteServerDatabaseQuery`; also requires `database_hosts.manage`):
   removes only BlockForge's entry without contacting the host — the database and its account stay there. For hosts
   that are permanently gone, so their entry can be deleted. Refused (409 `busy`) while a live operation holds the
   database; audited as `server.database.forget` with host, database and username.
 * **Sweep** (maintenance, every minute and at start): resolves abandoned claims, then drops `cleanup_pending`
-  databases whose window has passed — oldest first, at most 20 per host and run (fair share), 4 hosts at a time, one
-  session per host; after any failure on a host its remaining rows wait for the next run (a frozen host costs one
-  statement timeout per run, not one per row). Cancelled at shutdown.
+  databases whose window has passed (re-checked when each row is claimed) — the oldest 20 of every host per run (fair
+  share), 4 hosts at a time, one session per host; after any failure on a host its remaining rows wait for the next run
+  (a frozen host costs one statement timeout per run, not one per row). Cancelled at shutdown.
 * **Test connection** (`DatabaseHostTestResult`) also reports `proxyDetected` (see above) and `missingPrivileges`:
-  global privileges the admin account seems to lack according to `information_schema.USER_PRIVILEGES` of
-  `CURRENT_USER()` — `CREATE USER`, `GRANT OPTION` and the 18 database privileges it hands out — plus `SELECT on
-  mysql.user` (checked by a query). Privileges granted only through roles or only on some databases are not seen; the
-  UI says so.
+  privileges the admin account seems to lack — `CREATE USER` (global), `GRANT OPTION` and the 18 database privileges
+  it hands out, held globally (`information_schema.USER_PRIVILEGES` of `CURRENT_USER()`) or by a database-level grant
+  whose pattern covers BlockForge's names (`SCHEMA_PRIVILEGES`, matched against `s00000000_probe` with the grant
+  wildcard semantics; literally on MySQL with `partial_revokes = ON`) — plus `SELECT on mysql.user` (checked by a
+  query). Privileges granted only through roles are not seen; the UI says so.
+* **Recommended admin account** (least privilege; tested on MariaDB 11.4 — create, rotate and delete work and the check
+  reports nothing missing):
+  ```sql
+  CREATE USER 'blockforge'@'<control-plane address>' IDENTIFIED BY '<strong password>';
+  GRANT ALL PRIVILEGES ON `s%`.* TO 'blockforge'@'<control-plane address>' WITH GRANT OPTION;
+  GRANT CREATE USER ON *.* TO 'blockforge'@'<control-plane address>';
+  GRANT SELECT ON mysql.user TO 'blockforge'@'<control-plane address>';
+  ```
+  `s%` covers every BlockForge database (`s<shortId>_<name>`) and — like any database-level wildcard grant — any other
+  database whose name starts with `s`: keep the account's host dedicated to BlockForge databases. On MySQL with
+  `partial_revokes = ON` grant names are literal and the `s%` grant does not work; use global privileges there.
 * **Server deletion** gets a `databases` step after the container is removed: every database of the server is
   dropped on its host, each row deleted (and audited) as soon as its database is gone. One session per host; after an
   unanswered statement the next database gets a fresh session, a host that cannot be reached marks its remaining
@@ -535,9 +553,9 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   deadline). The step honours job cancellation (the running statement is killed, the job ends cancelled, the server
   stays), control-plane shutdown (the job is retried after the restart) and its own deadline (5 minutes; databases
   not reached are recorded with code `DEADLINE`). Problems are written to the job log as warnings and audited
-  (`server.database.delete`, `outcome: failed` with `details.result` `unchanged` / `partial` / `unknown` /
-  `not_attempted` — an unconfirmed drop is logged as "outcome unknown, may still complete", not as a refusal; the audit
-  outcome enum has no "unknown") with host, database and username to check and drop by hand. The step never fails the
+  (`server.database.delete`, `outcome: failed` with `details.result` `unchanged` / `partial` / `unknown` / `unchecked` /
+  `not_attempted` — an unconfirmed drop is logged as "outcome unknown, may still complete", a stopped one whose result
+  could not be checked as such, neither as a refusal; the audit outcome enum has no "unknown") with host, database and username to check and drop by hand. The step never fails the
   job and the remaining rows go with the server.
 * **Audit**: `database_host.create|update|delete`, `server.database.create|rotate_password|delete` (also failed
   attempts, with `result`, `cleanupPending` / `passwordUnknown` where relevant), `server.database.forget`,
