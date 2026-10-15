@@ -1,15 +1,17 @@
 import { X509Certificate } from "node:crypto";
+import { createServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { Writable } from "node:stream";
 import type { TLSSocket } from "node:tls";
 import { DatabaseHost, DatabaseHostTestResult, Server, ServerDatabase, ServerDatabasePassword } from "@blockforge/contracts";
 import mysql from "mysql2/promise";
+import pg from "pg";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createLogger } from "../../src/logging/logger.js";
 import { createUserClient, responseLog, startWithOwner, type ApiClient, type TestApp } from "../support/app.js";
 import { testPool } from "../support/db.js";
-import { TEST_MARIADB, TEST_MYSQL } from "../support/env.js";
+import { TEST_DATABASE_URL, TEST_MARIADB, TEST_MYSQL } from "../support/env.js";
 import type { FakeAgent } from "../support/fake-agent.js";
-import { catalogOptions, connectSimNode, paperRequest, templateIdByKey, waitJob } from "../support/panel.js";
+import { catalogOptions, connectSimNode, paperRequest, poll, templateIdByKey, waitJob } from "../support/panel.js";
 
 /**
  * Runs against the MariaDB 11.4 service of infra/compose (`pnpm infra:up`; required) and, when it answers, the
@@ -100,7 +102,33 @@ async function cleanTarget(target: Target): Promise<void> {
   }
 }
 
+/** TCP servers that accept connections and never answer (a hanging database host). */
+const hangers: Hanger[] = [];
+async function hangingHost(): Promise<{ port: number; open: () => number }> {
+  const sockets = new Set<Socket>();
+  const srv = createServer((s) => {
+    sockets.add(s);
+    s.on("close", () => sockets.delete(s));
+    s.on("error", () => undefined);
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  hangers.push({ srv, sockets });
+  return { port: (srv.address() as AddressInfo).port, open: () => sockets.size };
+}
+interface Hanger {
+  srv: NetServer;
+  sockets: Set<Socket>;
+}
+
+/** Dedicated Postgres connections of probing tests (outside the app's pool). */
+const probes: pg.Client[] = [];
+
 afterEach(async () => {
+  for (const p of probes.splice(0)) await p.end().catch(() => undefined);
+  for (const h of hangers.splice(0)) {
+    for (const s of h.sockets) s.destroy();
+    await new Promise((r) => h.srv.close(r));
+  }
   for (const a of agents.splice(0)) await a.close().catch(() => undefined);
   await t?.close();
   t = null;
@@ -110,7 +138,7 @@ afterAll(async () => {
   for (const target of TARGETS) await cleanTarget(target);
 });
 
-async function boot() {
+async function boot(databases: { connectTimeoutMs?: number; generateUsername?: (shortId: string) => string } = {}) {
   logLines = [];
   const sink = new Writable({
     write(chunk, _enc, cb) {
@@ -124,7 +152,7 @@ async function boot() {
     catalog: cat.catalog,
     serverJobs: { readyTimeoutMs: 10_000, slpWaitMs: 0 },
     logger: createLogger("debug", {}, sink),
-    databases: { connectTimeoutMs: 3000, queryTimeoutMs: 10_000 },
+    databases: { connectTimeoutMs: 3000, queryTimeoutMs: 10_000, ...databases },
   });
   t = r.t;
   return r;
@@ -227,20 +255,26 @@ describe("database hosts (admin)", () => {
     expect(rows[0].password_enc).toMatch(/^v\d+\./);
     expect(rows[0].password_enc).not.toContain(adminPassword);
 
-    // Test connection: preferred (MariaDB 11.4 offers TLS), disabled, required, required + unrelated CA.
+    // Test connection: preferred (MariaDB 11.4 offers TLS), disabled, required (not verified), verify_ca.
     const tested = DatabaseHostTestResult.parse((await owner.post(`/database-hosts/${host.id}/test`)).json());
     expect(tested).toMatchObject({ ok: true, error: null, tls: true });
     expect(tested.serverVersion).toMatch(MARIADB.version);
     const unsaved = (over: Record<string, unknown>) => owner.post("/database-hosts/test", { host: MARIADB.host, port: MARIADB.port, username: "root", password: adminPassword, ...over });
     expect((await unsaved({ tlsMode: "disabled" })).json()).toMatchObject({ ok: true, tls: false });
+    // `required` accepts any certificate (encrypted, host not verified) — even one no CA vouches for.
     expect((await unsaved({ tlsMode: "required" })).json()).toMatchObject({ ok: true, tls: true });
-    const pinned = DatabaseHostTestResult.parse((await unsaved({ tlsMode: "required", tlsCaCertificate: UNRELATED_CA })).json());
+    const pinned = DatabaseHostTestResult.parse((await unsaved({ tlsMode: "verify_ca", tlsCaCertificate: UNRELATED_CA })).json());
     expect(pinned.ok).toBe(false);
     expect(pinned.error).toMatch(/^TLS error: /);
     // MariaDB 11.4 serves a self-signed certificate generated at start-up: pinning exactly it verifies.
     const own = await serverCertificatePem(MARIADB);
-    expect((await unsaved({ tlsMode: "required", tlsCaCertificate: own })).json()).toMatchObject({ ok: true, tls: true });
-    expect((await unsaved({ tlsMode: "preferred", tlsCaCertificate: UNRELATED_CA })).json()).toMatchObject({ ok: false });
+    expect((await unsaved({ tlsMode: "verify_ca", tlsCaCertificate: own })).json()).toMatchObject({ ok: true, tls: true });
+    // The CA is accepted only with (and required by) verify_ca.
+    expect(await status(unsaved({ tlsMode: "verify_ca" }))).toBe("400 VALIDATION_FAILED");
+    expect(await status(unsaved({ tlsMode: "required", tlsCaCertificate: own }))).toBe("400 VALIDATION_FAILED");
+    expect(await status(unsaved({ tlsMode: "preferred", tlsCaCertificate: own }))).toBe("400 VALIDATION_FAILED");
+    expect(await status(owner.post("/database-hosts", hostBody(MARIADB, { name: "y", tlsMode: "required", tlsCaCertificate: own })))).toBe("400 VALIDATION_FAILED");
+    expect(await status(owner.post("/database-hosts", hostBody(MARIADB, { name: "y", tlsMode: "verify_ca" })))).toBe("400 VALIDATION_FAILED");
     const wrong = DatabaseHostTestResult.parse((await unsaved({ password: "definitely-wrong-password-123" })).json());
     expect(wrong).toMatchObject({ ok: false, error: "access denied for the admin user (check the username and password)" });
     const refused = DatabaseHostTestResult.parse((await unsaved({ port: 1 })).json());
@@ -248,7 +282,7 @@ describe("database hosts (admin)", () => {
 
     // The stored password is reused only for the saved connection settings.
     expect((await owner.post("/database-hosts/test", { host: MARIADB.host, port: MARIADB.port, username: "root", hostId: host.id })).json()).toMatchObject({ ok: true });
-    for (const change of [{ port: 1 }, { host: "localhost" }, { username: "other" }, { tlsMode: "disabled" }, { tlsCaCertificate: UNRELATED_CA }]) {
+    for (const change of [{ port: 1 }, { host: "localhost" }, { username: "other" }, { tlsMode: "disabled" }, { tlsMode: "verify_ca", tlsCaCertificate: UNRELATED_CA }]) {
       const body = { host: MARIADB.host, port: MARIADB.port, username: "root", hostId: host.id, ...change };
       const res = await owner.post("/database-hosts/test", body);
       expect(res.statusCode, JSON.stringify(change)).toBe(400);
@@ -266,6 +300,16 @@ describe("database hosts (admin)", () => {
     expect((await owner.post(`/database-hosts/${host.id}/test`)).json()).toMatchObject({ ok: false });
     expect((await owner.patch(`/database-hosts/${host.id}`, { tlsMode: "required", password: adminPassword })).statusCode).toBe(200);
     expect((await owner.post(`/database-hosts/${host.id}/test`)).json()).toMatchObject({ ok: true, tls: true });
+    // PATCH applies the CA rule to the resulting host; switching away from verify_ca clears the CA.
+    const toVerify = await owner.patch(`/database-hosts/${host.id}`, { tlsMode: "verify_ca", password: adminPassword });
+    expect(toVerify.statusCode).toBe(400);
+    expect(toVerify.json().error.details.issues[0].path).toBe("tlsCaCertificate");
+    expect(await status(owner.patch(`/database-hosts/${host.id}`, { tlsCaCertificate: own, password: adminPassword }))).toBe("400 VALIDATION_FAILED");
+    const verified = await owner.patch(`/database-hosts/${host.id}`, { tlsMode: "verify_ca", tlsCaCertificate: own, password: adminPassword });
+    expect(DatabaseHost.parse(verified.json())).toMatchObject({ tlsMode: "verify_ca", tlsCaCertificate: own });
+    expect((await owner.post(`/database-hosts/${host.id}/test`)).json()).toMatchObject({ ok: true, tls: true });
+    const back = await owner.patch(`/database-hosts/${host.id}`, { tlsMode: "required", password: adminPassword });
+    expect(DatabaseHost.parse(back.json())).toMatchObject({ tlsMode: "required", tlsCaCertificate: null });
 
     // Only database_hosts.manage holders (global) reach these routes; the denial is audited.
     const serverAdmin = await createUserClient(t, owner, "sadmin@example.com", [{ roleKey: "server_admin", scopeType: "global", scopeId: null }]);
@@ -278,7 +322,9 @@ describe("database hosts (admin)", () => {
 
     // Audit trail: what changed, never the password.
     const { rows: audit } = await testPool().query("SELECT action, details FROM audit_events WHERE target_type = 'database_host' ORDER BY id");
-    expect(audit.map((a) => a.action)).toEqual(["database_host.create", "database_host.update", "database_host.update", "database_host.update"]);
+    expect(audit.map((a) => a.action)).toEqual(["database_host.create", ...Array<string>(5).fill("database_host.update")]);
+    expect(audit[4].details.changes).toMatchObject({ tlsMode: "verify_ca", tlsCaCertificate: "[pinned]" });
+    expect(audit[5].details.changes).toMatchObject({ tlsMode: "required", tlsCaCertificate: null });
     expect(audit[2].details).toMatchObject({ passwordChanged: true });
 
     // Delete refused while the host has databases; allowed afterwards.
@@ -556,6 +602,175 @@ describe.skipIf(!MYSQL_UP)("MySQL with partial_revokes = ON", () => {
       await r.query("SET GLOBAL partial_revokes = OFF");
       await r.end();
     }
+  });
+});
+
+const countRows = async (sql: string, params: unknown[] = []) => (await testPool().query<{ n: number }>(sql, params)).rows[0]!.n;
+
+describe("host operations never hold Postgres resources; one operation per database", () => {
+  it("rotations and deletions against a hanging host hold no transaction, lock or pool connection; a second operation on the same database is busy", async () => {
+    const { t, owner } = await boot({ connectTimeoutMs: 6000 });
+    await connectSimNode(t, owner, { agents });
+    const host = await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    // 12 databases — more than the 10 connections of the test pool (the installation owner is not limited).
+    const dbs: ServerDatabase[] = [];
+    for (let i = 0; i < 12; i++) {
+      const res = await owner.post(`/servers/${srv.id}/databases`, { name: `h${i}` });
+      expect(res.statusCode, res.body).toBe(201);
+      dbs.push(ServerDatabase.parse(res.json()));
+    }
+    const first = dbs[0]!;
+    const passwordOf = async (d: ServerDatabase) => ServerDatabasePassword.parse((await owner.get(`/servers/${srv.id}/databases/${d.id}/password`)).json()).password;
+    const oldPassword = await passwordOf(first);
+    const hang = await hangingHost();
+    expect((await owner.patch(`/database-hosts/${host.id}`, { port: hang.port, password: MARIADB.password })).statusCode).toBe(200);
+    // Probes use their own connection: the app shares the 10-connection test pool, which must stay free.
+    const probe = new pg.Client({ connectionString: TEST_DATABASE_URL });
+    probes.push(probe);
+    await probe.connect();
+    const probeCount = async (sql: string) => (await probe.query<{ n: number }>(sql)).rows[0]!.n;
+    const IDLE_IN_TX = "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND query ILIKE '%server_databases%'";
+    const LOCKS = "SELECT count(*)::int AS n FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'server_databases' AND l.pid <> pg_backend_pid()";
+
+    const started = Date.now();
+    const rotations = dbs.map((d) => owner.post(`/servers/${srv.id}/databases/${d.id}/rotate-password`));
+    // Wait until the hanging host holds the connections (≥ 10 = the pool size, so this also holds when an
+    // implementation pins a pool connection per operation), then look at Postgres.
+    await poll(async () => hang.open() >= 10, 5000, 25);
+    await new Promise((r) => setTimeout(r, 200));
+    // No open transaction touches server_databases, no lock is held on it, every one of the 12 reached the
+    // host (none is waiting for a pool connection), and unrelated requests are served at once.
+    expect(await probeCount(IDLE_IN_TX)).toBe(0);
+    expect(await probeCount(LOCKS)).toBe(0);
+    expect(hang.open()).toBe(12);
+    expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE operation = 'rotating'")).toBe(12);
+    const t0 = Date.now();
+    expect((await owner.get(`/servers/${srv.id}/databases`)).statusCode).toBe(200);
+    expect((await owner.get(`/servers/${srv.id}`)).statusCode).toBe(200);
+    expect(Date.now() - t0).toBeLessThan(2500);
+    // A second operation on a database being rotated is refused cleanly; reading its password is not blocked.
+    expect(await status(owner.delete(`/servers/${srv.id}/databases/${first.id}`))).toBe("409 CONFLICT busy");
+    expect(await status(owner.post(`/servers/${srv.id}/databases/${first.id}/rotate-password`))).toBe("409 CONFLICT busy");
+    expect(await passwordOf(first)).toBe(oldPassword);
+    expect(Date.now() - started).toBeLessThan(6000); // all of the above happened while the rotations were pending
+
+    const results = await Promise.all(rotations);
+    expect(results.map((r) => r.statusCode)).toEqual(Array<number>(12).fill(502));
+    expect(results[0]!.json().error.details).toEqual({ reason: "host_error", code: "ETIMEDOUT" });
+    // Claims released; the old password is still the one stored and the one the host accepts.
+    expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE operation IS NOT NULL")).toBe(0);
+    expect(await passwordOf(first)).toBe(oldPassword);
+    await (await asUser(MARIADB, first, oldPassword)).end();
+
+    // Deletion against the hanging host: the same database cannot be rotated meanwhile; the 502 keeps the row.
+    const deleting = owner.delete(`/servers/${srv.id}/databases/${first.id}`);
+    await poll(async () => hang.open() >= 1, 5000, 25);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await probeCount(IDLE_IN_TX)).toBe(0);
+    expect(await probeCount(LOCKS)).toBe(0);
+    expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE operation = 'deleting'")).toBe(1);
+    expect(await status(owner.post(`/servers/${srv.id}/databases/${first.id}/rotate-password`))).toBe("409 CONFLICT busy");
+    expect(await status(deleting)).toBe("502 UPSTREAM_ERROR host_error");
+    expect(((await owner.get(`/servers/${srv.id}/databases`)).json() as ServerDatabase[]).some((d) => d.id === first.id)).toBe(true);
+    expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE operation IS NOT NULL")).toBe(0);
+
+    // An abandoned claim (process crash) blocks until it is stale, then is taken over.
+    expect((await owner.patch(`/database-hosts/${host.id}`, { port: MARIADB.port, password: MARIADB.password })).statusCode).toBe(200);
+    await testPool().query("UPDATE server_databases SET operation = 'rotating', operation_token = gen_random_uuid(), operation_started_at = now() WHERE id = $1", [first.id]);
+    expect(await status(owner.post(`/servers/${srv.id}/databases/${first.id}/rotate-password`))).toBe("409 CONFLICT busy");
+    await testPool().query("UPDATE server_databases SET operation_started_at = now() - interval '10 minutes' WHERE id = $1", [first.id]);
+    expect((await owner.post(`/servers/${srv.id}/databases/${first.id}/rotate-password`)).statusCode).toBe(200);
+    const rotated = await passwordOf(first);
+    expect(rotated).not.toBe(oldPassword);
+    expect(await connectError(MARIADB, first, oldPassword)).toBe("ER_ACCESS_DENIED_ERROR");
+    await (await asUser(MARIADB, first, rotated)).end();
+  }, 120_000);
+
+  it("concurrent rotate and delete of one database: one wins, the other is refused or finds it gone, and host and row agree", async () => {
+    const { t, owner } = await boot();
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    const r = await root(MARIADB);
+    const seen = new Set<string>();
+    for (let i = 0; i < 6; i++) {
+      const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: `race${i}` })).json());
+      const [rot, del] = await Promise.all([
+        owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`),
+        owner.delete(`/servers/${srv.id}/databases/${db.id}`),
+      ]);
+      seen.add(`${rot.statusCode}/${del.statusCode}`);
+      expect([200, 404, 409], rot.body).toContain(rot.statusCode);
+      expect([204, 409], del.body).toContain(del.statusCode);
+      expect(rot.statusCode === 409 && del.statusCode === 409).toBe(false);
+      const [onHost] = await r.query("SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?", [db.database]);
+      const [account] = await r.query("SELECT user FROM mysql.user WHERE user = ?", [db.username]);
+      const row = await countRows("SELECT count(*)::int AS n FROM server_databases WHERE id = $1", [db.id]);
+      if (del.statusCode === 204) {
+        expect([row, (onHost as unknown[]).length, (account as unknown[]).length]).toEqual([0, 0, 0]);
+      } else {
+        expect([row, (onHost as unknown[]).length, (account as unknown[]).length]).toEqual([1, 1, 1]);
+        expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE id = $1 AND operation IS NULL", [db.id])).toBe(1);
+        const pw = ServerDatabasePassword.parse((await owner.get(`/servers/${srv.id}/databases/${db.id}/password`)).json()).password;
+        await (await asUser(MARIADB, db, pw)).end();
+        expect((await owner.delete(`/servers/${srv.id}/databases/${db.id}`)).statusCode).toBe(204);
+      }
+    }
+    await r.end();
+    expect(seen.size).toBeGreaterThan(0);
+  }, 120_000);
+});
+
+describe("edge cases on the host", () => {
+  it("a pre-existing database account with the generated name: create fails safely and never drops or changes that account", async () => {
+    const { t, owner } = await boot({ generateUsername: (s) => `u${s}_collision0` });
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 2 });
+    const victim = `u${srv.shortId}_collision0`;
+    const theirs = "Pre-existing-Passw0rd";
+    const r = await root(MARIADB);
+    await r.query(`CREATE DATABASE \`${FOREIGN_DB}\``);
+    await r.query(`CREATE USER \`${victim}\`@\`%\` IDENTIFIED BY '${theirs}'`);
+    await r.query(`GRANT SELECT ON \`${FOREIGN_DB}\`.* TO \`${victim}\`@\`%\``);
+
+    const res = await owner.post(`/servers/${srv.id}/databases`, { name: "victim" });
+    expect(res.statusCode, res.body).toBe(502);
+    expect(res.json().error.details).toEqual({ reason: "host_error", code: "ER_CANNOT_USER" });
+    // The account is untouched: same password, same grant; the database this request created is gone again.
+    const own = await mysql.createConnection({ host: MARIADB.host, port: MARIADB.port, user: victim, password: theirs, database: FOREIGN_DB, ssl: { rejectUnauthorized: false } });
+    await own.end();
+    const [grants] = await r.query(`SHOW GRANTS FOR \`${victim}\`@\`%\``);
+    expect((grants as Record<string, string>[]).map((g) => Object.values(g)[0]!).join("\n")).toContain(`ON \`${FOREIGN_DB}\`.*`);
+    const [dbs] = await r.query("SELECT schema_name FROM information_schema.schemata WHERE schema_name = ?", [`s${srv.shortId}_victim`]);
+    expect(dbs).toEqual([]);
+    expect((await owner.get(`/servers/${srv.id}/databases`)).json()).toEqual([]);
+    const { rows } = await testPool().query("SELECT outcome, details FROM audit_events WHERE action = 'server.database.create'");
+    expect(rows).toEqual([expect.objectContaining({ outcome: "failed", details: expect.objectContaining({ code: "ER_CANNOT_USER", username: victim }) })]);
+    await r.end();
+  });
+
+  it("an IPv6 account host (::1): created, granted, rotated and dropped for exactly that host", async () => {
+    const { t, owner } = await boot();
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "v6", remote: "::1" })).json());
+    expect(db.remote).toBe("::1");
+    const r = await root(MARIADB);
+    const [acct] = await r.query("SELECT host AS host FROM mysql.user WHERE user = ?", [db.username]);
+    expect(acct).toEqual([{ host: "::1" }]);
+    const [grantRows] = await r.query(`SHOW GRANTS FOR \`${db.username}\`@\`::1\``);
+    expect((grantRows as Record<string, string>[]).map((g) => Object.values(g)[0]!).join("\n")).toContain(`ON \`${db.database.replaceAll("_", "\\_")}\`.*`);
+    // This client reaches MariaDB over IPv4 (Docker's port proxy), so the ::1-only account must refuse it.
+    const password = ServerDatabasePassword.parse((await owner.get(`/servers/${srv.id}/databases/${db.id}/password`)).json()).password;
+    expect(await connectError(MARIADB, db, password)).toMatch(/ER_ACCESS_DENIED_ERROR|ER_HOST_NOT_PRIVILEGED/);
+    expect((await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`)).statusCode).toBe(200);
+    expect((await owner.delete(`/servers/${srv.id}/databases/${db.id}`)).statusCode).toBe(204);
+    const [gone] = await r.query("SELECT host FROM mysql.user WHERE user = ?", [db.username]);
+    expect(gone).toEqual([]);
+    await r.end();
   });
 });
 

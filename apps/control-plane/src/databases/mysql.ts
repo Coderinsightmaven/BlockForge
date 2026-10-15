@@ -62,10 +62,15 @@ const KNOWN: Record<string, string> = {
   ER_MUST_CHANGE_PASSWORD_LOGIN: "the admin user's password has expired",
 };
 
-/** Replaces every occurrence of the given secrets (defence in depth for free-text messages). */
+/**
+ * Replaces every occurrence of the given secrets (defence in depth for free-text messages). Every non-empty
+ * secret is scrubbed, however short: a 1–3 character admin password may garble an error message, which is
+ * preferable to leaking it (the admin password is the host's own and its length is not ours to dictate).
+ * Longer secrets go first so a short one that is a substring of a longer one cannot leave a remainder.
+ */
 export function scrub(text: string, secrets: readonly string[]): string {
   let out = text;
-  for (const s of secrets) if (s.length >= 4) out = out.split(s).join(REDACTED);
+  for (const s of [...secrets].filter((x) => x.length > 0).sort((a, b) => b.length - a.length)) out = out.split(s).join(REDACTED);
   return out;
 }
 
@@ -145,12 +150,15 @@ export class MysqlConnector {
       dateStrings: true,
     };
     if (!tls) return base;
-    // With a pinned CA the chain must verify against it (MySQL VERIFY_CA; mysql2 skips the host name check
-    // unless `verifyIdentity`); without one the session is encrypted but the certificate is not verified.
-    return {
-      ...base,
-      ssl: cfg.tlsCaCertificate ? { ca: cfg.tlsCaCertificate, rejectUnauthorized: true } : { rejectUnauthorized: false },
-    };
+    if (cfg.tlsMode === "verify_ca") {
+      // The chain must verify against the pinned CA (MySQL VERIFY_CA; mysql2 skips the host name check unless
+      // `verifyIdentity`). The contracts and a CHECK constraint guarantee the CA is present in this mode.
+      if (!cfg.tlsCaCertificate) throw new DatabaseHostError(null, "verify_ca needs a CA certificate", true);
+      return { ...base, ssl: { ca: cfg.tlsCaCertificate, rejectUnauthorized: true } };
+    }
+    // `preferred` / `required`: encrypted, deliberately NOT authenticated (documented in the contracts, the
+    // API docs and the UI labels as "host not verified").
+    return { ...base, ssl: { rejectUnauthorized: false } };
   }
 
   private async connect(cfg: HostConnection): Promise<Connection> {

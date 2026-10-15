@@ -128,6 +128,12 @@ describe("database host errors", () => {
 
   it("scrubs secrets from free text", () => {
     expect(scrub(`a ${PW} b ${PW}`, [PW])).not.toContain(PW);
+    // Short secrets too (a 1–3 character admin password garbles the text rather than leaking).
+    expect(scrub("connect as root with pw xyz failed", ["xyz"])).not.toContain("xyz");
+    expect(scrub("a7 b7", ["7"])).not.toContain("7");
+    expect(scrub("unchanged", [""])).toBe("unchanged");
+    // A longer secret containing a shorter one is removed whole, not left as a remainder.
+    expect(scrub("secret: abcdef", ["abc", "abcdef"])).not.toMatch(/def|abc/);
     expect(describeMysqlError(Object.assign(new Error(`TLS failure ${PW}`), { code: "HANDSHAKE_SSL_ERROR" }), [PW], true).message).not.toContain(PW);
   });
 

@@ -1,5 +1,5 @@
 {
-  "id": "5a9e42cd-cccd-4788-88a9-7d96bece95b2",
+  "id": "50504685-5ed0-4e96-b2bf-ea4667af295c",
   "prevId": "03ca4d98-0893-4367-b648-fa2c6c2629d8",
   "version": "7",
   "dialect": "postgresql",
@@ -6744,7 +6744,11 @@
       "checkConstraints": {
         "database_hosts_tls_mode_check": {
           "name": "database_hosts_tls_mode_check",
-          "value": "\"database_hosts\".\"tls_mode\" IN ('disabled', 'preferred', 'required')"
+          "value": "\"database_hosts\".\"tls_mode\" IN ('disabled', 'preferred', 'required', 'verify_ca')"
+        },
+        "database_hosts_tls_ca_check": {
+          "name": "database_hosts_tls_ca_check",
+          "value": "(\"database_hosts\".\"tls_mode\" = 'verify_ca') = (\"database_hosts\".\"tls_ca_certificate\" IS NOT NULL)"
         },
         "database_hosts_port_check": {
           "name": "database_hosts_port_check",
@@ -6819,6 +6823,24 @@
         },
         "password_rotated_at": {
           "name": "password_rotated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation": {
+          "name": "operation",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_token": {
+          "name": "operation_token",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_started_at": {
+          "name": "operation_started_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -6903,6 +6925,14 @@
       },
       "policies": {},
       "checkConstraints": {
+        "server_databases_operation_check": {
+          "name": "server_databases_operation_check",
+          "value": "\"server_databases\".\"operation\" IS NULL OR \"server_databases\".\"operation\" IN ('creating', 'rotating', 'deleting')"
+        },
+        "server_databases_operation_claim_check": {
+          "name": "server_databases_operation_claim_check",
+          "value": "(\"server_databases\".\"operation\" IS NULL) = (\"server_databases\".\"operation_token\" IS NULL) AND (\"server_databases\".\"operation\" IS NULL) = (\"server_databases\".\"operation_started_at\" IS NULL)"
+        },
         "server_databases_database_name_check": {
           "name": "server_databases_database_name_check",
           "value": "\"server_databases\".\"database_name\" ~ '^s[0-9a-f]{8}_[a-z0-9_]{1,48}$'"

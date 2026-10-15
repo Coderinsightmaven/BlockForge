@@ -39,7 +39,20 @@ export interface ServerDatabasesDeps {
   audit: AuditService;
   connector: MysqlConnector;
   hosts: DatabaseHostsService;
+  /** Test seam: username generator (default `u<shortId>_<10 random>`). */
+  generateUsername?: (serverShortId: string) => string;
+  /** After this long an operation claim counts as abandoned (process crash) and may be taken over. */
+  operationStaleMs?: number;
 }
+
+/**
+ * Longest a create/rotate/delete can talk to a host: connect 10 s + up to 4 statements × 15 s + close 2 s
+ * ≈ 72 s with the default timeouts. Claims older than 5 minutes are therefore abandoned.
+ */
+export const DEFAULT_OPERATION_STALE_MS = 5 * 60_000;
+
+type Operation = "creating" | "rotating" | "deleting";
+const busy = () => conflict("Another operation on this database is still in progress; try again in a moment", { reason: "busy" });
 
 /** Job-log callback of the server delete job. */
 type JobLog = (level: "info" | "warn" | "error", message: string) => Promise<void>;
@@ -50,9 +63,42 @@ const SYSTEM_JOB: AuditActor = { actorType: "system", actorId: null, actorName: 
  * Per-server MySQL databases (api.md "Databases"): limits, host selection, creation of the database and
  * its single-database account, password reveal/rotation and deletion. Every statement comes from
  * `sql.ts` (validated + quoted); passwords are generated here and stored encrypted.
+ *
+ * No transaction (and so no pooled Postgres connection or row lock) is ever held while a host is contacted:
+ * every host operation claims the row in a short transaction (`operation` + `operation_token`), talks to
+ * the host, then persists the outcome in a second short transaction conditional on still holding the claim.
+ * A second create/rotate/delete of the same database meanwhile gets 409 `busy`.
  */
 export class ServerDatabasesService {
-  constructor(private readonly d: ServerDatabasesDeps) {}
+  private readonly staleMs: number;
+  private readonly newUsername: (serverShortId: string) => string;
+
+  constructor(private readonly d: ServerDatabasesDeps) {
+    this.staleMs = d.operationStaleMs ?? DEFAULT_OPERATION_STALE_MS;
+    this.newUsername = d.generateUsername ?? generateUsername;
+  }
+
+  /** Short transaction: lock the row, refuse a live claim of another operation, record ours. */
+  private async claim(serverId: string, databaseId: string, op: Operation): Promise<{ r: Row; h: HostRow; token: string }> {
+    const token = randomUUID();
+    const now = this.d.clock.now();
+    return this.d.db.transaction(async (tx) => {
+      const { r, h } = await this.rowOf(serverId, databaseId, tx, true);
+      if (r.operation !== null && r.operationStartedAt !== null && now - r.operationStartedAt.getTime() < this.staleMs) throw busy();
+      if (r.operation !== null) this.d.logger.warn({ databaseId, operation: r.operation }, "taking over an abandoned database operation claim");
+      await tx.update(serverDatabases).set({ operation: op, operationToken: token, operationStartedAt: new Date(now) }).where(eq(serverDatabases.id, r.id));
+      return { r, h, token };
+    });
+  }
+
+  /** Releases a claim (no-op when it was taken over or the row is gone). Never throws. */
+  private async release(databaseId: string, token: string): Promise<void> {
+    await this.d.db
+      .update(serverDatabases)
+      .set({ operation: null, operationToken: null, operationStartedAt: null })
+      .where(and(eq(serverDatabases.id, databaseId), eq(serverDatabases.operationToken, token)))
+      .catch((err: unknown) => this.d.logger.warn({ databaseId, code: pgErrorCode(err) }, "could not release a database operation claim (it expires on its own)"));
+  }
 
   private toDto(r: Row, host: Pick<HostRow, "id" | "name" | "host" | "port" | "publicHost">): ServerDatabase {
     return {
@@ -133,8 +179,10 @@ export class ServerDatabasesService {
     const remote = remoteFor(req.remote ?? "%");
     const password = generatePassword();
     const id = randomUUID();
+    const token = randomUUID();
 
-    // 1. Reserve: limits, host capacity and names are checked and the row inserted in one transaction.
+    // 1. Reserve: limits, host capacity and names are checked and the row inserted (claimed as `creating`)
+    //    in one short transaction; the host is contacted only after it committed.
     let host: HostRow;
     let username: string;
     try {
@@ -162,12 +210,13 @@ export class ServerDatabasesService {
           .where(and(eq(serverDatabases.hostId, h.id), eq(serverDatabases.databaseName, database)))
           .limit(1);
         if (taken) throw conflict("A database with this name already exists on the host", { reason: "name_taken" });
-        let user = generateUsername(shortId(server.id));
+        let user = this.newUsername(shortId(server.id));
         for (let i = 0; i < 5; i++) {
           const [u] = await tx.select({ id: serverDatabases.id }).from(serverDatabases).where(and(eq(serverDatabases.hostId, h.id), eq(serverDatabases.username, user))).limit(1);
           if (!u) break;
-          user = generateUsername(shortId(server.id));
+          user = this.newUsername(shortId(server.id));
         }
+        const now = new Date(this.d.clock.now());
         await tx.insert(serverDatabases).values({
           id,
           serverId: server.id,
@@ -177,7 +226,10 @@ export class ServerDatabasesService {
           remote,
           passwordEnc: this.d.box.encryptToString(password, dbAad(id)),
           createdBy: actorUserId(actor),
-          createdAt: new Date(this.d.clock.now()),
+          createdAt: now,
+          operation: "creating",
+          operationToken: token,
+          operationStartedAt: now,
         });
         return { host: h, username: user };
       }));
@@ -203,8 +255,10 @@ export class ServerDatabasesService {
         [password],
       );
     } catch (err) {
+      // Only what this request created is removed: a pre-existing database or account of the same name
+      // (ER_DB_CREATE_EXISTS / ER_CANNOT_USER) is never touched.
       await this.undoCreate(host, database, username, remote, created);
-      await this.d.db.delete(serverDatabases).where(eq(serverDatabases.id, id));
+      await this.d.db.delete(serverDatabases).where(and(eq(serverDatabases.id, id), eq(serverDatabases.operationToken, token)));
       const e = err instanceof DatabaseHostError ? err : null;
       await this.d.audit.record({
         ...actor,
@@ -219,11 +273,19 @@ export class ServerDatabasesService {
       throw err;
     }
 
-    // 3. The row may have been removed meanwhile (database or server deleted): then nothing may stay behind.
-    const [still] = await this.d.db.select().from(serverDatabases).where(eq(serverDatabases.id, id)).limit(1);
+    // 3. Release the claim. The row may have been removed meanwhile (server deleted): then nothing may stay
+    //    behind on the host either.
+    const [still] = await this.d.db
+      .update(serverDatabases)
+      .set({ operation: null, operationToken: null, operationStartedAt: null })
+      .where(and(eq(serverDatabases.id, id), eq(serverDatabases.operationToken, token)))
+      .returning();
     if (!still) {
-      await this.undoCreate(host, database, username, remote, created);
-      throw invalidState("The database was deleted while it was being created");
+      const [exists] = await this.d.db.select({ id: serverDatabases.id }).from(serverDatabases).where(eq(serverDatabases.id, id)).limit(1);
+      // Gone (server deleted meanwhile): remove what we created. Still there under another claim (taken over
+      // as abandoned): that operation owns it now.
+      if (!exists) await this.undoCreate(host, database, username, remote, created);
+      throw invalidState(exists ? "Another operation took over this database while it was being created" : "The database was deleted while it was being created");
     }
     await this.d.audit.record({
       ...actor,
@@ -264,58 +326,92 @@ export class ServerDatabasesService {
     return { password };
   }
 
+  /** Host failure of a claimed operation: release the claim, audit, map to 502 (other errors pass through). */
+  private async failClaimed(err: unknown, databaseId: string, token: string, action: string, actor: AuditActor, serverId: string): Promise<never> {
+    await this.release(databaseId, token);
+    if (err instanceof DatabaseHostError) {
+      await this.d.audit.record({ ...actor, action, targetType: "server", targetId: serverId, outcome: "failed", details: { databaseId, error: err.message, code: err.code } });
+      throw hostError(err.message, err.code);
+    }
+    throw err;
+  }
+
   /**
-   * New password on the host and in the database, atomically: the row is locked and updated, `ALTER USER`
-   * runs, and only then does the transaction commit (a host failure keeps the old password everywhere).
+   * New password: claim (short transaction) → `ALTER USER` on the host (no transaction open) → store the new
+   * password and release the claim (short transaction, conditional on the claim). A host failure releases the
+   * claim and keeps the old password everywhere (502). Narrow window: if the host applied `ALTER USER` but its
+   * answer was lost (timeout) or the new password could not be stored afterwards, the stored password is
+   * stale until the next successful rotation — rotating again always fixes it, since every rotation sets the
+   * password from scratch.
    */
   async rotate(access: ServerAccess, databaseId: string, actor: AuditActor): Promise<ServerDatabase> {
     const password = generatePassword();
-    const now = new Date(this.d.clock.now());
+    const { r, h, token } = await this.claim(access.server.id, databaseId, "rotating");
     try {
-      const { r, h } = await this.d.db.transaction(async (tx) => {
-        const row = await this.rowOf(access.server.id, databaseId, tx, true);
-        await tx.update(serverDatabases).set({ passwordEnc: this.d.box.encryptToString(password, dbAad(row.r.id)), passwordRotatedAt: now }).where(eq(serverDatabases.id, row.r.id));
-        await this.d.connector.withConnection(this.d.hosts.connectionOf(row.h), (run) => run(alterUserPasswordSql(row.r.username, row.r.remote, password)), [password]);
-        await this.d.audit.record(
-          { ...actor, action: "server.database.rotate_password", targetType: "server", targetId: access.server.id, outcome: "success", details: { databaseId: row.r.id, database: row.r.databaseName, username: row.r.username } },
-          tx,
-        );
+      await this.d.connector.withConnection(this.d.hosts.connectionOf(h), (run) => run(alterUserPasswordSql(r.username, r.remote, password)), [password]);
+    } catch (err) {
+      return this.failClaimed(err, r.id, token, "server.database.rotate_password", actor, access.server.id);
+    }
+    const now = new Date(this.d.clock.now());
+    let stored: Row | undefined;
+    try {
+      stored = await this.d.db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(serverDatabases)
+          .set({ passwordEnc: this.d.box.encryptToString(password, dbAad(r.id)), passwordRotatedAt: now, operation: null, operationToken: null, operationStartedAt: null })
+          .where(and(eq(serverDatabases.id, r.id), eq(serverDatabases.operationToken, token)))
+          .returning();
+        if (row) {
+          await this.d.audit.record(
+            { ...actor, action: "server.database.rotate_password", targetType: "server", targetId: access.server.id, outcome: "success", details: { databaseId: r.id, database: r.databaseName, username: r.username } },
+            tx,
+          );
+        }
         return row;
       });
-      return this.toDto({ ...r, passwordRotatedAt: now }, h);
     } catch (err) {
-      if (err instanceof DatabaseHostError) {
-        await this.d.audit.record({
-          ...actor,
-          action: "server.database.rotate_password",
-          targetType: "server",
-          targetId: access.server.id,
-          outcome: "failed",
-          details: { databaseId, error: err.message, code: err.code },
-        });
-        throw hostError(err.message, err.code);
-      }
+      this.d.logger.error({ databaseId: r.id, code: pgErrorCode(err) }, "the host has the new password but it could not be stored; rotate again");
+      await this.release(r.id, token);
       throw err;
     }
+    if (!stored) {
+      // The row went away (server deletion) or the claim was taken over while the host was contacted.
+      await this.d.audit.record({
+        ...actor,
+        action: "server.database.rotate_password",
+        targetType: "server",
+        targetId: access.server.id,
+        outcome: "failed",
+        details: { databaseId: r.id, error: "the database changed while its password was being rotated" },
+      });
+      throw conflict("The database changed while its password was being rotated; try again", { reason: "busy" });
+    }
+    return this.toDto(stored, h);
   }
 
-  /** Drops the database and its account on the host, then the row (a host failure keeps the row: retry). */
+  /**
+   * Claim → drop the database and its account on the host (no transaction open) → delete the row. A host
+   * failure releases the claim and keeps the row (502; retry). If the row cannot be deleted afterwards the
+   * claim is released and a retry drops again (`IF EXISTS`, idempotent) and deletes it.
+   */
   async remove(access: ServerAccess, databaseId: string, actor: AuditActor): Promise<void> {
+    const { r, h, token } = await this.claim(access.server.id, databaseId, "deleting");
+    try {
+      await this.d.connector.withConnection(this.d.hosts.connectionOf(h), (run) => this.drop(run, r));
+    } catch (err) {
+      return this.failClaimed(err, r.id, token, "server.database.delete", actor, access.server.id);
+    }
     try {
       await this.d.db.transaction(async (tx) => {
-        const { r, h } = await this.rowOf(access.server.id, databaseId, tx, true);
-        await this.d.connector.withConnection(this.d.hosts.connectionOf(h), (run) => this.drop(run, r));
-        await tx.delete(serverDatabases).where(eq(serverDatabases.id, r.id));
+        // Already gone (server deletion dropped it meanwhile) is fine: the database is dropped either way.
+        await tx.delete(serverDatabases).where(and(eq(serverDatabases.id, r.id), eq(serverDatabases.operationToken, token)));
         await this.d.audit.record(
           { ...actor, action: "server.database.delete", targetType: "server", targetId: access.server.id, outcome: "success", details: { databaseId: r.id, database: r.databaseName, username: r.username, hostId: h.id, hostName: h.name } },
           tx,
         );
       });
     } catch (err) {
-      if (err instanceof DatabaseHostError) {
-        await this.d.audit.record({ ...actor, action: "server.database.delete", targetType: "server", targetId: access.server.id, outcome: "failed", details: { databaseId, error: err.message, code: err.code } });
-        throw hostError(err.message, err.code);
-      }
+      await this.release(r.id, token);
       throw err;
     }
   }

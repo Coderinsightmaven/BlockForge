@@ -1,7 +1,7 @@
 import { DatabaseTlsMode } from "@blockforge/contracts";
 import { sql } from "drizzle-orm";
 import { check, index, integer, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
-import { enumCheck, tsz } from "./_helpers.js";
+import { enumCheck, nullableEnumCheck, tsz } from "./_helpers.js";
 import { users } from "./identity.js";
 import { nodes } from "./infrastructure.js";
 import { servers } from "./servers.js";
@@ -33,6 +33,8 @@ export const databaseHosts = pgTable(
   },
   (t) => [
     enumCheck("database_hosts_tls_mode_check", t.tlsMode, DatabaseTlsMode.options),
+    // A pinned CA exactly when the host is verified against it.
+    check("database_hosts_tls_ca_check", sql`(${t.tlsMode} = 'verify_ca') = (${t.tlsCaCertificate} IS NOT NULL)`),
     check("database_hosts_port_check", sql`${t.port} BETWEEN 1 AND 65535`),
     check("database_hosts_max_databases_check", sql`${t.maxDatabases} IS NULL OR ${t.maxDatabases} >= 0`),
     index("database_hosts_node_idx").on(t.nodeId),
@@ -63,8 +65,19 @@ export const serverDatabases = pgTable(
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: tsz("created_at").notNull().defaultNow(),
     passwordRotatedAt: tsz("password_rotated_at"),
+    /**
+     * Host operation in flight on this database (creating / rotating / deleting). Claimed and released in
+     * short transactions — no transaction or row lock is held while the host is contacted — so a second
+     * operation on the same database gets 409 `busy`. A claim older than the stale limit (process crash) may
+     * be taken over; `operation_token` makes the release conditional on still holding the claim.
+     */
+    operation: text("operation"),
+    operationToken: uuid("operation_token"),
+    operationStartedAt: tsz("operation_started_at"),
   },
   (t) => [
+    nullableEnumCheck("server_databases_operation_check", t.operation, ["creating", "rotating", "deleting"]),
+    check("server_databases_operation_claim_check", sql`(${t.operation} IS NULL) = (${t.operationToken} IS NULL) AND (${t.operation} IS NULL) = (${t.operationStartedAt} IS NULL)`),
     unique("server_databases_host_database_unique").on(t.hostId, t.databaseName),
     unique("server_databases_host_username_unique").on(t.hostId, t.username),
     index("server_databases_server_idx").on(t.serverId),

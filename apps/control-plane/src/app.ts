@@ -152,7 +152,13 @@ export interface BuildAppOptions {
   /** Player action timing (tests shorten the feedback wait and the unconfirmed-command linger). */
   players?: { feedbackTimeoutMs?: number; commandLingerMs?: number };
   /** MySQL host connection timeouts (tests shorten them for unreachable hosts). */
-  databases?: { connectTimeoutMs?: number; queryTimeoutMs?: number };
+  databases?: {
+    connectTimeoutMs?: number;
+    queryTimeoutMs?: number;
+    /** Username generator override (tests force a collision with a pre-existing account). */
+    generateUsername?: (serverShortId: string) => string;
+    operationStaleMs?: number;
+  };
 }
 
 export interface BuiltApp {
@@ -322,10 +328,17 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     db, clock, logger: logger.child({ module: "backups" }), audit, hub, gateway, jobs, storage: backupStorage, access: serverAccess, state: serverState,
     browser: browserTransfers, transfers,
   });
-  const mysqlConnector = new MysqlConnector({ logger: logger.child({ module: "database-hosts" }), ...(opts.databases ?? {}) });
+  const dbOpts = opts.databases ?? {};
+  const mysqlConnector = new MysqlConnector({
+    logger: logger.child({ module: "database-hosts" }),
+    ...(dbOpts.connectTimeoutMs !== undefined ? { connectTimeoutMs: dbOpts.connectTimeoutMs } : {}),
+    ...(dbOpts.queryTimeoutMs !== undefined ? { queryTimeoutMs: dbOpts.queryTimeoutMs } : {}),
+  });
   const databaseHosts = new DatabaseHostsService({ db, clock, box, audit, connector: mysqlConnector });
   const serverDatabases = new ServerDatabasesService({
     db, clock, logger: logger.child({ module: "server-databases" }), box, audit, connector: mysqlConnector, hosts: databaseHosts,
+    ...(dbOpts.generateUsername ? { generateUsername: dbOpts.generateUsername } : {}),
+    ...(dbOpts.operationStaleMs !== undefined ? { operationStaleMs: dbOpts.operationStaleMs } : {}),
   });
   const backupDeps: BackupJobDeps = {
     db, clock, logger: logger.child({ module: "backup-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit, masks,

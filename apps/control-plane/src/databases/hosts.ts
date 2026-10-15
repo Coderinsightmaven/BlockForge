@@ -23,6 +23,8 @@ const hostAad = (id: string) => `database-host:${id}`;
 /** Connection settings whose change requires the admin password again (a stored password is never sent elsewhere). */
 const CONNECTION_FIELDS = ["host", "port", "username", "tlsMode", "tlsCaCertificate"] as const;
 const PASSWORD_REQUIRED = "Re-enter the admin password when changing the connection settings";
+const CA_REQUIRED = "verify_ca needs the CA certificate to verify against";
+const CA_UNUSED = "A CA certificate is only used with verify_ca";
 
 /** Every certificate of a PEM bundle must parse (refuses junk before it reaches the TLS stack). */
 function checkPem(pem: string | null | undefined, path: string): void {
@@ -151,9 +153,18 @@ export class DatabaseHostsService {
     return this.get(id);
   }
 
-  async update(id: string, req: UpdateDatabaseHostRequest, actor: AuditActor): Promise<DatabaseHost> {
+  async update(id: string, input: UpdateDatabaseHostRequest, actor: AuditActor): Promise<DatabaseHost> {
     const r = await this.row(id);
-    checkPem(req.tlsCaCertificate, "tlsCaCertificate");
+    checkPem(input.tlsCaCertificate, "tlsCaCertificate");
+    // The CA rule on the resulting host: a CA exactly with verify_ca (switching away clears the stored one).
+    const mode = input.tlsMode ?? (r.tlsMode as DatabaseTlsMode);
+    const req: UpdateDatabaseHostRequest = { ...input };
+    if (mode !== "verify_ca") {
+      if (input.tlsCaCertificate) throw badRequest(CA_UNUSED, validationDetails(CA_UNUSED, "tlsCaCertificate"));
+      if (r.tlsCaCertificate !== null) req.tlsCaCertificate = null;
+    } else if (!(input.tlsCaCertificate !== undefined ? input.tlsCaCertificate : r.tlsCaCertificate)) {
+      throw badRequest(CA_REQUIRED, validationDetails(CA_REQUIRED, "tlsCaCertificate"));
+    }
     const changedConnection = CONNECTION_FIELDS.filter((k) => req[k] !== undefined && req[k] !== r[k]);
     if (changedConnection.length && req.password === undefined) throw badRequest(PASSWORD_REQUIRED, validationDetails(PASSWORD_REQUIRED, "password"));
     if (req.nodeId !== undefined) await this.checkNode(req.nodeId);

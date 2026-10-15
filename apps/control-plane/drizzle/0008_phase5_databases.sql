@@ -14,7 +14,8 @@ CREATE TABLE "database_hosts" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "database_hosts_name_unique" UNIQUE("name"),
-	CONSTRAINT "database_hosts_tls_mode_check" CHECK ("database_hosts"."tls_mode" IN ('disabled', 'preferred', 'required')),
+	CONSTRAINT "database_hosts_tls_mode_check" CHECK ("database_hosts"."tls_mode" IN ('disabled', 'preferred', 'required', 'verify_ca')),
+	CONSTRAINT "database_hosts_tls_ca_check" CHECK (("database_hosts"."tls_mode" = 'verify_ca') = ("database_hosts"."tls_ca_certificate" IS NOT NULL)),
 	CONSTRAINT "database_hosts_port_check" CHECK ("database_hosts"."port" BETWEEN 1 AND 65535),
 	CONSTRAINT "database_hosts_max_databases_check" CHECK ("database_hosts"."max_databases" IS NULL OR "database_hosts"."max_databases" >= 0)
 );
@@ -30,8 +31,13 @@ CREATE TABLE "server_databases" (
 	"created_by" uuid,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"password_rotated_at" timestamp with time zone,
+	"operation" text,
+	"operation_token" uuid,
+	"operation_started_at" timestamp with time zone,
 	CONSTRAINT "server_databases_host_database_unique" UNIQUE("host_id","database_name"),
 	CONSTRAINT "server_databases_host_username_unique" UNIQUE("host_id","username"),
+	CONSTRAINT "server_databases_operation_check" CHECK ("server_databases"."operation" IS NULL OR "server_databases"."operation" IN ('creating', 'rotating', 'deleting')),
+	CONSTRAINT "server_databases_operation_claim_check" CHECK (("server_databases"."operation" IS NULL) = ("server_databases"."operation_token" IS NULL) AND ("server_databases"."operation" IS NULL) = ("server_databases"."operation_started_at" IS NULL)),
 	CONSTRAINT "server_databases_database_name_check" CHECK ("server_databases"."database_name" ~ '^s[0-9a-f]{8}_[a-z0-9_]{1,48}$'),
 	CONSTRAINT "server_databases_username_check" CHECK ("server_databases"."username" ~ '^u[0-9a-f]{8}_[a-z0-9]{10}$'),
 	CONSTRAINT "server_databases_remote_check" CHECK ("server_databases"."remote" ~ '^[a-z0-9.%:/-]{1,60}$')
