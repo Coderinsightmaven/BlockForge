@@ -575,7 +575,7 @@ describe("Databases tab: status", () => {
     expect(unknown.className).toContain("tone-warning");
     const cleanup = await tr("cleanup_pending");
     expect(within(cleanup).getByText("Cleanup pending").className).toContain("tone-warning");
-    expect(within(cleanup).getByText("BlockForge removes it automatically shortly.")).toBeTruthy();
+    expect(within(cleanup).getByText(/BlockForge removes it automatically shortly\. If its database host is gone for good, an administrator can forget it instead\./)).toBeTruthy();
     expect(within(cleanup).getByText("Cleanup pending").getAttribute("title")).toBe(
       "Cleanup pending — BlockForge removes it automatically shortly.",
     );

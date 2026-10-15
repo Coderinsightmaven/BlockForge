@@ -78,7 +78,8 @@ export function remoteHint(input: string): string {
   return `Saved as ${normalized}. ${REMOTE_HELP}`;
 }
 
-export const CLEANUP_PENDING_HINT = "BlockForge removes it automatically shortly.";
+export const CLEANUP_PENDING_HINT =
+  "BlockForge removes it automatically shortly. If its database host is gone for good, an administrator can forget it instead.";
 
 export const FORGET_DESCRIPTION =
   "BlockForge forgets this database without contacting the host. The database and its account stay on the host and must be removed there by hand if it still exists.";
