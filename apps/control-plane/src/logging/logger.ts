@@ -55,6 +55,12 @@ export function safeErrSerializer(err: unknown): unknown {
         .join("\n"),
     };
   }
+  if (err instanceof Error && ("sqlState" in err || "sqlMessage" in err)) {
+    // mysql2 errors carry the full statement (`sql`, e.g. `CREATE USER … IDENTIFIED BY '…'`) and MySQL's
+    // message may quote it: keep only the codes.
+    const e = err as Error & { code?: unknown; errno?: unknown; sqlState?: unknown };
+    return { type: "MysqlError", message: "database host query failed", code: e.code, errno: e.errno, sqlState: e.sqlState };
+  }
   return err instanceof Error ? stdSerializers.err(err) : err;
 }
 

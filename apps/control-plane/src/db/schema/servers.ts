@@ -57,6 +57,8 @@ export const servers = pgTable(
     /** Additional allocations (besides the primary) the server's users may assign. */
     allocationLimit: integer("allocation_limit").notNull().default(0),
     backupLimit: integer("backup_limit").notNull().default(3),
+    /** Max MySQL databases (Phase 5); 0 disables databases for non-administrators. */
+    databaseLimit: integer("database_limit").notNull().default(0),
     jvmPreset: text("jvm_preset"),
     /** Gameplay settings chosen at creation (re-applied by reinstall). */
     gameplay: jsonb("gameplay").$type<GameplaySettings>(),
@@ -88,6 +90,7 @@ export const servers = pgTable(
     nullableEnumCheck("servers_software_check", t.software, ServerSoftware.options),
     nullableEnumCheck("servers_jvm_preset_check", t.jvmPreset, ["default", "aikar", "none"]),
     check("servers_limits_check", sql`${t.allocationLimit} >= 0 AND ${t.backupLimit} >= 0`),
+    check("servers_database_limit_check", sql`${t.databaseLimit} >= 0`),
     enumCheck("servers_state_check", t.state, ServerState.options),
     enumCheck("servers_desired_state_check", t.desiredState, DesiredState.options),
     nullableEnumCheck("servers_active_operation_check", t.activeOperation, ServerOperation.options),

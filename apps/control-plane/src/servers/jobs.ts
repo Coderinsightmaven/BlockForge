@@ -61,6 +61,8 @@ export interface ServerJobDeps {
   masks?: { forServer(serverId: string): Promise<readonly string[]> };
   /** Deletes the server's backups (archives / objects) before the server is removed. */
   deleteBackups?: (serverId: string, ctx: { jobId: string; signal: AbortSignal; log: StepContext<unknown>["log"] }) => Promise<void>;
+  /** Drops the server's MySQL databases on their hosts (best effort: failures are logged and audited, never thrown). */
+  deleteDatabases?: (serverId: string, ctx: { jobId: string; log: StepContext<unknown>["log"] }) => Promise<void>;
 }
 
 const ProvisionInput = z.object({ serverId: z.uuid(), eulaAcceptedBy: z.string().max(254).nullable().default(null) });
@@ -571,6 +573,16 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
             if (!(err instanceof AgentCommandError && err.code === "NOT_FOUND")) wrap(err, "workload.remove");
           }
           await ctx.log("info", ctx.input.deleteData ? "Container and data removed" : "Container removed (data kept on the node)");
+        },
+      },
+      {
+        // After the container is gone (a failed removal leaves the databases alone) and before the row
+        // goes: best effort, so an unreachable database host never blocks the deletion.
+        key: "databases",
+        label: "Drop databases",
+        run: async (ctx) => {
+          if (!deps.deleteDatabases) return SKIP_STEP;
+          await deps.deleteDatabases(ctx.input.serverId, { jobId: ctx.jobId, log: ctx.log });
         },
       },
       {
