@@ -1,4 +1,5 @@
 import type { DatabaseHostTestResult, DatabaseTlsMode } from "@blockforge/contracts";
+import { randomBytes } from "node:crypto";
 import mysql, { type Connection, type ConnectionOptions } from "mysql2/promise";
 import type { Logger } from "pino";
 import { REDACTED } from "@blockforge/contracts";
@@ -205,6 +206,8 @@ export interface ConnectorOptions {
    * never take effect later. Default true; tests turn it off to exercise the client-side path.
    */
   sessionLimits?: boolean;
+  /** Timeout of each statement of the abort procedure (default 5 s; tests stretch it). */
+  abortStatementTimeoutMs?: number;
 }
 
 /** Runs one SQL statement (optional `?` values for SELECTs) on an open admin connection. */
@@ -222,8 +225,11 @@ export interface ServerIdentity {
   hostname: string;
   port: string;
   version: string;
-  /** `@@server_uuid` (MySQL); null on MariaDB, which has no equivalent. */
-  uuid: string | null;
+  /**
+   * A unique id of the server instance: `@@server_uuid` on MySQL, `@@server_uid` on MariaDB 10.5.26 / 10.6.19 /
+   * 10.11.9 / 11.4.3 and later; null on older MariaDB (identity then rests on the per-statement nonce).
+   */
+  uid: string | null;
 }
 
 /** An open admin connection. After an `interrupted` failure every further `run` fails at once. */
@@ -232,14 +238,52 @@ export interface HostSession {
   close(): Promise<void>;
   /** Thread id announced in the server greeting. */
   readonly handshakeId: number | null;
-  readonly identity: ServerIdentity;
+  /** null when the server identity could not be read (e.g. a proxy refusing the query): never KILLed. */
+  readonly identity: ServerIdentity | null;
 }
 
 const sameServer = (a: ServerIdentity, b: ServerIdentity): boolean =>
-  a.serverId === b.serverId && a.hostname === b.hostname && a.port === b.port && a.version === b.version && a.uuid === b.uuid;
+  a.serverId === b.serverId && a.hostname === b.hostname && a.port === b.port && a.version === b.version && a.uid === b.uid;
 
 /** A direct connection: the greeting's thread id is the server's `CONNECTION_ID()`. */
 const direct = (handshakeId: number | null, identity: ServerIdentity): boolean => handshakeId !== null && handshakeId === identity.connectionId;
+
+/** Prefix of every session statement: a per-statement nonce visible in `PROCESSLIST.INFO`. */
+export const nonceComment = (nonce: string): string => `/* bf:${nonce} */ `;
+
+/** What the process list says about the origin's thread (seen from the fresh connection). */
+export interface ProcessRow {
+  user: string;
+  info: string | null;
+}
+
+/**
+ * The KILL decision for an unanswered statement (pure; unit-tested):
+ * - `kill`: the thread `connectionId` on the server the fresh connection reached runs *our* statement — the row
+ *   belongs to the admin user and its `INFO` carries the statement's nonce — and both connections are direct ones
+ *   to the same server;
+ * - `stopped`: our statement is provably not running any more — the server is the same one (equal unique ids)
+ *   and the thread is gone or runs something else;
+ * - `unknown`: anything else (identity unreadable, a proxy, another server, a foreign thread): never KILL.
+ */
+export function abortPlan(input: {
+  origin: { handshakeId: number | null; identity: ServerIdentity | null };
+  fresh: { handshakeId: number | null; identity: ServerIdentity | null };
+  row: ProcessRow | null;
+  adminUser: string;
+  nonce: string | null;
+}): "kill" | "stopped" | "unknown" {
+  const { origin, fresh, row, adminUser, nonce } = input;
+  if (!origin.identity || !fresh.identity) return "unknown";
+  if (!direct(origin.handshakeId, origin.identity) || !direct(fresh.handshakeId, fresh.identity) || !sameServer(origin.identity, fresh.identity)) return "unknown";
+  const ours = row !== null && row.user === adminUser;
+  if (ours && nonce !== null && row.info !== null && row.info.includes(`bf:${nonce}`)) return "kill";
+  const strong = origin.identity.uid !== null && origin.identity.uid === fresh.identity.uid;
+  if (!strong) return "unknown";
+  if (row === null) return "stopped";
+  if (!ours) return "unknown";
+  return "stopped";
+}
 
 /** The privileges `GRANT … ON db.*` hands out must be held (with GRANT OPTION) by the admin account. */
 const REQUIRED_GLOBAL_PRIVILEGES = [
@@ -264,8 +308,9 @@ const REQUIRED_GLOBAL_PRIVILEGES = [
   "TRIGGER",
 ] as const;
 
-/** Statement timeouts of the abort procedure (each statement of the fresh connection). */
-const ABORT_STATEMENT_TIMEOUT_MS = 5000;
+/** A name of the form BlockForge gives databases (`s<8 hex>_<name>`), to test database-level grants against. */
+export const PRIVILEGE_PROBE_DATABASE = "s00000000_probe";
+
 /** How long the process list is polled for the killed statement to disappear. */
 const ABORT_CONFIRM_WINDOW_MS = 5000;
 
@@ -279,30 +324,36 @@ const ABORT_CONFIRM_WINDOW_MS = 5000;
  * and stays the connection's active command, so a later statement on that connection would queue behind it
  * forever. Every session therefore (1) asks the host to abort statements itself shortly before the client
  * timeout, and (2) on any failure without an answer (timeout, connection lost, cancellation) sends
- * `KILL QUERY` for the connection's thread from a fresh connection — only when both connections are proven
- * direct connections to the same server — confirms in the process list that the statement is gone, kills the
- * thread and destroys the socket; the session is unusable afterwards. Without that proof (a proxy in front)
- * nothing is killed and the outcome is unknown.
+ * `KILL QUERY` for the connection's thread from a fresh connection — only when the process list there shows the
+ * thread running *this* statement (admin user, the statement's nonce) and both connections are proven direct
+ * connections to the same server ({@link abortPlan}) — confirms in the process list that the statement is gone,
+ * kills the thread and destroys the socket; the session is unusable afterwards. Without that proof (a proxy in
+ * front, an unreadable identity) nothing is killed and the outcome is unknown.
  */
 export class MysqlConnector {
   private readonly open = new Set<Connection>();
+  /** Fresh connections of abort procedures in progress (destroyed at once by {@link shutdown}). */
+  private readonly aborting = new Set<Connection>();
   private closed = false;
   private readonly shutdownCtrl = new AbortController();
   readonly connectTimeoutMs: number;
   readonly queryTimeoutMs: number;
+  readonly abortStatementTimeoutMs: number;
   /** Server-side statement/lock-wait limit, whole seconds, below the client timeout. */
   readonly sessionLimitS: number | null;
   /**
-   * Upper bound of the abort procedure after an unanswered statement: connect, identity (≤ 2 statements),
-   * `KILL QUERY`, the confirmation window plus one last poll, the final `KILL`.
+   * Upper bound of the abort procedure after an unanswered statement: connect, identity (≤ 2 statements), the
+   * process-list check, `KILL QUERY`, the confirmation window plus one last poll, the final `KILL`.
    */
   readonly abortBudgetMs: number;
 
   constructor(private readonly opts: ConnectorOptions) {
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 10_000;
     this.queryTimeoutMs = opts.queryTimeoutMs ?? 15_000;
+    this.abortStatementTimeoutMs = opts.abortStatementTimeoutMs ?? 5000;
     this.sessionLimitS = opts.sessionLimits === false ? null : Math.max(1, Math.floor((this.queryTimeoutMs - 3000) / 1000));
-    this.abortBudgetMs = this.connectTimeoutMs + 2 * ABORT_STATEMENT_TIMEOUT_MS + ABORT_STATEMENT_TIMEOUT_MS + (ABORT_CONFIRM_WINDOW_MS + ABORT_STATEMENT_TIMEOUT_MS) + ABORT_STATEMENT_TIMEOUT_MS;
+    const t = this.abortStatementTimeoutMs;
+    this.abortBudgetMs = this.connectTimeoutMs + 2 * t + t + t + (ABORT_CONFIRM_WINDOW_MS + t) + t;
   }
 
   /** Statements every session runs before the caller's (identity ≤ 2, session limits ≤ 2). */
@@ -387,25 +438,30 @@ export class MysqlConnector {
     return conn;
   }
 
-  /** Reads {@link ServerIdentity} with `query` (MySQL needs a second statement for `@@server_uuid`). */
+  /**
+   * Reads {@link ServerIdentity} with `query`: one statement plus one for the server's unique id
+   * (`@@server_uuid` on MySQL, `@@server_uid` on MariaDB — refused on older MariaDB, then null).
+   */
   private static async readIdentity(query: (sql: string) => Promise<unknown[]>): Promise<ServerIdentity> {
     const [row] = (await query("SELECT CONNECTION_ID() AS id, @@server_id AS sid, @@hostname AS hn, @@port AS port, VERSION() AS v")) as Record<string, unknown>[];
     const version = String(row?.v ?? "");
-    let uuid: string | null = null;
-    if (!/mariadb/i.test(version)) {
-      const [u] = (await query("SELECT @@server_uuid AS u")) as Record<string, unknown>[];
-      uuid = u?.u == null ? null : String(u.u);
+    let uid: string | null = null;
+    try {
+      const [u] = (await query(/mariadb/i.test(version) ? "SELECT @@server_uid AS u" : "SELECT @@server_uuid AS u")) as Record<string, unknown>[];
+      uid = u?.u == null || u.u === "" ? null : String(u.u);
+    } catch (err) {
+      if (!(err instanceof DatabaseHostError ? err.kind === "rejected" : typeof (err as { sqlState?: unknown }).sqlState === "string")) throw err;
     }
-    return { connectionId: Number(row?.id), serverId: String(row?.sid ?? ""), hostname: String(row?.hn ?? ""), port: String(row?.port ?? ""), version, uuid };
+    return { connectionId: Number(row?.id), serverId: String(row?.sid ?? ""), hostname: String(row?.hn ?? ""), port: String(row?.port ?? ""), version, uid };
   }
 
   /**
-   * After an unanswered statement of `origin`: from a fresh connection that is proven to reach the same
-   * server directly, `KILL QUERY` the origin's thread, confirm in the process list that no statement runs on it
-   * any more, then kill the thread. True = confirmed stopped (it can no longer take effect); false = not sent or
-   * not confirmed (it may still take effect).
+   * After an unanswered statement of `origin` (carrying `nonce`): from a fresh connection, decide with
+   * {@link abortPlan}; on `kill`, `KILL QUERY` the origin's thread, confirm in the process list that the statement
+   * is gone, then kill the thread. True = confirmed stopped (it can no longer take effect); false = not sent or not
+   * confirmed (it may still take effect). Shutdown abandons it at once.
    */
-  private async stopStatement(cfg: HostConnection, origin: { handshakeId: number | null; identity: ServerIdentity | null }): Promise<boolean> {
+  private async stopStatement(cfg: HostConnection, origin: { handshakeId: number | null; identity: ServerIdentity | null; nonce: string | null }): Promise<boolean> {
     const id = origin.identity?.connectionId;
     if (!origin.identity || id === undefined || !Number.isSafeInteger(id) || id <= 0) return false;
     if (!direct(origin.handshakeId, origin.identity)) {
@@ -415,28 +471,39 @@ export class MysqlConnector {
     let c2: Connection | null = null;
     try {
       c2 = await this.connect(cfg);
+      this.aborting.add(c2);
+      const conn = c2;
       const q = async (sql: string, values?: unknown[]) => {
-        const [rows] = await c2!.query({ sql, ...(values ? { values } : {}), timeout: ABORT_STATEMENT_TIMEOUT_MS });
+        const [rows] = await raceAbort(conn.query({ sql, ...(values ? { values } : {}), timeout: this.abortStatementTimeoutMs }), this.shutdownCtrl.signal);
         return Array.isArray(rows) ? (rows as unknown[]) : [];
       };
-      const here = await MysqlConnector.readIdentity(q);
-      const handshake = typeof c2.threadId === "number" ? c2.threadId : null;
-      if (!direct(handshake, here) || !sameServer(origin.identity, here)) {
-        this.opts.logger.warn({ host: cfg.host, port: cfg.port }, "not stopping an unanswered statement: the fresh connection reached a different server or a proxy");
-        return false;
+      const processRow = async (): Promise<ProcessRow | null> => {
+        const [r] = (await q("SELECT USER AS u, INFO AS info FROM information_schema.PROCESSLIST WHERE ID = ?", [id])) as { u?: unknown; info?: unknown }[];
+        return r ? { user: String(r.u ?? ""), info: r.info == null ? null : String(r.info) } : null;
+      };
+      let fresh: ServerIdentity | null = null;
+      try {
+        fresh = await MysqlConnector.readIdentity(q);
+      } catch (err) {
+        if (typeof (err as { sqlState?: unknown }).sqlState !== "string") throw err;
+      }
+      const handshake = typeof conn.threadId === "number" ? conn.threadId : null;
+      const plan = abortPlan({ origin, fresh: { handshakeId: handshake, identity: fresh }, row: await processRow(), adminUser: cfg.user, nonce: origin.nonce });
+      if (plan !== "kill") {
+        if (plan === "unknown") this.opts.logger.warn({ host: cfg.host, port: cfg.port }, "not stopping an unanswered statement: its thread could not be proven to be ours on the same server");
+        return plan === "stopped";
       }
       try {
         await q(`KILL QUERY ${id}`);
       } catch (err) {
-        // Same server, direct connection: the thread is gone, so nothing can run on it any more.
+        // The row was ours a moment ago on this server: the thread has ended meanwhile.
         if ((err as { code?: string }).code !== "ER_NO_SUCH_THREAD") throw err;
         return true;
       }
       let stopped = false;
-      for (const until = Date.now() + ABORT_CONFIRM_WINDOW_MS; Date.now() < until; await sleep(150)) {
-        const rows = (await q("SELECT INFO AS info FROM information_schema.PROCESSLIST WHERE ID = ?", [id])) as { info?: unknown }[];
-        const row = rows[0];
-        if (!row || row.info === null || row.info === undefined) {
+      for (const until = Date.now() + ABORT_CONFIRM_WINDOW_MS; Date.now() < until && !this.closed; await sleep(150)) {
+        const row = await processRow();
+        if (!row || row.info === null || !row.info.includes(`bf:${origin.nonce}`)) {
           stopped = true;
           break;
         }
@@ -444,11 +511,14 @@ export class MysqlConnector {
       await q(`KILL ${id}`).catch(() => undefined);
       return stopped;
     } catch (err) {
-      const e = describeMysqlError(err, [cfg.password], "connect");
-      this.opts.logger.warn({ code: e.code, reason: e.message, host: cfg.host, port: cfg.port }, "could not stop an unanswered statement on the database host");
+      if (!this.closed) {
+        const e = describeMysqlError(err, [cfg.password], "connect");
+        this.opts.logger.warn({ code: e.code, reason: e.message, host: cfg.host, port: cfg.port }, "could not stop an unanswered statement on the database host");
+      }
       return false;
     } finally {
       if (c2) {
+        this.aborting.delete(c2);
         this.open.delete(c2);
         hardClose(c2);
       }
@@ -471,7 +541,9 @@ export class MysqlConnector {
     let closed = false;
     const run: Run = async (sql, values) => {
       if (poisoned) throw new DatabaseHostError("CONNECTION_UNUSABLE", KNOWN.CONNECTION_UNUSABLE!, "interrupted", true);
-      const pending = conn.query({ sql, ...(values ? { values: [...values] } : {}), timeout: this.queryTimeoutMs });
+      // A per-statement nonce lets the abort procedure recognise this statement in the process list.
+      const nonce = randomBytes(8).toString("hex");
+      const pending = conn.query({ sql: nonceComment(nonce) + sql, ...(values ? { values: [...values] } : {}), timeout: this.queryTimeoutMs });
       try {
         const [rows] = await raceAbort(pending, cancel);
         return Array.isArray(rows) ? (rows as unknown[]) : [];
@@ -481,7 +553,7 @@ export class MysqlConnector {
         // No answer: stop the statement on the host, then abandon this connection for good.
         pending.catch(() => undefined);
         poisoned = true;
-        const stopped = this.closed ? false : await this.stopStatement(cfg, { handshakeId, identity });
+        const stopped = this.closed ? false : await this.stopStatement(cfg, { handshakeId, identity, nonce });
         this.open.delete(conn);
         hardClose(conn);
         if (this.closed) throw this.shutdownError("interrupted");
@@ -492,11 +564,18 @@ export class MysqlConnector {
       if (closed) return;
       closed = true;
       this.open.delete(conn);
-      if (poisoned) hardClose(conn);
+      // After shutdown started nobody waits for a polite COM_QUIT.
+      if (poisoned || this.closed) hardClose(conn);
       else await closeQuietly(conn);
     };
     try {
-      identity = await MysqlConnector.readIdentity(run);
+      try {
+        identity = await MysqlConnector.readIdentity(run);
+      } catch (err) {
+        // A refused identity query (e.g. a proxy): the session works, but its statements are never KILLed.
+        if (!(err instanceof DatabaseHostError && err.kind === "rejected")) throw err;
+        this.opts.logger.warn({ host: cfg.host, port: cfg.port, code: err.code }, "the database host refused the identity query; unanswered statements will not be stopped");
+      }
       if (this.sessionLimitS !== null) {
         await run(`SET SESSION lock_wait_timeout = ${this.sessionLimitS}`);
         try {
@@ -511,8 +590,7 @@ export class MysqlConnector {
       await close();
       throw err;
     }
-    const known = identity;
-    return { run, close, handshakeId, identity: known };
+    return { run, close, handshakeId, identity };
   }
 
   /** {@link session} around `fn`, closed afterwards. */
@@ -526,16 +604,28 @@ export class MysqlConnector {
     }
   }
 
-  /** Global privileges the account seems to lack (USER_PRIVILEGES of CURRENT_USER(), plus SELECT on mysql.user). */
+  /**
+   * Privileges the account seems to lack: global ones (`USER_PRIVILEGES` of `CURRENT_USER()`) together with
+   * database-level grants (`SCHEMA_PRIVILEGES`) whose pattern covers BlockForge's database names — tested with
+   * the probe name {@link PRIVILEGE_PROBE_DATABASE} as a `LIKE` pattern match (the grant wildcard semantics), or
+   * literally on MySQL with `partial_revokes = ON` — plus `SELECT on mysql.user`. `CREATE USER` must be global.
+   */
   private static async missingPrivileges(run: Run): Promise<string[]> {
     const [cu] = (await run("SELECT CURRENT_USER() AS u")) as { u?: unknown }[];
     const current = String(cu?.u ?? "");
     const at = current.lastIndexOf("@");
     const grantee = `'${current.slice(0, at)}'@'${current.slice(at + 1)}'`;
-    const rows = (await run("SELECT PRIVILEGE_TYPE AS p, IS_GRANTABLE AS g FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = ?", [grantee])) as { p?: unknown; g?: unknown }[];
-    const held = new Set(rows.map((r) => String(r.p ?? "").toUpperCase()));
-    const missing: string[] = REQUIRED_GLOBAL_PRIVILEGES.filter((p) => !held.has(p));
-    if (!rows.some((r) => String(r.g ?? "").toUpperCase() === "YES")) missing.push("GRANT OPTION");
+    const global = (await run("SELECT PRIVILEGE_TYPE AS p, IS_GRANTABLE AS g FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = ?", [grantee])) as { p?: unknown; g?: unknown }[];
+    const [partial] = (await run("SHOW GLOBAL VARIABLES LIKE 'partial_revokes'")) as { Value?: unknown }[];
+    const literal = String(partial?.Value ?? "").toUpperCase() === "ON";
+    const schema = (await run(
+      `SELECT PRIVILEGE_TYPE AS p, IS_GRANTABLE AS g FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE = ? AND ${literal ? "TABLE_SCHEMA = ?" : "? LIKE TABLE_SCHEMA"}`,
+      [grantee, PRIVILEGE_PROBE_DATABASE],
+    )) as { p?: unknown; g?: unknown }[];
+    const held = new Set(global.map((r) => String(r.p ?? "").toUpperCase()));
+    const onDatabases = new Set(schema.map((r) => String(r.p ?? "").toUpperCase()));
+    const missing: string[] = REQUIRED_GLOBAL_PRIVILEGES.filter((p) => !held.has(p) && (p === "CREATE USER" || !onDatabases.has(p)));
+    if (![...global, ...schema].some((r) => String(r.g ?? "").toUpperCase() === "YES")) missing.push("GRANT OPTION");
     try {
       await run("SELECT 1 FROM mysql.user LIMIT 0");
     } catch (err) {
@@ -569,11 +659,12 @@ export class MysqlConnector {
       } finally {
         await first.close();
       }
-      let proxyDetected = !direct(first.handshakeId, first.identity);
-      if (!proxyDetected) {
+      // An unreadable identity counts as a proxy: in both cases unanswered statements are never KILLed.
+      let proxyDetected = !first.identity || !direct(first.handshakeId, first.identity);
+      if (!proxyDetected && first.identity) {
         const second = await this.session(cfg);
         await second.close();
-        proxyDetected = !direct(second.handshakeId, second.identity) || !sameServer(first.identity, second.identity);
+        proxyDetected = !second.identity || !direct(second.handshakeId, second.identity) || !sameServer(first.identity, second.identity);
       }
       return { ...result, proxyDetected };
     } catch (err) {
@@ -591,6 +682,9 @@ export class MysqlConnector {
   shutdown(): void {
     this.closed = true;
     this.shutdownCtrl.abort();
+    // An abort procedure in progress (KILL / confirmation) is dropped too: its outcome stays unknown.
+    for (const c of this.aborting) hardClose(c);
+    this.aborting.clear();
   }
 
   /** Destroys every open connection (sockets included) and refuses new ones (app shutdown). */
