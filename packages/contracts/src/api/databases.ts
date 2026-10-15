@@ -317,9 +317,6 @@ export const CreateServerDatabaseRequest = z
   .strict();
 export type CreateServerDatabaseRequest = z.input<typeof CreateServerDatabaseRequest>;
 
-/** `GET /servers/:id/databases/:databaseId/password` (`servers.databases.view_password`, `Cache-Control: no-store`). */
-export const ServerDatabasePassword = z.object({ password: z.string() }).strict();
-
 /**
  * `DELETE /servers/:id/databases/:databaseId?forget=true`: remove only BlockForge's record and leave the
  * database and its account on the host (for a host that is permanently gone, so the host entry can be deleted).
@@ -329,6 +326,9 @@ export const DeleteServerDatabaseQuery = z
   .object({ forget: z.enum(["true", "false"]).optional() })
   .transform((q) => ({ forget: q.forget === "true" }));
 export type DeleteServerDatabaseQuery = z.output<typeof DeleteServerDatabaseQuery>;
+
+/** `GET /servers/:id/databases/:databaseId/password` (`servers.databases.view_password`, `Cache-Control: no-store`). */
+export const ServerDatabasePassword = z.object({ password: z.string() }).strict();
 export type ServerDatabasePassword = z.infer<typeof ServerDatabasePassword>;
 
 /**
