@@ -10,6 +10,8 @@
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
     "typecheck": "turbo run typecheck",
+    "typecheck:ts6": "node scripts/ci/typescript6.mjs check",
+    "emit-parity": "node scripts/ci/typescript6.mjs emit-parity",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "format": "prettier --write .",

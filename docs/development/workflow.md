@@ -27,19 +27,31 @@ consumed by everyone (TS via workspace import; Go via mirrored structs + golden 
 ```
 pnpm install
 pnpm -r typecheck
+pnpm typecheck:ts6
 pnpm -r lint
 pnpm -r test
 pnpm -r build
+pnpm emit-parity
 cd services/node-agent && go vet ./... && go test ./...
 ```
 Type checking and the TypeScript emit of `build` use **`tsc-rs`**, a Rust port of the TypeScript 7
 compiler (root devDependency, pinned to an exact version; default checker count, not `--fast`, so the
 diagnostics do not depend on the machine's core count). `typescript` ~6.0.3 stays installed for ESLint
 (typescript-eslint), vitest, drizzle-kit and editors, so the editor and `pnpm typecheck` run different
-compiler versions. If tsc-rs reports something TypeScript 6 does not (or crashes), check the package
-with TypeScript 6 — `pnpm exec tsc -p tsconfig.json --noEmit`, or `pnpm exec tsc -p tsconfig.build.json`
-for the emit — and record the difference; never silence a TS 7 diagnostic with `any` or `@ts-ignore`.
-A fix must be valid for both compilers. Upgrades: `docs/OPEN_WORK.md` §5.3.
+compiler versions. Two TypeScript 6 gates in `scripts/ci/typescript6.mjs` (both run in CI) keep the
+compilers in step:
+* `pnpm typecheck:ts6` runs TypeScript 6 `--noEmit` over every project the `typecheck` scripts check.
+* `pnpm emit-parity` (after `pnpm build`) emits every project the `build` scripts emit again with
+  TypeScript 6, into a temporary directory, and compares it with `dist`: the file lists must match, `.js`
+  must be byte-identical except for the allowlisted `import X, {} from "m"` → `import X from "m"` rewrite,
+  `.d.ts` must be identical or equal after sorting type-literal members and union members, and source
+  maps are compared by name only. Any other difference fails with a diff. If it is benign, add a precise,
+  documented normalisation to the script (never a blanket ignore); otherwise switch the emit back to `tsc`.
+
+If tsc-rs reports something TypeScript 6 does not (or crashes), check the package with TypeScript 6 —
+`pnpm exec tsc -p tsconfig.json --noEmit`, or `pnpm exec tsc -p tsconfig.build.json` for the emit — and
+record the difference; never silence a TS 7 diagnostic with `any` or `@ts-ignore`. A fix must be valid
+for both compilers. Upgrades: `docs/OPEN_WORK.md` §5.3.
 
 turbo runs tasks in strict env mode: a script only sees the environment variables that `turbo.json`
 lists for its task. The `test` task lists the variables the tests read (`TEST_DATABASE_URL`,

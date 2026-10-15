@@ -23,9 +23,10 @@ Spec: `docs/spec/MASTER_PROMPT.md`. Progress tracker: `docs/CHECKLIST.md` (updat
 - `pnpm install`, `pnpm infra:up`, `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build`
 - `typecheck` and the `tsc` emit in `build` run `tsc-rs` (Rust port of the TypeScript 7 compiler, root
   devDependency pinned exactly): `tsc-rs -p tsconfig.json --noEmit`. `typescript` ~6.0.3 stays for ESLint,
-  vitest, drizzle-kit and editors. If tsc-rs misbehaves, compare with TypeScript 6 in the package:
-  `pnpm exec tsc -p tsconfig.json --noEmit` (emit: `pnpm exec tsc -p tsconfig.build.json`). Upgrade policy:
-  `docs/OPEN_WORK.md` §5.3.
+  vitest, drizzle-kit and editors. CI also runs `pnpm typecheck:ts6` (TypeScript 6 over the same projects) and,
+  after `pnpm build`, `pnpm emit-parity` (dist against a TypeScript 6 emit). If tsc-rs misbehaves, compare with
+  TypeScript 6 in the package: `pnpm exec tsc -p tsconfig.json --noEmit` (emit: `pnpm exec tsc -p
+  tsconfig.build.json`). Upgrade policy: `docs/OPEN_WORK.md` §5.3.
 - Go (portable install, not on PATH by default): `export PATH=/c/Users/lmari/sdk/go/bin:$PATH` then
   `cd services/node-agent && go vet ./... && go test ./...`
 - Contracts fixtures: `node packages/contracts/scripts/gen-fixtures.mjs`

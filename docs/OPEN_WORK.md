@@ -214,16 +214,22 @@ replace the note with the concrete gap. Affected lines:
   - Platforms: the lockfile carries all six `@tsc-rs/*` platform packages (pnpm records every optional platform
     package whatever the host, so no `supportedArchitectures` is needed). The Linux binaries are static (no `libc`
     constraint), so glibc and musl images both work. `pnpm install --frozen-lockfile` and `tsc-rs --version` were
-    checked in a linux/arm64 Debian trixie container; a full Linux type check and build is first exercised by CI
-    (ubuntu-latest, x64) and by the control-plane image build (amd64/arm64).
+    checked in a linux/arm64 Debian trixie container. A full Linux type check and build runs in CI on ubuntu-latest
+    (x64). The control-plane image build (`infra/containers/control-plane/Dockerfile` and the CI `deploy` job that
+    builds the amd64 image and boots it) exists only on the in-flight deployment branch: until it merges, tsc-rs is
+    not exercised on linux/arm64 at all; after it merges, that image build and smoke test also exercise tsc-rs on
+    linux amd64 in CI.
   - Emit at adoption, compared with tsc 6: byte-identical to `typescript@7.1.0-dev.20261008.1` (same pin). Against
     tsc 6 the JS differs only in `import X, {} from "m"` becoming `import X from "m"` (same bindings and module
     evaluation); 23 of 99 `.d.ts` files differ only in the order of type-literal members and union constituents (equal
     after sorting both); source maps omit `sourceRoot: ""` and map compiler-written code (parameter-property
     assignments, default parameters, some `case` blocks) at coarser positions — 407 of 338,494 positions resolve to
-    another original line.
-  - Upgrade policy: keep the exact pin; bump deliberately, one version at a time. For each bump rerun `pnpm typecheck`
-    with both compilers (diagnostics must match tsc 6, or the difference is explained and fixed for both), emit with
-    tsc 6 and tsc-rs into separate directories and diff `dist`, and run the full quality gates. If tsc-rs misbehaves,
-    switch the affected scripts back to `tsc` (TypeScript 6) and record why. Revisit when TypeScript 7 is released
-    as stable: its own native `tsc` may replace tsc-rs.
+    another original line. CI keeps checking this on every change: `pnpm emit-parity` compares `dist` with a
+    TypeScript 6 emit and allows only these differences, and `pnpm typecheck:ts6` keeps TypeScript 6 error-free
+    (`scripts/ci/typescript6.mjs`, `docs/development/workflow.md`).
+  - Upgrade policy: keep the exact pin; bump deliberately, one version at a time. For each bump run `pnpm typecheck`,
+    `pnpm typecheck:ts6`, `pnpm build` and `pnpm emit-parity` (diagnostics must match tsc 6, or the difference is
+    explained and fixed for both; a new emit difference is either allowlisted in the script with a reason or the bump
+    is rejected), then the full quality gates. If tsc-rs misbehaves, switch the affected scripts back to `tsc`
+    (TypeScript 6) and record why. Revisit when TypeScript 7 is released as stable: its own native `tsc` may replace
+    tsc-rs.
