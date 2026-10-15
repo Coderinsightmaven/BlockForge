@@ -456,6 +456,8 @@ describe.each(TARGETS)("server databases on $name", (target) => {
     await connectSimNode(t, owner, { agents });
     const alice = await createUserClient(t, owner, "alice@example.com", []);
     const host = await createHost(owner, target, { publicHost: "db.example.net" });
+    // A direct connection with a fully privileged admin: no proxy, nothing missing (identity incl. @@server_uuid on MySQL).
+    expect((await owner.post(`/database-hosts/${host.id}/test`)).json()).toMatchObject({ ok: true, proxyDetected: false, missingPrivileges: [] });
     const srv = await paperServer(owner, { ownerId: await userId(alice), databaseLimit: 3 });
 
     // A database the server's users must never reach.
