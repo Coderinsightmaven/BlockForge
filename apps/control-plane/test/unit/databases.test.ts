@@ -122,6 +122,10 @@ describe("operation claims", () => {
     expect(new ServerDatabasesService(deps(c, 20 * 60_000)).staleMs).toBe(20 * 60_000);
     // The host-side statement limit stays below the client timeout; cleanup waits until a late statement cannot land.
     expect(c.sessionLimitS).toBe(12);
+    // Abort procedure: connect 10 s + identity ≤ 2 × 5 s + KILL QUERY 5 s + confirmation 5 s (+ last poll 5 s) + KILL 5 s.
+    expect(c.abortBudgetMs).toBe(40_000);
+    // A session: connect + (setup 4 + statements) × statement timeout + abort + close.
+    expect(c.maxSessionMs(2)).toBe(10_000 + 6 * 15_000 + 40_000 + 2000);
     expect(s.cleanupDelayMs).toBe(72_000);
     expect(new MysqlConnector({ logger: pino({ level: "silent" }), sessionLimits: false }).sessionLimitS).toBeNull();
   });
