@@ -419,9 +419,16 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   `password`), so a stored password is never sent to a different address or over a weaker channel. The same rule
   applies to `POST /database-hosts/test` with `hostId` instead of `password`. Test results carry only fixed,
   credential-free messages (`access denied for the admin user …`, `connection refused`, `TLS error: …`).
-* **TLS** (`tlsMode`): `disabled`; `preferred` (TLS when offered, certificate not verified, plain otherwise);
-  `required` (TLS or fail; without `tlsCaCertificate` the certificate is not verified, with it the chain must verify
-  against that CA — MySQL `VERIFY_CA`, the host name is not checked).
+* **TLS** (`tlsMode`, named after the MySQL client's SSL modes): `disabled` (plain TCP); `preferred` (TLS when
+  offered, plain otherwise — **host not verified**); `required` (TLS or fail — encrypted but **host not verified**:
+  stops passive sniffing only, an active man-in-the-middle can impersonate the host and receive the admin
+  credentials); `verify_ca` (TLS, and the certificate chain must verify against `tlsCaCertificate` — MySQL
+  `VERIFY_CA`; the host name is not checked). `tlsCaCertificate` is required with `verify_ca` and refused (400)
+  with every other mode; PATCHing to another mode clears the stored CA (a CHECK constraint enforces
+  CA ⇔ `verify_ca`). `DatabaseHostTestResult.tls` only says the session was encrypted. The UI labels the modes
+  "host not verified" / "certificate verified" accordingly. `required` stays available because many self-hosted
+  servers present auto-generated certificates no CA vouches for; use `verify_ca` with the server's CA (or its
+  self-signed certificate) wherever the network between control plane and host is not trusted.
 * **Names.** Database `s<shortId>_<name>` (`name` = 1–48 of `[a-z0-9_]`, ≤ 58 chars in total), username
   `u<shortId>_<10 random [a-z0-9]>` (20 chars), password 32 random chars of `[A-Za-z0-9-_.~]` (at least one of each
   class, so `validate_password` MEDIUM accepts it). `remote` ("connections from", default `%`) is normalised by
@@ -441,13 +448,26 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   non-administrators (403 `{reason: "disabled"}`), at the limit 409 `{reason: "limit_reached", limit}`; holders of
   `servers.admin` are not limited (as for backups). Concurrent creations are serialised per server. Lowering the
   limit below the usage keeps the existing databases.
-* **Create** reserves the row (limits, host capacity, names) in one transaction, then creates database, user and
-  grant on the host. On failure it removes only what this request created (an existing database of the same name
-  → 409 `{reason: "name_taken"}` and is left untouched) and the row; host failures → 502 `UPSTREAM_ERROR`
-  `{reason: "host_error", code}`. Refused while the server is being deleted (409 `INVALID_STATE`).
-* **Rotate** updates the stored (encrypted) password and runs `ALTER USER` in one transaction: a host failure keeps
-  the old password everywhere (502). **Delete** drops database and user on the host, then the row (a host failure
-  keeps the row: retry).
+* **No transaction across host I/O.** Every create/rotate/delete claims the row in a short transaction
+  (`server_databases.operation` = `creating`/`rotating`/`deleting` + a token), talks to the host with no Postgres
+  transaction, lock or pooled connection held, then records the outcome in a second short transaction that is
+  conditional on still holding the claim. A second create/rotate/delete of the same database meanwhile → 409
+  `{reason: "busy"}` (reading the password is not blocked). A claim older than 5 minutes (a crashed process; the
+  longest host operation is about 72 s with the default timeouts) is taken over.
+* **Create** reserves the row (limits, host capacity, names; claimed `creating`) in one short transaction, then
+  creates database, user and grant on the host. On failure it removes only what this request created — a
+  pre-existing database (409 `{reason: "name_taken"}`) or account (502 `ER_CANNOT_USER`) of the same name is never
+  dropped or altered — and the row; host failures → 502 `UPSTREAM_ERROR` `{reason: "host_error", code}`. Refused
+  while the server is being deleted (409 `INVALID_STATE`); if the server is deleted while the host is contacted,
+  the created objects are dropped again.
+* **Rotate**: claim → `ALTER USER` → store the new (encrypted) password and release. A host failure releases the
+  claim and keeps the old password everywhere (502). Failure window: if the host applied `ALTER USER` but its answer
+  was lost (timeout) or the new password could not be stored, the stored password is stale until the next
+  successful rotation; **rotating again fixes it** (every rotation sets the password from scratch). If the database
+  was deleted while rotating → 409 `busy`.
+* **Delete**: claim → `DROP DATABASE IF EXISTS` + `DROP USER IF EXISTS` → delete the row. A host failure releases
+  the claim and keeps the row (502; retry). If the row cannot be deleted afterwards the claim is released and a retry
+  drops again (idempotent) and deletes it.
 * **Server deletion** gets a `databases` step after the container is removed: every database of the server is
   dropped on its host (one connection per host); what cannot be dropped is written to the job log as a warning and
   audited (`server.database.delete`, `outcome: failed`, with host, database and username to drop by hand). The step
