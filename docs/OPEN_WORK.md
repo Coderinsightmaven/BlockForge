@@ -100,7 +100,21 @@ focus moved to Phase 5. Not blocking and still open: the live-only gaps in 1.3 a
   limitations.
 
 ## 3. Later phases (see `docs/CHECKLIST.md` for details)
-- **Phase 5 — Databases & remaining parity:** MySQL/MariaDB database hosts; create/rotate/delete per-server databases.
+- **Phase 5 — Databases & remaining parity:** database hosts and per-server databases implemented (2026-10-15,
+  pending cross-model review and a live run). Open:
+  - independent review of the Phase 5 change (control plane SQL/grant handling, web password handling);
+  - live run: a real plugin (e.g. LuckPerms) on the test node connecting to a database created through the UI;
+  - the web Databases tab and Database hosts page against the real control plane (component tests only so far);
+  - the timeout / KILL / inspection paths are tested on MariaDB only: on MySQL 8.4 only the basic flows,
+    `partial_revokes` and the test-connection identity/privilege checks ran (MySQL is not part of CI);
+  - behind a proxy or load balancer BlockForge never KILLs, so an unanswered statement always ends with an unknown
+    outcome (reconciled by rotating again / the sweep); direct connections are recommended (test connection warns);
+  - MySQL 8.4 is an opt-in compose profile (memory on small dev VMs), so CI runs the database tests against MariaDB
+    only; the MySQL tests (caching_sha2_password, `partial_revokes`) pass locally with `--profile mysql`;
+  - no `verify_identity` TLS mode (host name check): mysql2 skips it for IP-literal hosts; `verify_ca` with a private CA
+    or the server's own certificate is documented instead;
+  - Pterodactyl's per-database `max_connections` (`MAX_USER_CONNECTIONS`) is not implemented;
+  - admin view of all databases on a host (only the count is shown).
 - **Phase 6 — Velocity & networks:**
   - network creation wizard;
   - proxy provisioning (Fill API);

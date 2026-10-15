@@ -91,6 +91,7 @@ export async function buildServerDtos(db: Db, latest: LatestCache, rows: ServerR
       storageQuotaBytes: r.storageQuotaBytes,
       allocationLimit: r.allocationLimit,
       backupLimit: r.backupLimit,
+      databaseLimit: r.databaseLimit,
       allocations: allocs.map((a) => ({ id: a.id, ip: a.ip, port: a.port, alias: a.alias, primary: a.isPrimary })),
       address: primary && publicHost ? hostPort(publicHost, primary.port) : null,
       startup: r.startup as Server["startup"],

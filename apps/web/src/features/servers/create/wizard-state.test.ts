@@ -173,19 +173,34 @@ describe("validateStep", () => {
   it("checks resources, including heap headroom", () => {
     const e = validateStep(
       "resources",
-      mcState({ memoryMiB: "100", cpuCores: "0.1", diskGiB: "-1", allocationLimit: "60", backupLimit: "x" }),
+      mcState({
+        memoryMiB: "100",
+        cpuCores: "0.1",
+        diskGiB: "-1",
+        allocationLimit: "60",
+        backupLimit: "x",
+        databaseLimit: "101",
+      }),
       minecraftTemplate,
     );
     expect(Object.keys(e).sort()).toEqual([
       "allocationLimit",
       "backupLimit",
       "cpuCores",
+      "databaseLimit",
       "diskGiB",
       "memoryMiB",
     ]);
     expect(
       validateStep("resources", mcState({ memoryMiB: "2048", heapMiB: "2048" }), minecraftTemplate).heapMiB,
     ).toMatch(/smaller/);
+  });
+
+  it("accepts a database limit of 0–100 (whole numbers only)", () => {
+    const err = (databaseLimit: string) =>
+      validateStep("resources", mcState({ databaseLimit }), minecraftTemplate).databaseLimit;
+    for (const ok of ["0", "1", "100"]) expect(err(ok)).toBeUndefined();
+    for (const bad of ["-1", "101", "1.5", "", "x"]) expect(err(bad)).toBe("0–100.");
   });
 });
 
@@ -213,6 +228,21 @@ describe("buildCreateBody / validateWizard", () => {
       },
     });
     expect(body?.egg).toBeUndefined();
+  });
+
+  it("sends the database limit: 0 by default (as the contract), else the chosen value", () => {
+    expect(initialWizardState().databaseLimit).toBe("0");
+    const byDefault = validateWizard(mcState(), minecraftTemplate);
+    expect(byDefault.errors).toEqual({});
+    expect(byDefault.body).toMatchObject({ databaseLimit: 0, backupLimit: 3, allocationLimit: 0 });
+    expect(buildCreateBody(mcState({ databaseLimit: "5" }), minecraftTemplate).databaseLimit).toBe(5);
+    expect(validateWizard(mcState({ databaseLimit: "5" }), minecraftTemplate).body).toMatchObject({
+      databaseLimit: 5,
+    });
+    const tooMany = validateWizard(mcState({ databaseLimit: "101" }), minecraftTemplate);
+    expect(tooMany.body).toBeNull();
+    expect(tooMany.errors.resources?.databaseLimit).toBe("0–100.");
+    expect(stepForPath("databaseLimit")).toBe("resources");
   });
 
   it("builds an egg request with only editable variables", () => {

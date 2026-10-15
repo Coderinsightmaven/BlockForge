@@ -56,6 +56,9 @@ import type { ServerStateService } from "./servers/state.js";
 import type { SftpService } from "./sftp/service.js";
 import type { TemplatesService } from "./templates/service.js";
 import type { UsersService } from "./users/service.js";
+import type { DatabaseHostsService } from "./databases/hosts.js";
+import type { MysqlConnector } from "./databases/mysql.js";
+import type { ServerDatabasesService } from "./databases/service.js";
 
 /** Every long-lived service, created once by `buildApp` and shared by routes, jobs and timers. */
 export interface AppContext {
@@ -119,4 +122,8 @@ export interface AppContext {
   players: PlayersService;
   playerSessions: PlayerSessionTracker;
   sftp: SftpService;
+  /** Short-lived admin connections to MySQL/MariaDB database hosts. */
+  mysqlConnector: MysqlConnector;
+  databaseHosts: DatabaseHostsService;
+  serverDatabases: ServerDatabasesService;
 }

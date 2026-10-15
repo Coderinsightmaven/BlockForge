@@ -412,6 +412,7 @@ export class ServersService {
       dockerImage: prepared.dockerImage,
       allocationLimit: req.allocationLimit,
       backupLimit: req.backupLimit,
+      databaseLimit: req.databaseLimit,
       jvmArgs: prepared.jvmArgs,
       jvmPreset: prepared.jvmPreset,
       gameplay: prepared.gameplay,
@@ -564,6 +565,7 @@ export class ServersService {
       storageQuotaBytes?: number | null | undefined;
       allocationLimit?: number | undefined;
       backupLimit?: number | undefined;
+      databaseLimit?: number | undefined;
       ownerId?: string | undefined;
       restartPolicy?: ServerRow["restartPolicy"] | undefined;
       startup?: "manual" | "auto" | undefined;
@@ -593,6 +595,8 @@ export class ServersService {
         set.allocationLimit = input.allocationLimit;
       }
       if (input.backupLimit !== undefined) set.backupLimit = input.backupLimit;
+      // Lowering below the current number of databases is allowed (as for backups): no new ones until below.
+      if (input.databaseLimit !== undefined) set.databaseLimit = input.databaseLimit;
       if (input.restartPolicy !== undefined) set.restartPolicy = input.restartPolicy;
       if (input.startup !== undefined) set.startup = input.startup;
       if (input.memoryLimitBytes !== undefined && input.memoryLimitBytes !== row.memoryLimitBytes) {

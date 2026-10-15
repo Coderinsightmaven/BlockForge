@@ -74,6 +74,45 @@ describe("server settings forms during live updates", () => {
     expect((screen.getByLabelText(/^Backup limit/) as HTMLInputElement).value).toBe("3");
   });
 
+  it("saves a changed database limit (0–100) as the only patched field", async () => {
+    const { setServer } = renderTab(admin());
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit = {}) => {
+        calls.push({
+          url,
+          method: init.method ?? "GET",
+          body: init.body ? JSON.parse(String(init.body)) : null,
+        });
+        if (init.method === "PATCH")
+          return jsonResponse({ server: admin({ databaseLimit: 5 }), restartRequired: false });
+        return jsonResponse(apiErrorBody("NOT_FOUND"), { status: 404 });
+      }),
+    );
+    const user = userEvent.setup();
+    const limit = (await screen.findByLabelText(/^Database limit/)) as HTMLInputElement;
+    expect(limit.value).toBe("2");
+    await user.clear(limit);
+    await user.type(limit, "101");
+    // Out of range: the browser's own constraint validation (max=100) blocks the submit.
+    expect(limit.checkValidity()).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    await user.clear(limit);
+    await user.type(limit, "5");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    await vi.waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    const patch = calls.find((c) => c.method === "PATCH")!;
+    expect(patch.url).toMatch(/\/servers\/[^/]+\/build$/);
+    expect(patch.body).toEqual({ databaseLimit: 5 });
+    // Live updates of the limit refresh the field while it holds no unsaved edits.
+    setServer(admin({ databaseLimit: 7 }));
+    await vi.waitFor(() =>
+      expect((screen.getByLabelText(/^Database limit/) as HTMLInputElement).value).toBe("7"),
+    );
+  });
+
   it("follows live updates while the form has no unsaved edits", async () => {
     const { setServer } = renderTab(admin());
     expect(((await screen.findByLabelText(/^Backup limit/)) as HTMLInputElement).value).toBe("3");

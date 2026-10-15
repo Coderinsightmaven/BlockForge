@@ -22,3 +22,4 @@ export * from "./api/backups.js";
 export * from "./api/schedules.js";
 export * from "./api/extensions.js";
 export * from "./api/players.js";
+export * from "./api/databases.js";

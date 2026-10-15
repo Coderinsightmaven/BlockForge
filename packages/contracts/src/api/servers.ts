@@ -66,6 +66,8 @@ export const Server = z.object({
   /** Max additional allocations (besides the primary) the server's users may assign. */
   allocationLimit: z.number().int().nonnegative(),
   backupLimit: z.number().int().nonnegative(),
+  /** Max MySQL databases (Pterodactyl `database_limit`); 0 disables databases for non-administrators. */
+  databaseLimit: z.number().int().nonnegative(),
   allocations: z.array(ServerAllocationRef),
   /** Connection address for players: primary allocation alias (or node public address, or ip) + port. */
   address: z.string().nullable(),
@@ -205,6 +207,7 @@ export const CreateServerBase = z.object({
   storageQuotaBytes: Bytes.nullable().default(null),
   allocationLimit: z.number().int().min(0).max(50).default(0),
   backupLimit: z.number().int().min(0).max(100).default(3),
+  databaseLimit: z.number().int().min(0).max(100).default(0),
   startup: z.enum(["manual", "auto"]).default("auto"),
   restartPolicy: RestartPolicy.default({ mode: "on-failure", maxRetries: 3, backoffMs: 10_000 }),
   timezone: z.string().max(64).default("UTC"),
@@ -311,6 +314,7 @@ export const UpdateServerBuildRequest = z.object({
   storageQuotaBytes: Bytes.nullable().optional(),
   allocationLimit: z.number().int().min(0).max(50).optional(),
   backupLimit: z.number().int().min(0).max(100).optional(),
+  databaseLimit: z.number().int().min(0).max(100).optional(),
   ownerId: Id.optional(),
   restartPolicy: RestartPolicy.optional(),
   startup: z.enum(["manual", "auto"]).optional(),

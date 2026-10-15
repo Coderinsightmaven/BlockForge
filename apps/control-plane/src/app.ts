@@ -107,6 +107,10 @@ import { ServerStateService } from "./servers/state.js";
 import { ConsoleSecretMasks } from "./servers/secret-masks.js";
 import { ConsoleBackfill } from "./servers/console-backfill.js";
 import { SftpService } from "./sftp/service.js";
+import { DatabaseHostsService } from "./databases/hosts.js";
+import { MysqlConnector } from "./databases/mysql.js";
+import { registerDatabaseRoutes } from "./databases/routes.js";
+import { ServerDatabasesService } from "./databases/service.js";
 import { registerTemplateRoutes } from "./templates/routes.js";
 import { TemplatesService } from "./templates/service.js";
 
@@ -147,6 +151,19 @@ export interface BuildAppOptions {
   };
   /** Player action timing (tests shorten the feedback wait and the unconfirmed-command linger). */
   players?: { feedbackTimeoutMs?: number; commandLingerMs?: number };
+  /** MySQL host connection timeouts (tests shorten them for unreachable hosts). */
+  databases?: {
+    connectTimeoutMs?: number;
+    queryTimeoutMs?: number;
+    /** Username generator override (tests force a collision with a pre-existing account). */
+    generateUsername?: (serverShortId: string) => string;
+    operationStaleMs?: number;
+    /** Host-side statement limits (default on; tests turn them off to exercise KILL QUERY). */
+    sessionLimits?: boolean;
+    abortStatementTimeoutMs?: number;
+    deleteDeadlineMs?: number;
+    cleanupDelayMs?: number;
+  };
 }
 
 export interface BuiltApp {
@@ -316,6 +333,24 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     db, clock, logger: logger.child({ module: "backups" }), audit, hub, gateway, jobs, storage: backupStorage, access: serverAccess, state: serverState,
     browser: browserTransfers, transfers,
   });
+  const dbOpts = opts.databases ?? {};
+  /** Cancels a running database sweep at shutdown. */
+  const sweepAbort = new AbortController();
+  const mysqlConnector = new MysqlConnector({
+    logger: logger.child({ module: "database-hosts" }),
+    ...(dbOpts.connectTimeoutMs !== undefined ? { connectTimeoutMs: dbOpts.connectTimeoutMs } : {}),
+    ...(dbOpts.queryTimeoutMs !== undefined ? { queryTimeoutMs: dbOpts.queryTimeoutMs } : {}),
+    ...(dbOpts.sessionLimits !== undefined ? { sessionLimits: dbOpts.sessionLimits } : {}),
+    ...(dbOpts.abortStatementTimeoutMs !== undefined ? { abortStatementTimeoutMs: dbOpts.abortStatementTimeoutMs } : {}),
+  });
+  const databaseHosts = new DatabaseHostsService({ db, clock, box, audit, connector: mysqlConnector });
+  const serverDatabases = new ServerDatabasesService({
+    db, clock, logger: logger.child({ module: "server-databases" }), box, audit, connector: mysqlConnector, hosts: databaseHosts,
+    ...(dbOpts.generateUsername ? { generateUsername: dbOpts.generateUsername } : {}),
+    ...(dbOpts.operationStaleMs !== undefined ? { operationStaleMs: dbOpts.operationStaleMs } : {}),
+    ...(dbOpts.deleteDeadlineMs !== undefined ? { deleteDeadlineMs: dbOpts.deleteDeadlineMs } : {}),
+    ...(dbOpts.cleanupDelayMs !== undefined ? { cleanupDelayMs: dbOpts.cleanupDelayMs } : {}),
+  });
   const backupDeps: BackupJobDeps = {
     db, clock, logger: logger.child({ module: "backup-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit, masks,
     storage: backupStorage, publish: (id) => backupsService.publish(id), publishDeleted: (s, b) => backupsService.publishDeleted(s, b),
@@ -324,6 +359,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   for (const def of serverJobDefinitions({
     db, clock, logger: logger.child({ module: "server-jobs" }), gateway, latest, consoles, ownership, state: serverState, bus, audit, masks,
     deleteBackups: (serverId, c) => deleteAllBackups(backupDeps, serverId, c),
+    deleteDatabases: async (serverId, c) => {
+      await serverDatabases.dropAllForServer(serverId, c);
+    },
     ...(opts.serverJobs ?? {}),
   })) {
     jobs.define(def as JobDefinition<unknown>);
@@ -364,7 +402,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     signer, authenticator, rotations, tracker, gateway, enrollment, ownership, consoles, transfers, nodes, latest, vmWriter,
     vmClient, metricsQuery, overview, overviewPublisher, alerts, alertEvaluator, notifications,
     templates, catalog, allocations, serverAccess, serverState, servers, reconciler, files, browserTransfers, sshKeys, apiKeys, sftp, backups: backupsService, backupStorage, backupJobs: backupDeps, schedules: schedulesService, scheduler, consoleBackfill,
-    upstreams, serverEvents, extensions, players, playerSessions,
+    upstreams, serverEvents, extensions, players, playerSessions, mysqlConnector, databaseHosts, serverDatabases,
   };
 
   // --- Seed & wiring -------------------------------------------------------------------
@@ -418,6 +456,11 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   app.addHook("preClose", async () => {
     gateway.closeAll(CLOSE.serviceRestart, "control plane restarting");
     for (const c of hub.allClients()) hub.unregister(c);
+    // Before in-flight requests and background tasks are awaited: database-host work must not hold shutdown
+    // (a host that stops answering would otherwise cost a statement timeout per operation). Running statements
+    // are abandoned with their outcome recorded as unknown; jobs see SHUTDOWN and are retried after the restart.
+    sweepAbort.abort();
+    mysqlConnector.shutdown();
   });
   await app.register(fastifyHelmet, {
     contentSecurityPolicy: { useDefaults: false, directives: cspDirectives(config.publicUrl) },
@@ -454,6 +497,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
       registerScheduleRoutes(api, ctx);
       registerExtensionRoutes(api, ctx);
       registerPlayerRoutes(api, ctx);
+      registerDatabaseRoutes(api, ctx);
       registerAccountRoutes(api, ctx);
       registerRealtimeRoutes(api, ctx);
     },
@@ -498,6 +542,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
       },
       logger,
     ),
+    // Abandoned database operations and `cleanup_pending` databases (host I/O: its own task, so a slow host
+    // never delays the other maintenance).
+    databaseSweep: new PeriodicTask("database-sweep", 60_000, async () => void (await serverDatabases.sweep(sweepAbort.signal)), logger),
   };
 
   await auth.ensureSetupToken(opts.setupTokenSink ?? defaultSetupTokenSink(logger));
@@ -510,13 +557,19 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     await abortStaleUploads(backupDeps).catch((err: unknown) => logger.warn({ err }, "aborting stale uploads failed"));
     void retryPendingSaveOn(backupDeps).catch((err: unknown) => logger.warn({ err }, "save-on retry failed"));
     for (const t of Object.values(tasks)) t.start();
+    // Claims a previous process left behind are resolved right away, not a minute later.
+    void tasks.databaseSweep!.runNow();
   }
 
   app.addHook("onClose", async () => {
     for (const t of Object.values(tasks)) await t.stop();
     overviewPublisher.stop();
     await scheduler.stop();
+    // Database-host work was already abandoned in preClose (connector shut down, sweep cancelled); jobs are
+    // stopped (a server deletion that met SHUTDOWN is retried after the restart), then every remaining admin
+    // connection is torn down.
     if (startBackground) await jobs.stop();
+    mysqlConnector.closeAll();
     await vmWriter.flush(true);
     if (ownPool) await pool.end();
   });

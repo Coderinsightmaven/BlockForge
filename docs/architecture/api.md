@@ -13,6 +13,9 @@ pagination (`?limit=&cursor=` → `{items, nextCursor}`) unless noted. Timestamp
 
 Permission column = what the route checks (scope resolved from the target resource).
 
+**Rate limits.** Besides the auth/enrollment limits and the per-API-key limit, the database routes that reach a
+database host or reveal a password are limited to 60 requests/minute per client IP and route (429 `RATE_LIMITED`).
+
 **Idempotency.** Job-creating routes (`POST /servers`, `POST /servers/:id/actions`,
 `DELETE /servers/:id`, backup/restore/network-apply routes, extension install/apply-updates/scan/rollback) accept an optional
 `Idempotency-Key` header (1–128 printable chars). The key is scoped to the user and route;
@@ -146,7 +149,7 @@ expire after 2 hours. World upload at creation is not implemented yet (`world.mo
 | POST | `/servers` | `CreateServerRequest` → `{server: Server, jobId}` (202, idempotent) | servers.create on node/network (+ servers.admin for another owner) |
 | GET | `/servers/:id` | → `Server` | servers.view |
 | PATCH | `/servers/:id` | `UpdateServerSettingsRequest` → `Server` | servers.settings.edit |
-| PATCH | `/servers/:id/build` | `UpdateServerBuildRequest` → `{server, restartRequired}` | servers.admin |
+| PATCH | `/servers/:id/build` | `UpdateServerBuildRequest` → `{server, restartRequired}` (incl. `databaseLimit`, Phase 5) | servers.admin |
 | POST | `/servers/:id/suspend` · `/unsuspend` | → `Server` (suspend stops the server) | servers.admin |
 | POST | `/servers/:id/reinstall` | → `{jobId}` (idempotent; stopped/crashed/provision_failed only) | servers.reinstall |
 | DELETE | `/servers/:id` | `?deleteData=true` → `{jobId}` | servers.delete |
@@ -389,6 +392,177 @@ non-Minecraft servers have no install dir: the list answers `installDir: null`, 
   `server.players` / `global.players` (`GET /metrics/range`); no extra route.
 * Realtime: `player.joined` / `player.left` on `server:<id>`, delivered only to subscribers holding
   `servers.players.view` on that server (per-event filter on top of the topic's `servers.view`).
+
+## Databases (Phase 5) — see `api/databases.ts`
+MySQL/MariaDB database hosts (admin) and per-server databases (Pterodactyl "Databases"). The control plane connects
+to the hosts itself with the host's admin account (`mysql2`, one short-lived connection per operation, 10 s connect
+/ 15 s statement timeout, no LOCAL INFILE, cleartext auth refused); agents are not involved.
+
+| Method | Path | Body → Response | Permission |
+|--------|------|-----------------|------------|
+| GET | `/database-hosts` | → `DatabaseHost[]` (not paginated) | database_hosts.manage (global) |
+| POST | `/database-hosts` | `CreateDatabaseHostRequest` → `DatabaseHost` (201) | database_hosts.manage |
+| GET | `/database-hosts/:id` | → `DatabaseHost` | database_hosts.manage |
+| PATCH | `/database-hosts/:id` | `UpdateDatabaseHostRequest` → `DatabaseHost` | database_hosts.manage |
+| DELETE | `/database-hosts/:id` | → 204; 409 `{reason: "has_databases", count}` while it has databases | database_hosts.manage |
+| POST | `/database-hosts/:id/test` | → `DatabaseHostTestResult` (saved settings) | database_hosts.manage, rate-limited |
+| POST | `/database-hosts/test` | `TestDatabaseHostRequest` → `DatabaseHostTestResult` (unsaved settings) | database_hosts.manage, rate-limited |
+| GET | `/servers/:id/databases` | → `ServerDatabase[]` (no passwords) | servers.databases.view |
+| POST | `/servers/:id/databases` | `CreateServerDatabaseRequest` `{name, remote?, hostId?}` → `ServerDatabase` (201) | servers.databases.create (+ database_hosts.manage for `hostId`), rate-limited |
+| GET | `/servers/:id/databases/:databaseId/password` | → `ServerDatabasePassword` (`Cache-Control: no-store`, audited) | servers.databases.view_password, rate-limited |
+| POST | `/servers/:id/databases/:databaseId/rotate-password` | → `ServerDatabase` | servers.databases.update, rate-limited |
+| DELETE | `/servers/:id/databases/:databaseId` | `?forget=true` (optional) → 204 | servers.databases.delete (+ database_hosts.manage to forget), rate-limited |
+
+* **Host admin password** is write-only: never returned (`DatabaseHost` is strict), logged or audited (audit
+  records `passwordChanged`). Omitting it on PATCH keeps the stored one, **except** when a connection setting changes
+  (`host`, `port`, `username`, `tlsMode`, `tlsCaCertificate`): then it must be sent again (400, issue path
+  `password`), so a stored password is never sent to a different address or over a weaker channel. The same rule
+  applies to `POST /database-hosts/test` with `hostId` instead of `password`. Test results carry only fixed,
+  credential-free messages (`access denied for the admin user …`, `connection refused`, `TLS error: …`).
+* **TLS** (`tlsMode`, named after the MySQL client's SSL modes): `disabled` (plain TCP); `preferred` (TLS when
+  offered, plain otherwise — **host not verified**); `required` (TLS or fail — encrypted but **host not verified**:
+  stops passive sniffing only, an active man-in-the-middle can impersonate the host and receive the admin
+  credentials); `verify_ca` (TLS, and the certificate chain must verify against `tlsCaCertificate` — MySQL
+  `VERIFY_CA`; the host name is not checked). `tlsCaCertificate` is required with `verify_ca` and refused (400)
+  with every other mode; PATCHing to another mode clears the stored CA (a CHECK constraint enforces
+  CA ⇔ `verify_ca`). `DatabaseHostTestResult.tls` only says the session was encrypted. The UI labels the modes
+  "host not verified" / "certificate verified" accordingly. `required` stays available because many self-hosted
+  servers present auto-generated certificates no CA vouches for; use `verify_ca` with the server's CA (or its
+  self-signed certificate) wherever the network between control plane and host is not trusted. **Pin a private CA or
+  the server's own certificate, never a public CA**: the host name is not checked, so any certificate the pinned CA
+  issued (for any name) would be accepted. A `verify_identity` mode (host name check) is not offered: `mysql2` skips
+  the name check for IP-literal hosts and hosts are commonly addressed by IP; pinning the server's own certificate
+  gives the stronger guarantee.
+* **Names.** Database `s<shortId>_<name>` (`name` = 1–48 of `[a-z0-9_]`, ≤ 58 chars in total), username
+  `u<shortId>_<10 random [a-z0-9]>` (20 chars), password 32 random chars of `[A-Za-z0-9-_.~]` (at least one of each
+  class, so `validate_password` MEDIUM accepts it). `remote` ("connections from", default `%`) is normalised by
+  `normalizeDatabaseRemote`: `%`, IPv4, `10.0.%`-style wildcards, CIDR (rewritten to the portable netmask form
+  `10.0.0.0/255.0.0.0`), address/netmask, host names (optionally `%.example.com`), IPv6.
+* **Statements** (`databases/sql.ts`): `CREATE DATABASE … utf8mb4`, `CREATE USER … IDENTIFIED BY …`,
+  `GRANT <Pterodactyl's 18 database privileges> ON \`db\`.* TO …` (never GRANT OPTION or anything global),
+  `ALTER USER … IDENTIFIED BY …`, `DROP DATABASE IF EXISTS`, `DROP USER IF EXISTS`. These statements take no `?`
+  parameters, so every identifier/value is re-validated against an allowlist regex right before it is backtick- or
+  single-quoted; nothing else reaches SQL. In the GRANT the `_` of the database name is escaped (`\_`), because `_`
+  is a wildcard in database-level grants (an unescaped grant on `s…_a_b` would also cover — and allow creating —
+  `s…_aXb`); on MySQL with `partial_revokes = ON` grant names are literal and the escape is omitted.
+* **Host choice** (no `hostId`): the first host with capacity (`maxDatabases`, null = unlimited) among hosts linked
+  to the server's node, then unlinked hosts, then hosts linked to other nodes (oldest first). None → 422
+  `PRECONDITION_FAILED` `{reason: "no_host"}`; an explicitly chosen full host → 409 `{reason: "host_full"}`.
+* **Limit** `Server.databaseLimit` (set with `PATCH /servers/:id/build`, default 0): 0 disables databases for
+  non-administrators (403 `{reason: "disabled"}`), at the limit 409 `{reason: "limit_reached", limit}`; holders of
+  `servers.admin` are not limited (as for backups). Concurrent creations are serialised per server. Lowering the
+  limit below the usage keeps the existing databases.
+* **No transaction across host I/O.** Every create/rotate/delete claims the row in a short transaction
+  (`server_databases.operation` = `creating`/`rotating`/`deleting` + a token, timestamps from the database clock),
+  talks to the host with no Postgres transaction, lock or pooled connection held, then records the outcome in a
+  second short transaction that is conditional on still holding the claim. A second create/rotate/delete of the same
+  database meanwhile → 409 `{reason: "busy"}`. A claim older than the stale limit (default ≈ 7 minutes; checked at
+  startup to exceed the longest host operation including the create clean-up, ≈ 6 minutes with the default
+  timeouts) belongs to a crashed process: the maintenance sweep (every minute and at start) resolves it, and claim
+  takeovers are audited (`server.database.claim_takeover`).
+* **Statements the host does not answer.** mysql2's statement timeout only reports an error: the statement keeps
+  running on the host (e.g. waiting behind `FLUSH TABLES WITH READ LOCK` or a metadata lock) and may take effect
+  later. Therefore (1) every admin session sets `lock_wait_timeout` (and `max_statement_time` on MariaDB; MySQL's
+  `max_execution_time` covers SELECTs only) to a few seconds below the client timeout, so the host aborts such a
+  statement itself with an error; (2) if no answer arrives anyway (client timeout, connection lost, cancellation),
+  the control plane sends `KILL QUERY <id>` from a fresh connection, confirms in `information_schema.PROCESSLIST`
+  that the statement is gone, kills the thread, destroys the socket and never reuses that session; (3) the outcome
+  is then decided by looking at the host (database / account existence, the account's authentication string). Only
+  if the statement cannot be confirmed stopped is the outcome unknown (502 with `unknownOutcome: true`) and the
+  database's `status` says what happens next. The admin account therefore needs `SELECT` on `mysql.user` (and may
+  kill its own threads, which needs no privilege).
+* **KILL only for our own statement on a proven direct connection.** Every session statement carries a random
+  per-statement nonce comment (`/* bf:<nonce> */ …`, visible in `PROCESSLIST.INFO`), and every session records
+  `CONNECTION_ID()` and the server's identity (`@@server_id`, `@@hostname`, `@@port`, `VERSION()`, plus the server's
+  unique id: `@@server_uuid` on MySQL, `@@server_uid` on MariaDB 10.5.26 / 10.6.19 / 10.11.9 / 11.4.3 and later).
+  `KILL QUERY` is sent only when both connections are direct (greeting id = `CONNECTION_ID()`), report the same server
+  identity, and the process-list row of the recorded thread belongs to the admin user and shows the statement's nonce.
+  Without a KILL a statement counts as stopped only when the unique ids prove the same server and the thread is gone
+  or runs something else; on older MariaDB without `@@server_uid` only the nonce can prove it. Otherwise — a proxy or
+  load balancer (MaxScale, ProxySQL, HAProxy to several servers), an identity query the host refuses, a foreign thread —
+  nothing is killed and the outcome stays unknown until reconciled. Test connection reports `proxyDetected`
+  (greeting id ≠ `CONNECTION_ID()`, two sessions reaching different servers, or an unreadable identity); connect
+  BlockForge directly to the database server where possible.
+* **Shutdown** never waits for a host: before in-flight requests and background tasks are awaited the control plane
+  refuses new host connections, cancels the sweep, abandons running statements and destroys the connections of abort
+  procedures already in progress (a `KILL` waiting for a host that stopped answering); outcomes are recorded as unknown
+  (`password_unknown` / `cleanup_pending`), requests waiting on them answer 503 `{reason: "host_error", code:
+  "SHUTDOWN"}`, and server-deletion jobs see `SHUTDOWN` and are retried after the restart.
+* **Status** (`ServerDatabase.status`): `creating` / `rotating` / `deleting` while that operation runs; `ready`;
+  `password_unknown` (a rotation's outcome could not be determined — the password route answers 409
+  `{reason: "password_unknown"}`; rotating again fixes it); `cleanup_pending` (a failed create, a deletion that got
+  partway, or an outcome that is unknown: the sweep drops it by name with `IF EXISTS` once a late statement can no
+  longer land — host statement limit + 60 s after the state was set — and removes the entry). Deleting a
+  `cleanup_pending` database inside that safety window answers 409 `{reason: "not_ready", retryAfterMs}`; afterwards it
+  retries the drops at once. Password and rotation answer 409 `{reason: "not_ready"}` while a database is `creating`
+  or `cleanup_pending`.
+* **Create** reserves the row (limits, host capacity, names; state `reserved`, claimed `creating`) in one short
+  transaction, then on the host checks that neither the database nor an account with the generated name exists
+  (pre-existing database → 409 `{reason: "name_taken"}`, pre-existing account → 502 `ER_CANNOT_USER`; neither is ever
+  touched) and marks the row `provisioning` — from then on whatever exists under those names is ours — and creates
+  database, account and grant. On failure everything that may have been created is dropped by name and the row
+  removed; if that clean-up fails or a statement could not be confirmed stopped, the row stays `cleanup_pending`
+  (audited) for the sweep. Host failures → 502 `UPSTREAM_ERROR` `{reason: "host_error", code}`. Refused while the
+  server is being deleted (409 `INVALID_STATE`); if the server is deleted while the host is contacted, the created
+  objects are dropped again. A creation or deletion abandoned by a crash on a `reserved` row (names never verified on
+  the host) only removes the row — nothing is ever dropped by name for it.
+* **Rotate** (`ready` or `password_unknown`): claim → read the account's authentication string → `ALTER USER` →
+  store the new (encrypted) password, `ready`, release. A failure before `ALTER USER` was sent changes nothing (the
+  state stays). `ALTER USER` refused by the host (atomic) → the old password stays valid (502, "the password was not
+  changed"). No answer → the statement is stopped and the authentication string compared: changed → applied, the new
+  password is stored (200); unchanged → nothing happened (502); undeterminable → `password_unknown` (502
+  `unknownOutcome`). If the database was deleted meanwhile → 404; taken over → 409 `busy`.
+* **Delete**: claim → `DROP DATABASE IF EXISTS` + `DROP USER IF EXISTS` → delete the row (conditional on the claim;
+  if the entry vanished meanwhile → 404 and no success is recorded). On failure the outcome is decided per statement:
+  before `DROP DATABASE` was sent, or `DROP DATABASE` refused by the host (atomic on MySQL 8; on MariaDB a
+  `DROP DATABASE` that has started dropping is not interruptible, so an error means it had not) → unchanged (502,
+  "the database was not deleted"; retry); no answer and not confirmed stopped → `cleanup_pending` (502
+  `unknownOutcome`); otherwise the host is inspected: both gone → deleted (204), both present → unchanged (502),
+  anything else — e.g. `DROP USER` failed after the database was dropped — → `cleanup_pending` (502, "partly
+  deleted"; the sweep finishes the requested deletion); stopped but the host could not be inspected → `cleanup_pending`
+  (502, result `unchecked`).
+* **Forget** (`DELETE …?forget=true`, contracts `DeleteServerDatabaseQuery`; also requires `database_hosts.manage`):
+  removes only BlockForge's entry without contacting the host — the database and its account stay there. For hosts
+  that are permanently gone, so their entry can be deleted. Refused (409 `busy`) while a live operation holds the
+  database; audited as `server.database.forget` with host, database and username.
+* **Sweep** (maintenance, every minute and at start): resolves abandoned claims, then drops `cleanup_pending`
+  databases whose window has passed (re-checked when each row is claimed) — the oldest 20 of every host per run (fair
+  share), 4 hosts at a time, one session per host; after any failure on a host its remaining rows wait for the next run
+  (a frozen host costs one statement timeout per run, not one per row). Cancelled at shutdown.
+* **Test connection** (`DatabaseHostTestResult`) also reports `proxyDetected` (see above) and `missingPrivileges`:
+  privileges the admin account seems to lack — `CREATE USER` (global), `GRANT OPTION` and the 18 database privileges
+  it hands out, held globally (`information_schema.USER_PRIVILEGES` of `CURRENT_USER()`) or by a database-level grant
+  whose pattern covers BlockForge's names (`SCHEMA_PRIVILEGES`, matched against `s00000000_probe` with the grant
+  wildcard semantics; literally on MySQL with `partial_revokes = ON`) — plus `SELECT on mysql.user` (checked by a
+  query). Privileges granted only through roles are not seen; the UI says so.
+* **Recommended admin account** (least privilege; tested on MariaDB 11.4 — create, rotate and delete work and the check
+  reports nothing missing):
+  ```sql
+  CREATE USER 'blockforge'@'<control-plane address>' IDENTIFIED BY '<strong password>';
+  GRANT ALL PRIVILEGES ON `s%`.* TO 'blockforge'@'<control-plane address>' WITH GRANT OPTION;
+  GRANT CREATE USER ON *.* TO 'blockforge'@'<control-plane address>';
+  GRANT SELECT ON mysql.user TO 'blockforge'@'<control-plane address>';
+  ```
+  `s%` covers every BlockForge database (`s<shortId>_<name>`) and — like any database-level wildcard grant — any other
+  database whose name starts with `s`: keep the account's host dedicated to BlockForge databases. On MySQL with
+  `partial_revokes = ON` grant names are literal and the `s%` grant does not work; use global privileges there.
+* **Server deletion** gets a `databases` step after the container is removed: every database of the server is
+  dropped on its host, each row deleted (and audited) as soon as its database is gone. One session per host; after an
+  unanswered statement the next database gets a fresh session, a host that cannot be reached marks its remaining
+  databases failed. Outcomes are decided per statement as for Delete (inspections honour the step's cancellation and
+  deadline). The step honours job cancellation (the running statement is killed, the job ends cancelled, the server
+  stays), control-plane shutdown (the job is retried after the restart) and its own deadline (5 minutes; databases
+  not reached are recorded with code `DEADLINE`). Problems are written to the job log as warnings and audited
+  (`server.database.delete`, `outcome: failed` with `details.result` `unchanged` / `partial` / `unknown` / `unchecked` /
+  `not_attempted` — an unconfirmed drop is logged as "outcome unknown, may still complete", a stopped one whose result
+  could not be checked as such, neither as a refusal; the audit outcome enum has no "unknown") with host, database and username to check and drop by hand. The step never fails the
+  job and the remaining rows go with the server.
+* **Audit**: `database_host.create|update|delete`, `server.database.create|rotate_password|delete` (also failed
+  attempts, with `result`, `cleanupPending` / `passwordUnknown` where relevant), `server.database.forget`,
+  `server.database.claim_takeover`, `server.database.password.view` (every reveal). No password, hash or SQL
+  statement is ever recorded.
+* **Rate limits**: 60 requests/minute per client IP and route on the routes that reach a host or reveal a password.
+* No realtime events: all mutations are synchronous; clients refetch the list after their own changes.
 
 ## Agent endpoints (agent auth, not cookie auth)
 `POST /agent/v1/enroll`, `GET /agent/v1/connect` (WS), `POST|GET /agent/v1/transfers/:id`,

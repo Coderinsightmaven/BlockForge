@@ -46,7 +46,7 @@ export async function startTestApp(
   const built = await buildApp({
     ...opts,
     config,
-    logger: pino({ level: config.logLevel }),
+    logger: opts.logger ?? pino({ level: config.logLevel }),
     pool: testPool(),
     masterKey: opts.masterKey ?? randomBytes(32),
     ...(opts.clock ? { clock: opts.clock } : {}),

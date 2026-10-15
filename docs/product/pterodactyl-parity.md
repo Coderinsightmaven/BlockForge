@@ -25,7 +25,7 @@ before Velocity network management.
 | SFTP (Wings :2022) | Agent SFTP server (:2022) | Auth via control plane; SSH keys; password auth refused when the user has MFA. |
 | Schedules | Schedules (Phase 4) | Cron + sequential tasks (command / power / backup), offsets, only-when-online. |
 | Backups (local / S3) | Backups (Phase 4) | Consistent (save-off/save-all for Minecraft), locked backups, limits, restore. |
-| Databases (MySQL hosts) | Phase 5 | |
+| Databases (MySQL hosts) | Database hosts (admin) + per-server databases (Phase 5) | Same naming (`s<shortId>_<name>`, `u<shortId>_<random>`), privileges, limits (`databaseLimit`) and permissions (`servers.databases.view/create/update/delete/view_password`); plus TLS modes with optional CA pinning, escaped grant wildcards, CIDR "connections from", per-host `maxDatabases`, password re-entry when connection settings change. No per-database `max_connections` yet. |
 | Client + Application API keys | API keys scoped to a user's permissions (Phase 4) | One API, permission-scoped (no separate "application" API). |
 | Activity log | Hash-chained audit log, per-server view | Includes SFTP mutations reported by the agent. |
 | Mounts | Not planned for v1 | Host path mounts weaken isolation; revisit with an allowlist design. |
