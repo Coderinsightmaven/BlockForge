@@ -34,8 +34,11 @@ CREATE TABLE "server_databases" (
 	"operation" text,
 	"operation_token" uuid,
 	"operation_started_at" timestamp with time zone,
+	"state" text DEFAULT 'ready' NOT NULL,
+	"state_changed_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "server_databases_host_database_unique" UNIQUE("host_id","database_name"),
 	CONSTRAINT "server_databases_host_username_unique" UNIQUE("host_id","username"),
+	CONSTRAINT "server_databases_state_check" CHECK ("server_databases"."state" IN ('reserved', 'provisioning', 'ready', 'password_unknown', 'cleanup_pending')),
 	CONSTRAINT "server_databases_operation_check" CHECK ("server_databases"."operation" IS NULL OR "server_databases"."operation" IN ('creating', 'rotating', 'deleting')),
 	CONSTRAINT "server_databases_operation_claim_check" CHECK (("server_databases"."operation" IS NULL) = ("server_databases"."operation_token" IS NULL) AND ("server_databases"."operation" IS NULL) = ("server_databases"."operation_started_at" IS NULL)),
 	CONSTRAINT "server_databases_database_name_check" CHECK ("server_databases"."database_name" ~ '^s[0-9a-f]{8}_[a-z0-9_]{1,48}$'),
@@ -50,6 +53,7 @@ ALTER TABLE "server_databases" ADD CONSTRAINT "server_databases_server_id_server
 ALTER TABLE "server_databases" ADD CONSTRAINT "server_databases_host_id_database_hosts_id_fk" FOREIGN KEY ("host_id") REFERENCES "public"."database_hosts"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "server_databases" ADD CONSTRAINT "server_databases_created_by_users_id_fk" FOREIGN KEY ("created_by") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "database_hosts_node_idx" ON "database_hosts" USING btree ("node_id");--> statement-breakpoint
+CREATE INDEX "server_databases_cleanup_idx" ON "server_databases" USING btree ("state_changed_at") WHERE "server_databases"."state" = 'cleanup_pending' OR "server_databases"."operation" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "server_databases_server_idx" ON "server_databases" USING btree ("server_id");--> statement-breakpoint
 ALTER TABLE "role_permissions" ADD CONSTRAINT "role_permissions_permission_check" CHECK ("role_permissions"."permission" IN ('settings.manage', 'users.view', 'users.manage', 'roles.manage', 'audit.view', 'secrets.read', 'secrets.manage', 'monitoring.view', 'jobs.view', 'alerts.view', 'alerts.manage', 'nodes.view', 'nodes.manage', 'nodes.enroll', 'allocations.manage', 'database_hosts.manage', 'templates.view', 'templates.manage', 'networks.view', 'networks.create', 'networks.manage', 'servers.view', 'servers.create', 'servers.admin', 'servers.delete', 'servers.control', 'servers.console.view', 'servers.console.send', 'servers.config.view', 'servers.config.edit', 'servers.files.read', 'servers.files.write', 'servers.extensions.view', 'servers.extensions.manage', 'servers.players.view', 'servers.players.manage', 'servers.backups.view', 'servers.backups.create', 'servers.backups.restore', 'servers.backups.delete', 'servers.backups.download', 'servers.databases.view', 'servers.databases.create', 'servers.databases.update', 'servers.databases.delete', 'servers.databases.view_password', 'servers.files.sftp', 'servers.startup.view', 'servers.startup.edit', 'servers.startup.image', 'servers.allocations.view', 'servers.allocations.manage', 'servers.subusers.view', 'servers.subusers.manage', 'servers.settings.edit', 'servers.reinstall', 'servers.activity.view', 'schedules.view', 'schedules.manage'));--> statement-breakpoint
 ALTER TABLE "servers" ADD CONSTRAINT "servers_database_limit_check" CHECK ("servers"."database_limit" >= 0);

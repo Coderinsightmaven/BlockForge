@@ -1,6 +1,8 @@
 import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { describeMysqlError, scrub } from "../../src/databases/mysql.js";
+import { pino } from "pino";
+import { describeMysqlError, MysqlConnector, scrub } from "../../src/databases/mysql.js";
+import { ServerDatabasesService, type ServerDatabasesDeps } from "../../src/databases/service.js";
 import {
   alterUserPasswordSql,
   createDatabaseSql,
@@ -105,6 +107,26 @@ describe("database SQL builders", () => {
   });
 });
 
+describe("operation claims", () => {
+  const deps = (connector: MysqlConnector, operationStaleMs?: number) =>
+    ({ connector, logger: pino({ level: "silent" }), ...(operationStaleMs !== undefined ? { operationStaleMs } : {}) }) as unknown as ServerDatabasesDeps;
+
+  it("refuses a stale-claim limit that is not longer than the longest host operation (incl. the create clean-up)", () => {
+    const c = new MysqlConnector({ logger: pino({ level: "silent" }) });
+    // Defaults: 10 s connect, 15 s statements → the longest operation is about 4 minutes.
+    expect(() => new ServerDatabasesService(deps(c, 60_000))).toThrow(/operationStaleMs/);
+    expect(() => new ServerDatabasesService(deps(c, 200_000))).toThrow(/operationStaleMs/);
+    const s = new ServerDatabasesService(deps(c));
+    expect(s.staleMs).toBeGreaterThanOrEqual(5 * 60_000);
+    expect(s.staleMs).toBeGreaterThan(c.maxSessionMs(6) + c.maxSessionMs(2));
+    expect(new ServerDatabasesService(deps(c, 20 * 60_000)).staleMs).toBe(20 * 60_000);
+    // The host-side statement limit stays below the client timeout; cleanup waits until a late statement cannot land.
+    expect(c.sessionLimitS).toBe(12);
+    expect(s.cleanupDelayMs).toBe(72_000);
+    expect(new MysqlConnector({ logger: pino({ level: "silent" }), sessionLimits: false }).sessionLimitS).toBeNull();
+  });
+});
+
 describe("database host errors", () => {
   it("never copies MySQL error text or the statement (which may contain the password)", () => {
     const err = Object.assign(new Error(`You have an error in your SQL syntax near 'IDENTIFIED BY '${PW}''`), {
@@ -133,7 +155,12 @@ describe("database host errors", () => {
     expect(scrub("a7 b7", ["7"])).not.toContain("7");
     expect(scrub("unchanged", [""])).toBe("unchanged");
     // A longer secret containing a shorter one is removed whole, not left as a remainder.
-    expect(scrub("secret: abcdef", ["abc", "abcdef"])).not.toMatch(/def|abc/);
+    expect(scrub("secret: abcdef", ["abc", "abcdef"])).toBe("secret: [REDACTED]");
+    // Overlapping secrets: every match is found on the original text and the ranges merged.
+    expect(scrub("xxabcdeyy", ["abcd", "cde"])).toBe("xx[REDACTED]yy");
+    expect(scrub("p1-p1", ["p1"])).toBe("[REDACTED]-[REDACTED]");
+    // Replacing one secret must not create or hide another (the marker itself is never matched).
+    expect(scrub("RED", ["RED", "R"])).toBe("[REDACTED]");
     expect(describeMysqlError(Object.assign(new Error(`TLS failure ${PW}`), { code: "HANDSHAKE_SSL_ERROR" }), [PW], true).message).not.toContain(PW);
   });
 

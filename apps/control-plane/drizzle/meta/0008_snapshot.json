@@ -1,5 +1,5 @@
 {
-  "id": "50504685-5ed0-4e96-b2bf-ea4667af295c",
+  "id": "12657090-fe95-49ff-83ca-efc77f3683fc",
   "prevId": "03ca4d98-0893-4367-b648-fa2c6c2629d8",
   "version": "7",
   "dialect": "postgresql",
@@ -6844,9 +6844,39 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ready'"
+        },
+        "state_changed_at": {
+          "name": "state_changed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
         }
       },
       "indexes": {
+        "server_databases_cleanup_idx": {
+          "name": "server_databases_cleanup_idx",
+          "columns": [
+            {
+              "expression": "state_changed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"server_databases\".\"state\" = 'cleanup_pending' OR \"server_databases\".\"operation\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "server_databases_server_idx": {
           "name": "server_databases_server_idx",
           "columns": [
@@ -6925,6 +6955,10 @@
       },
       "policies": {},
       "checkConstraints": {
+        "server_databases_state_check": {
+          "name": "server_databases_state_check",
+          "value": "\"server_databases\".\"state\" IN ('reserved', 'provisioning', 'ready', 'password_unknown', 'cleanup_pending')"
+        },
         "server_databases_operation_check": {
           "name": "server_databases_operation_check",
           "value": "\"server_databases\".\"operation\" IS NULL OR \"server_databases\".\"operation\" IN ('creating', 'rotating', 'deleting')"

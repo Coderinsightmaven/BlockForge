@@ -62,7 +62,7 @@ export interface ServerJobDeps {
   /** Deletes the server's backups (archives / objects) before the server is removed. */
   deleteBackups?: (serverId: string, ctx: { jobId: string; signal: AbortSignal; log: StepContext<unknown>["log"] }) => Promise<void>;
   /** Drops the server's MySQL databases on their hosts (best effort: failures are logged and audited, never thrown). */
-  deleteDatabases?: (serverId: string, ctx: { jobId: string; log: StepContext<unknown>["log"] }) => Promise<void>;
+  deleteDatabases?: (serverId: string, ctx: { jobId: string; log: StepContext<unknown>["log"]; signal: AbortSignal }) => Promise<void>;
 }
 
 const ProvisionInput = z.object({ serverId: z.uuid(), eulaAcceptedBy: z.string().max(254).nullable().default(null) });
@@ -582,7 +582,8 @@ export function serverJobDefinitions(deps: ServerJobDeps): JobDefinition<never>[
         label: "Drop databases",
         run: async (ctx) => {
           if (!deps.deleteDatabases) return SKIP_STEP;
-          await deps.deleteDatabases(ctx.input.serverId, { jobId: ctx.jobId, log: ctx.log });
+          // Honours cancellation (the step stops and the job ends cancelled) and its own overall deadline.
+          await deps.deleteDatabases(ctx.input.serverId, { jobId: ctx.jobId, log: ctx.log, signal: ctx.signal });
         },
       },
       {

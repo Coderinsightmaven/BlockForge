@@ -74,8 +74,18 @@ export const serverDatabases = pgTable(
     operation: text("operation"),
     operationToken: uuid("operation_token"),
     operationStartedAt: tsz("operation_started_at"),
+    /**
+     * What is known about the host side: `reserved` (row only; the names are not yet verified free on the host),
+     * `provisioning` (names verified free — whatever exists under them now is ours), `ready`,
+     * `password_unknown` (a rotation's outcome could not be determined), `cleanup_pending` (drop by name and
+     * remove the row; done by the maintenance sweep once a late statement can no longer land).
+     */
+    state: text("state").notNull().default("ready"),
+    stateChangedAt: tsz("state_changed_at").notNull().defaultNow(),
   },
   (t) => [
+    enumCheck("server_databases_state_check", t.state, ["reserved", "provisioning", "ready", "password_unknown", "cleanup_pending"]),
+    index("server_databases_cleanup_idx").on(t.stateChangedAt).where(sql`${t.state} = 'cleanup_pending' OR ${t.operation} IS NOT NULL`),
     nullableEnumCheck("server_databases_operation_check", t.operation, ["creating", "rotating", "deleting"]),
     check("server_databases_operation_claim_check", sql`(${t.operation} IS NULL) = (${t.operationToken} IS NULL) AND (${t.operation} IS NULL) = (${t.operationStartedAt} IS NULL)`),
     unique("server_databases_host_database_unique").on(t.hostId, t.databaseName),

@@ -1,5 +1,5 @@
 import { X509Certificate } from "node:crypto";
-import { createServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
+import { connect as netConnect, createServer, type AddressInfo, type Server as NetServer, type Socket } from "node:net";
 import { Writable } from "node:stream";
 import type { TLSSocket } from "node:tls";
 import { DatabaseHost, DatabaseHostTestResult, Server, ServerDatabase, ServerDatabasePassword } from "@blockforge/contracts";
@@ -120,6 +120,90 @@ interface Hanger {
   sockets: Set<Socket>;
 }
 
+/**
+ * A plain-TCP proxy to a database host that "stops answering" on a connection as soon as the client sends a
+ * statement matching `rule` (the statement is swallowed; nothing more is forwarded either way on that
+ * connection, which stays open). Hosts behind it use `tlsMode: "disabled"` so statements can be read.
+ */
+async function freezingProxy(
+  target: Target,
+  rule: (sql: string) => boolean,
+  delay: { rule: (sql: string) => boolean; ms: number } | null = null,
+): Promise<{ port: number; open: () => number; frozen: () => number }> {
+  const clients = new Set<Socket>();
+  let frozenCount = 0;
+  const srv = createServer((client) => {
+    clients.add(client);
+    const upstream = netConnect(target.port, target.host);
+    let frozen = false;
+    /** Answers to a statement matching `delay.rule` reach the client only after `delay.ms`. */
+    let holdUntil = 0;
+    client.on("error", () => undefined);
+    upstream.on("error", () => undefined);
+    client.on("close", () => {
+      clients.delete(client);
+      upstream.destroy();
+    });
+    upstream.on("close", () => {
+      if (!frozen) client.destroy();
+    });
+    client.on("data", (chunk: Buffer) => {
+      if (frozen) return;
+      // COM_QUERY: 3-byte length, sequence 0, command 0x03, statement text.
+      const sql = chunk.length > 5 && chunk[3] === 0 && chunk[4] === 0x03 ? chunk.subarray(5).toString("utf8") : null;
+      if (sql !== null && rule(sql)) {
+        frozen = true;
+        frozenCount++;
+        return;
+      }
+      if (sql !== null && delay?.rule(sql)) holdUntil = Date.now() + delay.ms;
+      upstream.write(chunk);
+    });
+    upstream.on("data", (chunk: Buffer) => {
+      if (frozen) return;
+      const wait = holdUntil - Date.now();
+      if (wait > 0) setTimeout(() => client.write(chunk), wait);
+      else client.write(chunk);
+    });
+  });
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  hangers.push({ srv, sockets: clients });
+  return { port: (srv.address() as AddressInfo).port, open: () => clients.size, frozen: () => frozenCount };
+}
+
+/** A root session holding `FLUSH TABLES WITH READ LOCK` (as backup tools do) until released. */
+async function globalReadLock(target: Target): Promise<() => Promise<void>> {
+  const c = await root(target);
+  await c.query("FLUSH TABLES WITH READ LOCK");
+  return async () => {
+    await c.query("UNLOCK TABLES").catch(() => undefined);
+    await c.end().catch(() => undefined);
+  };
+}
+
+/** A root session holding a metadata lock on a table of `database` (blocks DROP DATABASE) until released. */
+async function tableLock(target: Target, database: string): Promise<() => Promise<void>> {
+  const c = await root(target);
+  await c.query(`CREATE TABLE IF NOT EXISTS \`${database}\`.held (a INT)`);
+  await c.query("START TRANSACTION");
+  await c.query(`SELECT * FROM \`${database}\`.held`);
+  return async () => {
+    await c.query("COMMIT").catch(() => undefined);
+    await c.end().catch(() => undefined);
+  };
+}
+
+const exists = async (target: Target, db: Pick<ServerDatabase, "database" | "username">) => {
+  const r = await root(target);
+  try {
+    const [s] = await r.query("SELECT COUNT(*) AS n FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", [db.database]);
+    const [u] = await r.query("SELECT COUNT(*) AS n FROM mysql.user WHERE User = ?", [db.username]);
+    return { database: Number((s as { n: number }[])[0]!.n) > 0, account: Number((u as { n: number }[])[0]!.n) > 0 };
+  } finally {
+    await r.end();
+  }
+};
+
 /** Dedicated Postgres connections of probing tests (outside the app's pool). */
 const probes: pg.Client[] = [];
 
@@ -138,7 +222,15 @@ afterAll(async () => {
   for (const target of TARGETS) await cleanTarget(target);
 });
 
-async function boot(databases: { connectTimeoutMs?: number; generateUsername?: (shortId: string) => string } = {}) {
+interface BootDatabases {
+  connectTimeoutMs?: number;
+  queryTimeoutMs?: number;
+  sessionLimits?: boolean;
+  deleteDeadlineMs?: number;
+  cleanupDelayMs?: number;
+  generateUsername?: (shortId: string) => string;
+}
+async function boot(databases: BootDatabases = {}) {
   logLines = [];
   const sink = new Writable({
     write(chunk, _enc, cb) {
@@ -658,6 +750,8 @@ describe("host operations never hold Postgres resources; one operation per datab
     const results = await Promise.all(rotations);
     expect(results.map((r) => r.statusCode)).toEqual(Array<number>(12).fill(502));
     expect(results[0]!.json().error.details).toEqual({ reason: "host_error", code: "ETIMEDOUT" });
+    // Every socket to the hanging host is closed again (not half-closed and left behind).
+    await poll(async () => hang.open() === 0, 5000, 50);
     // Claims released; the old password is still the one stored and the one the host accepts.
     expect(await countRows("SELECT count(*)::int AS n FROM server_databases WHERE operation IS NOT NULL")).toBe(0);
     expect(await passwordOf(first)).toBe(oldPassword);
@@ -681,6 +775,8 @@ describe("host operations never hold Postgres resources; one operation per datab
     expect(await status(owner.post(`/servers/${srv.id}/databases/${first.id}/rotate-password`))).toBe("409 CONFLICT busy");
     await testPool().query("UPDATE server_databases SET operation_started_at = now() - interval '10 minutes' WHERE id = $1", [first.id]);
     expect((await owner.post(`/servers/${srv.id}/databases/${first.id}/rotate-password`)).statusCode).toBe(200);
+    const { rows: takeovers } = await testPool().query("SELECT details FROM audit_events WHERE action = 'server.database.claim_takeover'");
+    expect(takeovers).toEqual([expect.objectContaining({ details: expect.objectContaining({ databaseId: first.id, previousOperation: "rotating", takenOverBy: "rotating" }) })]);
     const rotated = await passwordOf(first);
     expect(rotated).not.toBe(oldPassword);
     expect(await connectError(MARIADB, first, oldPassword)).toBe("ER_ACCESS_DENIED_ERROR");
@@ -772,6 +868,244 @@ describe("edge cases on the host", () => {
     expect(gone).toEqual([]);
     await r.end();
   });
+});
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const listOf = async (c: ApiClient, serverId: string) => ((await c.get(`/servers/${serverId}/databases`)).json() as unknown[]).map((d) => ServerDatabase.parse(d));
+const passwordFor = async (c: ApiClient, d: ServerDatabase) => ServerDatabasePassword.parse((await c.get(`/servers/${d.serverId}/databases/${d.id}/password`)).json()).password;
+const BUSY_CODES = ["ER_STATEMENT_TIMEOUT", "ER_LOCK_WAIT_TIMEOUT"];
+
+describe("statements the host does not answer never take effect later", () => {
+  it("with host-side limits: rotation, deletion and creation stuck behind FLUSH TABLES WITH READ LOCK fail cleanly and never land", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 5000 }); // host-side limit 2 s
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 3 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "ftwrl" })).json());
+    const pw = await passwordFor(owner, db);
+    const unlock = await globalReadLock(MARIADB);
+    try {
+      const rot = await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`);
+      expect(rot.statusCode, rot.body).toBe(502);
+      expect(BUSY_CODES).toContain(rot.json().error.details.code);
+      expect(rot.json().error.details.unknownOutcome).toBeUndefined();
+      const del = await owner.delete(`/servers/${srv.id}/databases/${db.id}`);
+      expect(del.statusCode).toBe(502);
+      expect(BUSY_CODES).toContain(del.json().error.details.code);
+      const cr = await owner.post(`/servers/${srv.id}/databases`, { name: "late" });
+      expect(cr.statusCode).toBe(502);
+      expect(BUSY_CODES).toContain(cr.json().error.details.code);
+    } finally {
+      await unlock();
+    }
+    await sleep(3000);
+    // Nothing landed after the lock went away.
+    expect((await listOf(owner, srv.id)).map((d) => [d.database, d.status])).toEqual([[db.database, "ready"]]);
+    expect(await passwordFor(owner, db)).toBe(pw);
+    await (await asUser(MARIADB, db, pw)).end();
+    expect(await exists(MARIADB, db)).toEqual({ database: true, account: true });
+    expect((await exists(MARIADB, { database: `s${srv.shortId}_late`, username: "-" })).database).toBe(false);
+  }, 60_000);
+
+  it("without host-side limits: the statement is killed on the host and its outcome decided by looking; leftovers are swept", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false, cleanupDelayMs: 0 });
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 3 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "kill" })).json());
+    const pw = await passwordFor(owner, db);
+    const unlock = await globalReadLock(MARIADB);
+    try {
+      // ALTER USER waits for the backup lock → client timeout → KILL QUERY → authentication string unchanged.
+      const rot = await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`);
+      expect(rot.statusCode, rot.body).toBe(502);
+      expect(rot.json().error.details).toEqual({ reason: "host_error", code: "PROTOCOL_SEQUENCE_TIMEOUT" });
+      expect((await listOf(owner, srv.id))[0]!.status).toBe("ready");
+      // CREATE DATABASE waits → killed; the clean-up (DROP … IF EXISTS) waits too → the entry stays `cleanup_pending`.
+      const cr = await owner.post(`/servers/${srv.id}/databases`, { name: "late" });
+      expect(cr.statusCode, cr.body).toBe(502);
+      expect(cr.json().error.details).toMatchObject({ reason: "host_error", unknownOutcome: true });
+      const late = (await listOf(owner, srv.id)).find((d) => d.database === `s${srv.shortId}_late`)!;
+      expect(late.status).toBe("cleanup_pending");
+      expect(await status(owner.get(`/servers/${srv.id}/databases/${late.id}/password`))).toBe("409 CONFLICT not_ready");
+      expect(await status(owner.post(`/servers/${srv.id}/databases/${late.id}/rotate-password`))).toBe("409 CONFLICT not_ready");
+    } finally {
+      await unlock();
+    }
+    await sleep(1500);
+    expect(await passwordFor(owner, db)).toBe(pw);
+    await (await asUser(MARIADB, db, pw)).end();
+    // The sweep finishes the failed creation: drop by name, entry removed.
+    expect(await t.ctx.serverDatabases.sweep()).toEqual({ resolved: 0, cleaned: 1 });
+    expect((await listOf(owner, srv.id)).map((d) => d.database)).toEqual([db.database]);
+    expect((await exists(MARIADB, { database: `s${srv.shortId}_late`, username: "-" })).database).toBe(false);
+
+    // DROP DATABASE waits for a metadata lock → killed → the database is still there: 502, entry kept.
+    const release = await tableLock(MARIADB, db.database);
+    try {
+      expect(await status(owner.delete(`/servers/${srv.id}/databases/${db.id}`))).toBe("502 UPSTREAM_ERROR host_error");
+    } finally {
+      await release();
+    }
+    await sleep(1500);
+    expect(await exists(MARIADB, db)).toEqual({ database: true, account: true });
+    expect((await listOf(owner, srv.id))[0]!.status).toBe("ready");
+    expect((await owner.delete(`/servers/${srv.id}/databases/${db.id}`)).statusCode).toBe(204);
+    expect(await exists(MARIADB, db)).toEqual({ database: false, account: false });
+  }, 90_000);
+
+  it("a lost answer: the outcome is decided by looking (applied rotation stored), and a vanished entry is 404, never 204", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000 });
+    await connectSimNode(t, owner, { agents });
+    // ALTER USER / DROP USER reach the host and run, but their answers arrive only after 4 s (> the 3 s client timeout).
+    const proxy = await freezingProxy(MARIADB, () => false, { rule: (sql) => sql.startsWith("ALTER USER") || sql.startsWith("DROP USER"), ms: 4000 });
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 3 });
+    const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "lost" })).json());
+    const old = await passwordFor(owner, db);
+    // The host applied ALTER USER; its answer was lost: the changed authentication string proves it → 200.
+    const rot = await owner.post(`/servers/${srv.id}/databases/${db.id}/rotate-password`);
+    expect(rot.statusCode, rot.body).toBe(200);
+    const now = await passwordFor(owner, db);
+    expect(now).not.toBe(old);
+    expect(await connectError(MARIADB, db, old)).toBe("ER_ACCESS_DENIED_ERROR");
+    await (await asUser(MARIADB, db, now)).end();
+    // The entry disappears while the deletion waits for the host: 404, and no success is recorded.
+    const del = owner.delete(`/servers/${srv.id}/databases/${db.id}`);
+    await poll(async () => (await countRows("SELECT count(*)::int AS n FROM server_databases WHERE operation = 'deleting'")) === 1, 5000, 50);
+    await testPool().query("DELETE FROM server_databases WHERE id = $1", [db.id]);
+    expect(await status(del)).toBe("404 NOT_FOUND");
+    expect(await countRows("SELECT count(*)::int AS n FROM audit_events WHERE action = 'server.database.delete' AND outcome = 'success'")).toBe(0);
+  }, 60_000);
+});
+
+describe("server deletion with a stuck host", () => {
+  it("a database stuck behind a lock: the statement is killed, the failure recorded, the rest dropped on a fresh connection", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false });
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 2 });
+    const a = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "a" })).json());
+    const b = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "b" })).json());
+    const release = await tableLock(MARIADB, a.database);
+    const started = Date.now();
+    try {
+      const del = await owner.delete(`/servers/${srv.id}`);
+      expect((await waitJob(owner, del.json().jobId, 60_000)).status).toBe("succeeded");
+      expect(Date.now() - started).toBeLessThan(40_000);
+    } finally {
+      await release();
+    }
+    await sleep(1500);
+    expect(await exists(MARIADB, a)).toEqual({ database: true, account: true });
+    expect(await exists(MARIADB, b)).toEqual({ database: false, account: false });
+    const { rows } = await testPool().query("SELECT outcome, details FROM audit_events WHERE action = 'server.database.delete' ORDER BY id");
+    expect(rows.map((x) => `${x.details.database}:${x.outcome}:${x.details.code ?? ""}`)).toEqual([`${a.database}:failed:PROTOCOL_SEQUENCE_TIMEOUT`, `${b.database}:success:`]);
+  }, 90_000);
+
+  it("a host that stops answering after connecting: fresh connection for the next database, sockets closed", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 3000 });
+    await connectSimNode(t, owner, { agents });
+    let drops = 0;
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP DATABASE") && drops++ === 0);
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 2 });
+    const a = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "a" })).json());
+    const b = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "b" })).json());
+    const started = Date.now();
+    const del = await owner.delete(`/servers/${srv.id}`);
+    expect((await waitJob(owner, del.json().jobId, 60_000)).status).toBe("succeeded");
+    expect(Date.now() - started).toBeLessThan(40_000);
+    expect(proxy.frozen()).toBe(1);
+    await poll(async () => proxy.open() === 0, 5000, 50);
+    expect(await exists(MARIADB, a)).toEqual({ database: true, account: true });
+    expect(await exists(MARIADB, b)).toEqual({ database: false, account: false });
+    const logs = (await owner.get(`/jobs/${del.json().jobId}/logs`)).json() as { level: string; message: string }[];
+    expect(logs.some((l) => l.level === "warn" && l.message.includes(a.database))).toBe(true);
+  }, 90_000);
+
+  it("stops at once when the job is cancelled (the hanging statement is killed); the server and its databases stay", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 60_000, sessionLimits: false });
+    await connectSimNode(t, owner, { agents });
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP DATABASE"));
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 2 });
+    for (const name of ["a", "b"]) expect((await owner.post(`/servers/${srv.id}/databases`, { name })).statusCode).toBe(201);
+    const jobId = (await owner.delete(`/servers/${srv.id}`)).json().jobId as string;
+    await poll(async () => proxy.frozen() >= 1, 20_000, 100);
+    const t0 = Date.now();
+    expect((await owner.post(`/jobs/${jobId}/cancel`)).statusCode).toBe(200);
+    expect((await waitJob(owner, jobId, 30_000)).status).toBe("cancelled");
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    expect((await owner.get(`/servers/${srv.id}`)).statusCode).toBe(200);
+    expect(await listOf(owner, srv.id)).toHaveLength(2);
+    await poll(async () => proxy.open() === 0, 5000, 50);
+  }, 90_000);
+
+  it("is bounded by its deadline: databases not reached are recorded as failed", async () => {
+    const { t, owner } = await boot({ queryTimeoutMs: 60_000, sessionLimits: false, deleteDeadlineMs: 4000 });
+    await connectSimNode(t, owner, { agents });
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP DATABASE"));
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
+    const srv = await paperServer(owner, { databaseLimit: 2 });
+    const a = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "a" })).json());
+    const b = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "b" })).json());
+    const started = Date.now();
+    const del = await owner.delete(`/servers/${srv.id}`);
+    expect((await waitJob(owner, del.json().jobId, 60_000)).status).toBe("succeeded");
+    expect(Date.now() - started).toBeLessThan(40_000);
+    const { rows } = await testPool().query("SELECT details FROM audit_events WHERE action = 'server.database.delete' AND outcome = 'failed' ORDER BY id");
+    expect(rows.map((x) => [x.details.database, x.details.code])).toEqual([
+      [a.database, "ABORTED"],
+      [b.database, "DEADLINE"],
+    ]);
+  }, 90_000);
+});
+
+describe("database status and the maintenance sweep", () => {
+  it("a database being created shows `creating` and refuses password, rotation and deletion until its creation ends", async () => {
+    const { t, owner } = await boot({ connectTimeoutMs: 5000 });
+    await connectSimNode(t, owner, { agents });
+    const hang = await hangingHost();
+    await createHost(owner, MARIADB, { host: "127.0.0.1", port: hang.port });
+    const srv = await paperServer(owner, { databaseLimit: 1 });
+    const creating = owner.post(`/servers/${srv.id}/databases`, { name: "slow" });
+    await poll(async () => (await listOf(owner, srv.id)).length === 1, 4000, 50);
+    const [d] = await listOf(owner, srv.id);
+    expect(d!.status).toBe("creating");
+    expect(await status(owner.get(`/servers/${srv.id}/databases/${d!.id}/password`))).toBe("409 CONFLICT not_ready");
+    expect(await status(owner.post(`/servers/${srv.id}/databases/${d!.id}/rotate-password`))).toBe("409 CONFLICT busy");
+    expect(await status(owner.delete(`/servers/${srv.id}/databases/${d!.id}`))).toBe("409 CONFLICT busy");
+    expect(await status(creating)).toBe("502 UPSTREAM_ERROR host_error");
+    expect(await listOf(owner, srv.id)).toEqual([]);
+  }, 60_000);
+
+  it("the sweep resolves abandoned operations (audited) and finishes cleanup by name; reserved entries never touch the host", async () => {
+    const { t, owner } = await boot({ cleanupDelayMs: 0 });
+    await connectSimNode(t, owner, { agents });
+    await createHost(owner, MARIADB);
+    const srv = await paperServer(owner, { databaseLimit: 4 });
+    const [a, b, c, d] = await Promise.all(["a", "b", "c", "d"].map(async (name) => ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name })).json())));
+    const abandon = (id: string, operation: string, state: string) =>
+      testPool().query("UPDATE server_databases SET operation = $2, operation_token = gen_random_uuid(), operation_started_at = now() - interval '1 hour', state = $3 WHERE id = $1", [id, operation, state]);
+    await abandon(a!.id, "creating", "provisioning"); // crashed after the names were verified: host objects are ours
+    await abandon(b!.id, "creating", "reserved"); // crashed before the host was asked: nothing of ours there
+    await abandon(c!.id, "rotating", "ready");
+    await abandon(d!.id, "deleting", "ready");
+    expect(await status(owner.post(`/servers/${srv.id}/databases/${a!.id}/rotate-password`))).toBe("409 CONFLICT not_ready");
+    expect(await t.ctx.serverDatabases.sweep()).toEqual({ resolved: 4, cleaned: 2 });
+    expect((await listOf(owner, srv.id)).map((x) => [x.database, x.status])).toEqual([[c!.database, "password_unknown"]]);
+    expect(await exists(MARIADB, a!)).toEqual({ database: false, account: false });
+    expect(await exists(MARIADB, d!)).toEqual({ database: false, account: false });
+    expect(await exists(MARIADB, b!)).toEqual({ database: true, account: true });
+    expect(await status(owner.get(`/servers/${srv.id}/databases/${c!.id}/password`))).toBe("409 CONFLICT password_unknown");
+    expect((await owner.post(`/servers/${srv.id}/databases/${c!.id}/rotate-password`)).statusCode).toBe(200);
+    expect((await listOf(owner, srv.id))[0]!.status).toBe("ready");
+    await (await asUser(MARIADB, c!, await passwordFor(owner, c!))).end();
+    const { rows } = await testPool().query("SELECT actor_name, details FROM audit_events WHERE action = 'server.database.claim_takeover' ORDER BY id");
+    expect(rows).toHaveLength(4);
+    expect(rows.every((x) => x.actor_name === "database-sweep")).toBe(true);
+  }, 60_000);
 });
 
 describe("server deletion", () => {
