@@ -18,3 +18,5 @@ test-results/
 .cp-dev.log
 # Generated dev-only TLS certificate for the MinIO test service
 infra/compose/.minio-certs/
+# TanStack Router generator scratch files (written, then renamed into src/)
+apps/web/.tanstack/
