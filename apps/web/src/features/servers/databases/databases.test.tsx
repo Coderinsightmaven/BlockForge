@@ -3,6 +3,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SERVER_OWNER_PERMISSIONS } from "@blockforge/contracts";
 import type { Permission } from "@blockforge/contracts";
@@ -250,6 +251,7 @@ describe("Databases tab: create", () => {
       { reason: "host_error", code: "ER_ACCESS_DENIED_ERROR" },
       /\(error ER_ACCESS_DENIED_ERROR\)/,
     ],
+    [409, "CONFLICT", { reason: "busy" }, /Another operation on this database is still in progress/],
   ])("maps HTTP %i %s %o to a clear message", async (status, code, details, message) => {
     routeFetch([
       ["GET", LIST, ok([])],
@@ -481,6 +483,60 @@ describe("Databases tab: delete", () => {
     expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
       `/api/v1/servers/${makeServer().id}/databases/${DATABASE_ID}`,
     ]);
+  });
+});
+
+describe("Databases tab: busy (409)", () => {
+  const BUSY = "Another operation on this database is still in progress — try again in a moment.";
+  const busy = fail(409, "CONFLICT", { reason: "busy" });
+
+  it("a busy delete keeps the database and says why", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    routeFetch([
+      ["GET", LIST, ok([makeServerDatabase()])],
+      ["DELETE", /\/databases\/[^/]+$/, busy],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await user.click(await screen.findByRole("button", { name: "Delete s55555555_luckperms" }));
+    const confirm = await screen.findByRole("alertdialog");
+    await user.type(within(confirm).getByLabelText(/to confirm/), "s55555555_luckperms");
+    await user.click(within(confirm).getByRole("button", { name: "Delete database" }));
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(errorToast).toHaveBeenCalledWith(
+      "Could not delete the database",
+      expect.objectContaining({ description: expect.stringContaining(BUSY) }),
+    );
+    // The row stays (the confirmation stays open for another try).
+    expect(screen.getAllByText("s55555555_luckperms").some((el) => el.closest("tr"))).toBe(true);
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+
+  it("a busy rotation says why and keeps a revealed password", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    routeFetch([
+      ["GET", LIST, ok([makeServerDatabase()])],
+      ["GET", /\/password$/, ok({ password: PASSWORD })],
+      ["POST", /\/rotate-password$/, busy],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Connection details for s55555555_luckperms" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Show password" }));
+    await within(dialog).findByLabelText("Password");
+    await user.click(within(dialog).getByRole("button", { name: "Rotate password" }));
+    const confirm = await screen.findByRole("alertdialog");
+    await user.click(within(confirm).getByRole("button", { name: "Rotate password" }));
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(errorToast).toHaveBeenCalledWith(
+      "Could not rotate the password",
+      expect.objectContaining({ description: expect.stringContaining(BUSY) }),
+    );
+    // The rotation did not happen: the shown password is still the valid one.
+    expect(within(dialog).getByLabelText("Password").textContent).toBe(PASSWORD);
   });
 });
 

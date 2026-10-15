@@ -46,6 +46,9 @@ describe("database error reasons", () => {
     expect(databaseErrorMessage(err("UPSTREAM_ERROR", { reason: "host_error", code: null }))).not.toMatch(
       /\(error/,
     );
+    expect(databaseErrorMessage(err("CONFLICT", { reason: "busy" }))).toBe(
+      "Another operation on this database is still in progress — try again in a moment.",
+    );
     expect(databaseErrorMessage(err("CONFLICT", { reason: "has_databases", count: 2 }))).toMatch(
       /still holds 2 databases/,
     );

@@ -102,6 +102,18 @@ describe("database host contracts", () => {
     expect(CreateDatabaseHostRequest.safeParse({ ...base, tlsCaCertificate: "not a cert" }).success).toBe(false);
   });
 
+  it("accepts a CA certificate only with verify_ca, which requires one", () => {
+    const ca = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----";
+    expect(CreateDatabaseHostRequest.safeParse({ ...base, tlsMode: "verify_ca", tlsCaCertificate: ca }).success).toBe(true);
+    expect(CreateDatabaseHostRequest.safeParse({ ...base, tlsMode: "verify_ca" }).success).toBe(false);
+    for (const tlsMode of ["disabled", "preferred", "required"]) {
+      expect(CreateDatabaseHostRequest.safeParse({ ...base, tlsMode }).success, tlsMode).toBe(true);
+      expect(CreateDatabaseHostRequest.safeParse({ ...base, tlsMode, tlsCaCertificate: ca }).success, tlsMode).toBe(false);
+    }
+    expect(TestDatabaseHostRequest.safeParse({ host: "db", username: "root", password: "x", tlsMode: "verify_ca" }).success).toBe(false);
+    expect(TestDatabaseHostRequest.safeParse({ host: "db", username: "root", password: "x", tlsMode: "required", tlsCaCertificate: ca }).success).toBe(false);
+  });
+
   it("test request needs a password or a saved host", () => {
     expect(TestDatabaseHostRequest.safeParse({ host: "db", username: "root" }).success).toBe(false);
     expect(TestDatabaseHostRequest.safeParse({ host: "db", username: "root", hostId: "6f1c3c1e-6c1d-4a63-9c1b-0d1f0a7b5e11" }).success).toBe(true);

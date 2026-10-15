@@ -20,12 +20,16 @@ import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarNav } from "@/components/shell/sidebar";
 import {
+  CA_REQUIRED_MESSAGE,
   DatabaseHostsPage,
   PASSWORD_REQUIRED_MESSAGE,
+  TLS_MODES,
   connectionChanged,
   formFromHost,
   hostRequest,
   testRequest,
+  testTlsFact,
+  tlsBadge,
 } from "./database-hosts-page";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -72,6 +76,20 @@ const HOSTS = /\/database-hosts$/;
 const SECRET = "Adm1n-S3cret!";
 const saved = makeDatabaseHost();
 const OTHER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-000000000002";
+const PEM = "-----BEGIN CERTIFICATE-----\nMIIBCA\n-----END CERTIFICATE-----";
+const verifiedHost = makeDatabaseHost({ tlsMode: "verify_ca", tlsCaCertificate: PEM });
+
+/** Choose an option of a Radix select inside the dialog. */
+async function pick(
+  user: ReturnType<typeof userEvent.setup>,
+  dialog: HTMLElement,
+  label: string,
+  option: RegExp,
+) {
+  within(dialog).getByRole("combobox", { name: label }).focus();
+  await user.keyboard("{Enter}");
+  await user.click(await screen.findByRole("option", { name: option }));
+}
 
 function cacheDump(qc: QueryClient): string {
   return JSON.stringify([
@@ -102,12 +120,15 @@ describe("database host form model", () => {
     expect(connectionChanged({ ...f, port: "3307" }, saved)).toBe(true);
     expect(connectionChanged({ ...f, username: "root" }, saved)).toBe(true);
     expect(connectionChanged({ ...f, tlsMode: "required" }, saved)).toBe(true);
-    expect(
-      connectionChanged(
-        { ...f, tlsCaCertificate: "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----" },
-        saved,
-      ),
-    ).toBe(true);
+    expect(connectionChanged({ ...f, tlsMode: "verify_ca", tlsCaCertificate: PEM }, saved)).toBe(true);
+    // A CA left in the form under another mode is never sent, so it changes nothing.
+    expect(connectionChanged({ ...f, tlsCaCertificate: PEM }, saved)).toBe(false);
+    const v = formFromHost(verifiedHost);
+    expect(v.tlsCaCertificate).toBe(PEM);
+    expect(connectionChanged(v, verifiedHost)).toBe(false);
+    expect(connectionChanged({ ...v, tlsCaCertificate: PEM.replace("MIIBCA", "MIIBCB") }, verifiedHost)).toBe(
+      true,
+    );
   });
 
   it("create needs the password and sends every field", () => {
@@ -153,9 +174,98 @@ describe("database host form model", () => {
       host: expect.stringMatching(/host name or IP/),
       password: PASSWORD_REQUIRED_MESSAGE,
     });
-    expect(hostRequest({ ...f, tlsCaCertificate: "not a pem" }, saved).errors).toMatchObject({
-      tlsCaCertificate: expect.stringMatching(/PEM/),
+    expect(
+      hostRequest({ ...f, tlsMode: "verify_ca", tlsCaCertificate: "not a pem", password: SECRET }, saved)
+        .errors,
+    ).toEqual({ tlsCaCertificate: expect.stringMatching(/PEM/) });
+  });
+
+  it("Verify CA requires a CA certificate; no other mode ever sends one", () => {
+    const create = {
+      ...formFromHost(null),
+      name: "mysql-1",
+      host: "db.internal",
+      username: "admin",
+      password: SECRET,
+    };
+    expect(hostRequest({ ...create, tlsMode: "verify_ca" }, null).errors).toEqual({
+      tlsCaCertificate: CA_REQUIRED_MESSAGE,
     });
+    expect(hostRequest({ ...create, tlsMode: "verify_ca", tlsCaCertificate: PEM }, null).body).toMatchObject({
+      tlsMode: "verify_ca",
+      tlsCaCertificate: PEM,
+    });
+    for (const mode of ["disabled", "preferred", "required"] as const)
+      expect(hostRequest({ ...create, tlsMode: mode, tlsCaCertificate: PEM }, null)).toMatchObject({
+        errors: {},
+        body: { tlsMode: mode, tlsCaCertificate: null },
+      });
+
+    // Switching a host to Verify CA: CA and password needed.
+    const f = formFromHost(saved);
+    expect(hostRequest({ ...f, tlsMode: "verify_ca" }, saved).errors).toEqual({
+      tlsCaCertificate: CA_REQUIRED_MESSAGE,
+      password: PASSWORD_REQUIRED_MESSAGE,
+    });
+    expect(
+      hostRequest({ ...f, tlsMode: "verify_ca", tlsCaCertificate: PEM, password: SECRET }, saved),
+    ).toEqual({
+      kind: "update",
+      errors: {},
+      body: { tlsMode: "verify_ca", tlsCaCertificate: PEM, password: SECRET },
+    });
+    // Leaving Verify CA: the CA is dropped (explicit null), never sent with the new mode.
+    const v = formFromHost(verifiedHost);
+    expect(hostRequest({ ...v, tlsMode: "required", password: SECRET }, verifiedHost)).toEqual({
+      kind: "update",
+      errors: {},
+      body: { tlsMode: "required", tlsCaCertificate: null, password: SECRET },
+    });
+    // Unchanged Verify CA host: nothing to send, no password needed.
+    expect(hostRequest({ ...v, notes: "rack 2" }, verifiedHost)).toEqual({
+      kind: "update",
+      errors: {},
+      body: { notes: "rack 2" },
+    });
+
+    // The connection test follows the same rule.
+    expect(testRequest({ ...f, tlsMode: "verify_ca", password: SECRET }, saved)).toEqual({
+      body: null,
+      errors: { tlsCaCertificate: CA_REQUIRED_MESSAGE },
+    });
+    expect(testRequest({ ...f, tlsCaCertificate: PEM }, saved).body).toMatchObject({
+      tlsMode: "preferred",
+      tlsCaCertificate: null,
+    });
+    expect(testRequest(v, verifiedHost).body).toMatchObject({
+      tlsMode: "verify_ca",
+      tlsCaCertificate: PEM,
+      hostId: DATABASE_HOST_ID,
+    });
+  });
+
+  it("labels TLS modes, badges and test results by what they actually guarantee", () => {
+    expect(TLS_MODES.map((m) => m.label)).toEqual([
+      "Disabled (no encryption)",
+      "Preferred (encrypted if offered, host not verified)",
+      "Required (encrypted, host not verified)",
+      "Verify CA (encrypted, certificate verified against your CA)",
+    ]);
+    for (const m of ["preferred", "required"] as const)
+      expect(TLS_MODES.find((x) => x.value === m)!.help).toMatch(
+        /only against passive sniffing: an active attacker .* can impersonate the host/,
+      );
+    expect(tlsBadge("disabled")).toMatchObject({ label: "Disabled · not encrypted", tone: "danger" });
+    expect(tlsBadge("preferred")).toMatchObject({ label: "Preferred · not verified", tone: "warning" });
+    expect(tlsBadge("required")).toMatchObject({ label: "Required · not verified", tone: "warning" });
+    expect(tlsBadge("verify_ca")).toMatchObject({ label: "Verify CA", tone: "success" });
+    const r = { ok: true, error: null, serverVersion: null, tls: true, latencyMs: 1 };
+    expect(testTlsFact(r, "required")).toBe("Encrypted (host not verified)");
+    expect(testTlsFact(r, "preferred")).toBe("Encrypted (host not verified)");
+    expect(testTlsFact(r, "verify_ca")).toBe("Encrypted, certificate verified");
+    expect(testTlsFact({ ...r, ok: false }, "verify_ca")).toBe("Encrypted (host not verified)");
+    expect(testTlsFact({ ...r, tls: false }, "preferred")).toBe("Not encrypted");
+    expect(testTlsFact({ ...r, tls: null }, "verify_ca")).toBeNull();
   });
 
   it("tests unsaved values with the stored password only while the connection is unchanged", () => {
@@ -214,8 +324,8 @@ describe("Database hosts page", () => {
             nodeName: null,
             maxDatabases: null,
             databaseCount: 0,
-            tlsMode: "required",
-            tlsCaCertificate: "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----",
+            tlsMode: "verify_ca",
+            tlsCaCertificate: PEM,
           }),
         ]),
       ],
@@ -227,7 +337,9 @@ describe("Database hosts page", () => {
     expect(within(row).getByText("db.example.test")).toBeTruthy();
     expect(within(row).getByText("fra-1")).toBeTruthy();
     expect(within(row).getByText("3 / 50")).toBeTruthy();
-    expect(within(row).getByText("Preferred")).toBeTruthy();
+    const notVerified = within(row).getByText("Preferred · not verified");
+    expect(notVerified.className).toContain("tone-warning");
+    expect(notVerified.getAttribute("title")).toMatch(/impersonate the host/);
     expect(within(row).getByText('<img src=x onerror="alert(1)"> rack 4')).toBeTruthy();
     expect(row.querySelector("img")).toBeNull();
     // Hosts that still hold databases cannot be deleted.
@@ -238,7 +350,7 @@ describe("Database hosts page", () => {
     expect(within(v6).getByText("[2001:db8::5]:3306")).toBeTruthy();
     expect(within(v6).getByText("Same")).toBeTruthy();
     expect(within(v6).getByText("0 / unlimited")).toBeTruthy();
-    expect(within(v6).getByText("Required · CA verified")).toBeTruthy();
+    expect(within(v6).getByText("Verify CA").className).toContain("tone-success");
     // No password anywhere.
     expect(document.body.textContent).not.toMatch(/password/i);
   });
@@ -274,8 +386,15 @@ describe("Database hosts page", () => {
     await user.type(within(dialog).getByLabelText(/^Max databases/), "25");
     within(dialog).getByRole("combobox", { name: "TLS" }).focus();
     await user.keyboard("{Enter}");
-    await user.click(await screen.findByRole("option", { name: "Required" }));
-    expect(within(dialog).getByText(/Always encrypted, or the connection fails/)).toBeTruthy();
+    expect((await screen.findAllByRole("option")).map((o) => o.textContent)).toEqual(
+      TLS_MODES.map((m) => m.label),
+    );
+    await user.click(screen.getByRole("option", { name: "Required (encrypted, host not verified)" }));
+    expect(
+      within(dialog).getByText(/certificate is not checked\. This protects only against passive/),
+    ).toBeTruthy();
+    // No CA field outside Verify CA.
+    expect(within(dialog).queryByLabelText(/^CA certificate/)).toBeNull();
     await user.click(within(dialog).getByRole("button", { name: "Add host" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(calls.find((c) => c.method === "POST")!.body).toEqual({
@@ -376,7 +495,7 @@ describe("Database hosts page", () => {
     await user.click(within(dialog).getByRole("button", { name: "Test connection" }));
     const result = await within(dialog).findByRole("status");
     expect(result.textContent).toContain("Connection works");
-    expect(result.textContent).toContain("Server 8.0.36 · TLS on · 4 ms");
+    expect(result.textContent).toContain("Server 8.0.36 · Encrypted (host not verified) · 4 ms");
     expect(calls.find((c) => c.url.endsWith("/database-hosts/test"))!.body).toEqual({
       host: "10.0.0.5",
       port: 3306,
@@ -405,12 +524,96 @@ describe("Database hosts page", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Connection failed");
     expect(alert.textContent).toContain("Access denied for user");
-    expect(alert.textContent).toContain("TLS off (not encrypted) · 12 ms");
+    expect(alert.textContent).toContain("Not encrypted · 12 ms");
     expect(calls.find((c) => c.method === "POST")!.url).toBe(
       `/api/v1/database-hosts/${DATABASE_HOST_ID}/test`,
     );
     await user.click(screen.getByRole("button", { name: "Dismiss test result" }));
     expect(screen.queryByText("Connection failed")).toBeNull();
+  });
+
+  it("Verify CA shows and requires the CA field; switching away hides and clears it", async () => {
+    const calls = routeFetch([
+      ["GET", HOSTS, ok([])],
+      ["GET", /\/nodes$/, ok([makeNode()])],
+      ["POST", HOSTS, ok(makeDatabaseHost(), 201)],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabaseHostsPage me={admin} />);
+    await user.click(await screen.findByRole("button", { name: "Add database host" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText(/^Name/), "mysql-ca");
+    await user.type(within(dialog).getByLabelText(/^Host/), "db.internal");
+    await user.type(within(dialog).getByLabelText(/^Admin username/), "admin");
+    await user.type(within(dialog).getByLabelText(/^Admin password/), SECRET);
+    expect(within(dialog).queryByLabelText(/^CA certificate/)).toBeNull();
+
+    await pick(user, dialog, "TLS", /^Verify CA/);
+    expect(within(dialog).getByText(/must chain to the CA certificate below/)).toBeTruthy();
+    const ca = within(dialog).getByLabelText(/^CA certificate/);
+    await user.click(within(dialog).getByRole("button", { name: "Add host" }));
+    expect(within(dialog).getByText(CA_REQUIRED_MESSAGE)).toBeTruthy();
+    expect(ca.getAttribute("aria-invalid")).toBe("true");
+    // Testing needs it too.
+    await user.click(within(dialog).getByRole("button", { name: "Test connection" }));
+    expect(calls.some((c) => c.method === "POST")).toBe(false);
+
+    await user.click(ca);
+    await user.paste(PEM);
+    await pick(user, dialog, "TLS", /^Required/);
+    expect(within(dialog).queryByLabelText(/^CA certificate/)).toBeNull();
+    await pick(user, dialog, "TLS", /^Verify CA/);
+    expect((within(dialog).getByLabelText(/^CA certificate/) as HTMLTextAreaElement).value).toBe("");
+
+    // The pasted CA is gone: Required sends none.
+    await pick(user, dialog, "TLS", /^Required/);
+    await user.click(within(dialog).getByRole("button", { name: "Add host" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+    expect(calls.find((c) => c.method === "POST")!.body).toMatchObject({
+      tlsMode: "required",
+      tlsCaCertificate: null,
+    });
+  });
+
+  it("edits a Verify CA host: the CA is shown; leaving Verify CA needs the password and drops the CA", async () => {
+    const calls = routeFetch([
+      ["GET", HOSTS, ok([verifiedHost])],
+      ["GET", /\/nodes$/, ok([makeNode()])],
+      [
+        "POST",
+        /\/database-hosts\/test$/,
+        ok({ ok: true, error: null, serverVersion: "11.4.2-MariaDB", tls: true, latencyMs: 3 }),
+      ],
+      ["PATCH", /\/database-hosts\/[^/]+$/, ok(makeDatabaseHost({ tlsMode: "required" }))],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabaseHostsPage me={admin} />);
+    await user.click(await screen.findByRole("button", { name: "Edit mysql-fra" }));
+    const dialog = await screen.findByRole("dialog");
+    expect((within(dialog).getByLabelText(/^CA certificate/) as HTMLTextAreaElement).value).toBe(PEM);
+    // Testing the unchanged Verify CA settings: stored password, certificate verified.
+    await user.click(within(dialog).getByRole("button", { name: "Test connection" }));
+    expect((await within(dialog).findByRole("status")).textContent).toContain(
+      "Server 11.4.2-MariaDB · Encrypted, certificate verified · 3 ms",
+    );
+    expect(calls.find((c) => c.url.endsWith("/database-hosts/test"))!.body).toMatchObject({
+      tlsMode: "verify_ca",
+      tlsCaCertificate: PEM,
+      hostId: DATABASE_HOST_ID,
+    });
+
+    await pick(user, dialog, "TLS", /^Required/);
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    expect(within(dialog).getAllByText(PASSWORD_REQUIRED_MESSAGE).length).toBeGreaterThan(0);
+    await user.type(within(dialog).getByLabelText(/^Admin password/), SECRET);
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    expect(calls.find((c) => c.method === "PATCH")!.body).toEqual({
+      tlsMode: "required",
+      tlsCaCertificate: null,
+      password: SECRET,
+    });
   });
 
   it("explains a refused delete (409 has_databases)", async () => {

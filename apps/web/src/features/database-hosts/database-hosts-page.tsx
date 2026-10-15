@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Database, Pencil, PlugZap, Plus, Trash2, X } from "lucide-react";
 import { Fragment, useState } from "react";
 import type { FormEvent } from "react";
-import { CreateDatabaseHostRequest, TestDatabaseHostRequest } from "@blockforge/contracts";
+import { CreateDatabaseHostRequest, TestDatabaseHostRequest, tlsModeVerifies } from "@blockforge/contracts";
 import type {
   DatabaseHost,
   DatabaseHostTestResult,
@@ -22,6 +22,7 @@ import { PageHeader } from "@/components/common/page-header";
 import { EmptyState, ErrorState, NoPermission, TableSkeleton } from "@/components/common/states";
 import { ConfirmDialog } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import type { Tone } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Callout } from "@/components/ui/callout";
 import { Card } from "@/components/ui/card";
@@ -59,23 +60,34 @@ export interface HostForm {
   notes: string;
 }
 
+/** Wording shared by every TLS mode that encrypts without authenticating the host. */
+export const TLS_NOT_VERIFIED_HELP =
+  "This protects only against passive sniffing: an active attacker on the network path can impersonate the host (and receive the admin password). Use Verify CA to rule that out.";
+
 export const TLS_MODES: { value: DatabaseTlsMode; label: string; help: string }[] = [
   {
     value: "disabled",
-    label: "Disabled",
-    help: "Never encrypted. Only for hosts on a trusted private network.",
+    label: "Disabled (no encryption)",
+    help: "Plain TCP: anyone on the network path can read the traffic, including credentials. Only for a trusted private network.",
   },
   {
     value: "preferred",
-    label: "Preferred",
-    help: "Encrypted when the server offers TLS, without verifying its certificate; plain otherwise.",
+    label: "Preferred (encrypted if offered, host not verified)",
+    help: `Encrypted when the server offers TLS, plain otherwise; its certificate is not checked. ${TLS_NOT_VERIFIED_HELP}`,
   },
   {
     value: "required",
-    label: "Required",
-    help: "Always encrypted, or the connection fails. With a CA certificate the server's certificate chain is verified.",
+    label: "Required (encrypted, host not verified)",
+    help: `Always encrypted (or the connection fails), but the certificate is not checked. ${TLS_NOT_VERIFIED_HELP}`,
+  },
+  {
+    value: "verify_ca",
+    label: "Verify CA (encrypted, certificate verified against your CA)",
+    help: "Always encrypted, and the server's certificate must chain to the CA certificate below. The host name in the certificate is not checked.",
   },
 ];
+
+export const CA_REQUIRED_MESSAGE = "Paste the CA certificate the host's certificate is verified against.";
 
 export const PASSWORD_REQUIRED_MESSAGE = "Re-enter the admin password when changing the connection settings.";
 
@@ -97,6 +109,13 @@ export function formFromHost(h: DatabaseHost | null): HostForm {
 
 const orNull = (v: string) => (v.trim() === "" ? null : v.trim());
 
+/** The CA the form would send: only with Verify CA (the API refuses one with any other mode). */
+export function effectiveCa(f: Pick<HostForm, "tlsMode" | "tlsCaCertificate">): string | null {
+  return tlsModeVerifies(f.tlsMode) ? orNull(f.tlsCaCertificate) : null;
+}
+
+const savedCa = (h: DatabaseHost) => h.tlsCaCertificate?.trim() || null;
+
 /**
  * Whether the connection settings differ from the saved host. The stored admin password is only
  * reused when none of them changed (the API refuses otherwise).
@@ -107,7 +126,7 @@ export function connectionChanged(f: HostForm, saved: DatabaseHost): boolean {
     Number(f.port) !== saved.port ||
     f.username !== saved.username ||
     f.tlsMode !== saved.tlsMode ||
-    orNull(f.tlsCaCertificate) !== (saved.tlsCaCertificate?.trim() || null)
+    effectiveCa(f) !== savedCa(saved)
   );
 }
 
@@ -138,9 +157,15 @@ function parseAll(f: HostForm, passwordPlaceholder: boolean) {
     nodeId: f.nodeId || null,
     maxDatabases: f.maxDatabases.trim() === "" ? null : numberOrNaN(f.maxDatabases),
     tlsMode: f.tlsMode,
-    tlsCaCertificate: orNull(f.tlsCaCertificate),
+    tlsCaCertificate: effectiveCa(f),
     notes: f.notes,
   });
+}
+
+/** The CA rule as a field message (the schemas only check it once every other field passes). */
+function caErrors(f: HostForm, errors: Record<string, string>): void {
+  if (tlsModeVerifies(f.tlsMode) && effectiveCa(f) === null) errors.tlsCaCertificate = CA_REQUIRED_MESSAGE;
+  else if (!tlsModeVerifies(f.tlsMode)) delete errors.tlsCaCertificate;
 }
 
 /**
@@ -158,6 +183,7 @@ export function hostRequest(
   const errors = parsed.success ? {} : issuesToErrors(parsed.error.issues);
   if (errors.port) errors.port = "A port from 1 to 65535.";
   if (errors.maxDatabases) errors.maxDatabases = "A whole number from 0 to 100000, or empty for unlimited.";
+  caErrors(f, errors);
   if (saved === null) {
     if (!typedPassword) errors.password = "Enter the admin password.";
     return { kind: "create", body: parsed.success ? parsed.data : ({} as CreateBody), errors };
@@ -175,8 +201,9 @@ export function hostRequest(
     if (v.nodeId !== saved.nodeId) body.nodeId = v.nodeId;
     if (v.maxDatabases !== saved.maxDatabases) body.maxDatabases = v.maxDatabases;
     if (v.tlsMode !== saved.tlsMode) body.tlsMode = v.tlsMode;
-    if (v.tlsCaCertificate !== (saved.tlsCaCertificate?.trim() || null))
-      body.tlsCaCertificate = v.tlsCaCertificate;
+    // A CA only travels with Verify CA. Leaving Verify CA clears the stored CA server-side anyway; the
+    // explicit null (allowed with every mode) also clears one left on a host from before that rule.
+    if (v.tlsCaCertificate !== savedCa(saved)) body.tlsCaCertificate = v.tlsCaCertificate;
     if (v.notes !== saved.notes) body.notes = v.notes;
   }
   return { kind: "update", body, errors };
@@ -201,27 +228,53 @@ export function testRequest(
     username: f.username,
     ...(typedPassword ? { password: f.password } : saved ? { hostId: saved.id } : {}),
     tlsMode: f.tlsMode,
-    tlsCaCertificate: orNull(f.tlsCaCertificate),
+    tlsCaCertificate: effectiveCa(f),
   });
   if (!parsed.success)
     for (const [k, v] of Object.entries(issuesToErrors(parsed.error.issues))) errors[k] ??= v;
   if (errors.port) errors.port = "A port from 1 to 65535.";
+  caErrors(f, errors);
   return { body: parsed.success && Object.keys(errors).length === 0 ? parsed.data : null, errors };
 }
 
 // ---------------------------------------------------------------------------------------------
 // Presentation
 
-function tlsLabel(h: Pick<DatabaseHost, "tlsMode" | "tlsCaCertificate">): string {
-  const base = TLS_MODES.find((m) => m.value === h.tlsMode)?.label ?? h.tlsMode;
-  return h.tlsMode === "required" && h.tlsCaCertificate ? `${base} · CA verified` : base;
+/** Table badge: whether the host is encrypted and, separately, whether it is authenticated. */
+export function tlsBadge(mode: DatabaseTlsMode): { label: string; tone: Tone; title: string } {
+  switch (mode) {
+    case "disabled":
+      return { label: "Disabled · not encrypted", tone: "danger", title: TLS_MODES[0]!.help };
+    case "preferred":
+      return { label: "Preferred · not verified", tone: "warning", title: TLS_NOT_VERIFIED_HELP };
+    case "required":
+      return { label: "Required · not verified", tone: "warning", title: TLS_NOT_VERIFIED_HELP };
+    case "verify_ca":
+      return {
+        label: "Verify CA",
+        tone: "success",
+        title: "Encrypted; the host's certificate is verified against the configured CA.",
+      };
+  }
+}
+
+/** What `tls` in a test result means for the tested mode (`true` alone only means encrypted). */
+export function testTlsFact(result: DatabaseHostTestResult, mode: DatabaseTlsMode): string | null {
+  if (result.tls === null) return null;
+  if (!result.tls) return "Not encrypted";
+  return result.ok && tlsModeVerifies(mode)
+    ? "Encrypted, certificate verified"
+    : "Encrypted (host not verified)";
 }
 
 export function TestResultView({
   result,
+  mode,
   onDismiss,
 }: {
   result: DatabaseHostTestResult;
+  /** The TLS mode the test used. */
+  mode: DatabaseTlsMode;
   onDismiss?: () => void;
 }) {
   const dismiss = onDismiss ? (
@@ -231,7 +284,7 @@ export function TestResultView({
   ) : undefined;
   const facts = [
     result.serverVersion ? `Server ${result.serverVersion}` : null,
-    result.tls === null ? null : result.tls ? "TLS on" : "TLS off (not encrypted)",
+    testTlsFact(result, mode),
     result.latencyMs === null ? null : `${result.latencyMs} ms`,
   ].filter(Boolean);
   return result.ok ? (
@@ -264,11 +317,18 @@ function HostDialog({
   const queryClient = useQueryClient();
   const [form, setForm] = useState<HostForm>(() => formFromHost(host));
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [result, setResult] = useState<DatabaseHostTestResult | null>(null);
+  const [result, setResult] = useState<{ result: DatabaseHostTestResult; mode: DatabaseTlsMode } | null>(
+    null,
+  );
   const canListNodes = canAny(me, "nodes.view");
   const nodes = useQuery({ ...nodesQuery, enabled: canListNodes, refetchInterval: false });
   const set = <K extends keyof HostForm>(k: K, v: HostForm[K]) => {
-    setForm((f) => ({ ...f, [k]: v }));
+    // Leaving Verify CA drops the CA: it is never sent with another mode.
+    setForm((f) =>
+      k === "tlsMode" && !tlsModeVerifies(v as DatabaseTlsMode)
+        ? { ...f, tlsMode: v as DatabaseTlsMode, tlsCaCertificate: "" }
+        : { ...f, [k]: v },
+    );
     setResult(null);
     setErrors((e) => {
       if (!(k in e) && !("form" in e)) return e;
@@ -298,7 +358,8 @@ function HostDialog({
     },
   });
   const test = useApiMutation({
-    mutationFn: (body: TestBody) => databaseHostsApi.testSettings(body),
+    mutationFn: (body: TestBody) =>
+      databaseHostsApi.testSettings(body).then((r) => ({ result: r, mode: body.tlsMode ?? "preferred" })),
     sensitive: true,
     silentError: true,
     onError: (err) => {
@@ -448,20 +509,23 @@ function HostDialog({
               options={TLS_MODES.map((m) => ({ value: m.value, label: m.label }))}
             />
           </Field>
-          <Field
-            label="CA certificate"
-            error={errors.tlsCaCertificate}
-            hint="Optional PEM. With TLS Required, the server's certificate chain is verified against this CA (the host name is not checked)."
-          >
-            <Textarea
-              value={form.tlsCaCertificate}
-              onChange={(e) => set("tlsCaCertificate", e.target.value)}
-              rows={4}
-              className="font-mono text-xs"
-              spellCheck={false}
-              placeholder="-----BEGIN CERTIFICATE-----"
-            />
-          </Field>
+          {tlsModeVerifies(form.tlsMode) ? (
+            <Field
+              label="CA certificate"
+              required
+              error={errors.tlsCaCertificate}
+              hint="PEM of the CA (or CA chain) that issued the database server's certificate."
+            >
+              <Textarea
+                value={form.tlsCaCertificate}
+                onChange={(e) => set("tlsCaCertificate", e.target.value)}
+                rows={4}
+                className="font-mono text-xs"
+                spellCheck={false}
+                placeholder="-----BEGIN CERTIFICATE-----"
+              />
+            </Field>
+          ) : null}
           <Field label="Notes" error={errors.notes}>
             <Textarea
               value={form.notes}
@@ -470,7 +534,7 @@ function HostDialog({
               maxLength={1024}
             />
           </Field>
-          {result ? <TestResultView result={result} /> : null}
+          {result ? <TestResultView result={result.result} mode={result.mode} /> : null}
           {errors.form ? (
             <p role="alert" className="text-sm text-danger">
               {errors.form}
@@ -510,13 +574,15 @@ export function DatabaseHostsPage({ me }: { me: Me }) {
   const [editing, setEditing] = useState<DatabaseHost | "new" | null>(null);
   const [deleting, setDeleting] = useState<DatabaseHost | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [results, setResults] = useState<Record<string, DatabaseHostTestResult>>({});
+  const [results, setResults] = useState<
+    Record<string, { result: DatabaseHostTestResult; mode: DatabaseTlsMode }>
+  >({});
 
   const test = useApiMutation({
     mutationFn: (h: DatabaseHost) => databaseHostsApi.test(h.id),
     silentError: true,
     onError: (err) => toastDatabaseError(err, "Could not run the connection test"),
-    onSuccess: (r, h) => setResults((all) => ({ ...all, [h.id]: r })),
+    onSuccess: (r, h) => setResults((all) => ({ ...all, [h.id]: { result: r, mode: h.tlsMode } })),
   });
   const remove = useApiMutation({
     mutationFn: (h: DatabaseHost) => databaseHostsApi.remove(h.id),
@@ -584,6 +650,7 @@ export function DatabaseHostsPage({ me }: { me: Me }) {
               <TableBody>
                 {hosts.map((h) => {
                   const result = results[h.id];
+                  const badge = tlsBadge(h.tlsMode);
                   return (
                     <Fragment key={h.id}>
                       <TableRow>
@@ -611,16 +678,8 @@ export function DatabaseHostsPage({ me }: { me: Me }) {
                           {h.databaseCount} / {h.maxDatabases ?? "unlimited"}
                         </TableCell>
                         <TableCell>
-                          <Badge
-                            tone={
-                              h.tlsMode === "disabled"
-                                ? "warning"
-                                : h.tlsMode === "required"
-                                  ? "success"
-                                  : "neutral"
-                            }
-                          >
-                            {tlsLabel(h)}
+                          <Badge tone={badge.tone} title={badge.title}>
+                            {badge.label}
                           </Badge>
                         </TableCell>
                         <TableCell>
@@ -666,7 +725,8 @@ export function DatabaseHostsPage({ me }: { me: Me }) {
                         <TableRow className="hover:bg-transparent">
                           <TableCell colSpan={7} className="pt-0">
                             <TestResultView
-                              result={result}
+                              result={result.result}
+                              mode={result.mode}
                               onDismiss={() =>
                                 setResults((all) => {
                                   const next = { ...all };

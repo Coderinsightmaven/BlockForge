@@ -14,11 +14,28 @@ import { DisplayName, EpochMs, Id, Port } from "../common.js";
  * username `u<shortId>_<10 random [a-z0-9]>` (20 chars, within MySQL 5.7+/MariaDB's 32-character limit).
  */
 
-/** TLS towards the database host. `preferred`: encrypted when the server offers TLS (certificate not
- * verified), plain otherwise. `required`: encrypted or fail; with `tlsCaCertificate` the server
- * certificate must chain to that CA (MySQL `VERIFY_CA`; the host name is not checked). */
-export const DatabaseTlsMode = z.enum(["disabled", "preferred", "required"]);
+/**
+ * TLS towards the database host (named after the MySQL client's SSL modes):
+ * - `disabled`: plain TCP.
+ * - `preferred`: encrypted when the server offers TLS, plain otherwise; the certificate is NOT verified.
+ * - `required`: encrypted or fail, but the certificate is NOT verified (protects against passive sniffing
+ *   only; an active man-in-the-middle can impersonate the host).
+ * - `verify_ca`: encrypted, and the server certificate must chain to `tlsCaCertificate` (required for this
+ *   mode and accepted only with it); the host name is not checked (MySQL `VERIFY_CA`).
+ */
+export const DatabaseTlsMode = z.enum(["disabled", "preferred", "required", "verify_ca"]);
 export type DatabaseTlsMode = z.infer<typeof DatabaseTlsMode>;
+
+/** Modes that authenticate the host by its certificate (only `verify_ca`). */
+export const tlsModeVerifies = (mode: DatabaseTlsMode): boolean => mode === "verify_ca";
+
+const CA_RULE_REQUIRED = "verify_ca needs the CA certificate to verify against";
+const CA_RULE_UNUSED = "A CA certificate is only used with verify_ca";
+/** `tlsCaCertificate` is required with `verify_ca` and refused with every other mode. */
+function checkCaRule(v: { tlsMode: DatabaseTlsMode; tlsCaCertificate: string | null }, ctx: z.RefinementCtx): void {
+  if (v.tlsMode === "verify_ca" && !v.tlsCaCertificate) ctx.addIssue({ code: "custom", path: ["tlsCaCertificate"], message: CA_RULE_REQUIRED });
+  if (v.tlsMode !== "verify_ca" && v.tlsCaCertificate) ctx.addIssue({ code: "custom", path: ["tlsCaCertificate"], message: CA_RULE_UNUSED });
+}
 
 const HOSTNAME_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/;
 const IPV4_RE = /^(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
@@ -98,13 +115,19 @@ export const CreateDatabaseHostRequest = z
     nodeId: Id.nullable().default(null),
     maxDatabases: z.number().int().min(0).max(100_000).nullable().default(null),
     tlsMode: DatabaseTlsMode.default("preferred"),
+    /** Only with (and required by) `tlsMode: "verify_ca"`. */
     tlsCaCertificate: PemCertificate.nullable().default(null),
     notes: z.string().max(1024).default(""),
   })
-  .strict();
+  .strict()
+  .superRefine(checkCaRule);
 export type CreateDatabaseHostRequest = z.infer<typeof CreateDatabaseHostRequest>;
 
-/** `PATCH /database-hosts/:id`: omitted fields are kept; an omitted `password` keeps the stored one. */
+/**
+ * `PATCH /database-hosts/:id`: omitted fields are kept; an omitted `password` keeps the stored one. The CA
+ * rule applies to the resulting host: switching away from `verify_ca` clears the stored CA, switching to it
+ * needs one, and sending a CA with another mode is refused (400).
+ */
 export const UpdateDatabaseHostRequest = z
   .object({
     name: DisplayName.optional(),
@@ -137,7 +160,8 @@ export const TestDatabaseHostRequest = z
     hostId: Id.optional(),
   })
   .strict()
-  .refine((v) => v.password !== undefined || v.hostId !== undefined, { path: ["password"], message: "Enter the password" });
+  .refine((v) => v.password !== undefined || v.hostId !== undefined, { path: ["password"], message: "Enter the password" })
+  .superRefine(checkCaRule);
 export type TestDatabaseHostRequest = z.infer<typeof TestDatabaseHostRequest>;
 
 export const DatabaseHostTestResult = z.object({
@@ -145,7 +169,7 @@ export const DatabaseHostTestResult = z.object({
   /** Short, credential-free reason when `ok` is false. */
   error: z.string().nullable(),
   serverVersion: z.string().nullable(),
-  /** Whether the session was encrypted. */
+  /** Whether the session was encrypted (not whether the host was authenticated — see `DatabaseTlsMode`). */
   tls: z.boolean().nullable(),
   latencyMs: z.number().int().nonnegative().nullable(),
 });
@@ -272,9 +296,10 @@ export type ServerDatabasePassword = z.infer<typeof ServerDatabasePassword>;
  * `details` of database errors: `disabled` (403, the server's `databaseLimit` is 0), `limit_reached` (409),
  * `name_taken` (409), `host_full` (409, an explicitly picked host is at `maxDatabases`), `no_host` (422 —
  * no host with capacity), `has_databases` (409, deleting a host that still has databases),
- * `host_error` (502, the database host refused or could not be reached; `code` = driver/MySQL error code).
+ * `host_error` (502, the database host refused or could not be reached; `code` = driver/MySQL error code),
+ * `busy` (409, another create/rotate/delete of the same database is still talking to the host).
  */
-export const DatabaseErrorReason = z.enum(["disabled", "limit_reached", "name_taken", "host_full", "no_host", "has_databases", "host_error"]);
+export const DatabaseErrorReason = z.enum(["disabled", "limit_reached", "name_taken", "host_full", "no_host", "has_databases", "host_error", "busy"]);
 export const DatabaseErrorDetails = z.object({
   reason: DatabaseErrorReason,
   limit: z.number().int().nonnegative().optional(),

@@ -56,6 +56,8 @@ export function databaseErrorMessage(err: unknown): string {
       return "No database host has room for another database. Ask an administrator to add a database host or raise a host's limit.";
     case "host_error":
       return `The database host refused the request or could not be reached${d.code ? ` (error ${d.code})` : ""}. Try again later, or ask an administrator to check the host.`;
+    case "busy":
+      return "Another operation on this database is still in progress — try again in a moment.";
     case "has_databases":
       return d.count !== undefined
         ? `This host still holds ${plural(d.count, "database")}. Delete them from their servers before deleting the host.`
