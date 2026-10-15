@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc-rs -p tsconfig.build.json",
     "typecheck": "tsc-rs -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run"

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch --conditions=@blockforge/source src/main.ts",
     "start": "node dist/main.js",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc-rs -p tsconfig.build.json",
     "typecheck": "tsc-rs -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
