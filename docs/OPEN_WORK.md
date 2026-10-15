@@ -105,6 +105,8 @@ focus moved to Phase 5. Not blocking and still open: the live-only gaps in 1.3 a
   - independent review of the Phase 5 change (control plane SQL/grant handling, web password handling);
   - live run: a real plugin (e.g. LuckPerms) on the test node connecting to a database created through the UI;
   - the web Databases tab and Database hosts page against the real control plane (component tests only so far);
+  - MySQL 8.4 is an opt-in compose profile (memory on small dev VMs), so CI runs the database tests against MariaDB
+    only; the MySQL tests (caching_sha2_password, `partial_revokes`) pass locally with `--profile mysql`;
   - Pterodactyl's per-database `max_connections` (`MAX_USER_CONNECTIONS`) is not implemented;
   - admin view of all databases on a host (only the count is shown).
 - **Phase 6 — Velocity & networks:**

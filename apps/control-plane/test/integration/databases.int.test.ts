@@ -12,8 +12,9 @@ import type { FakeAgent } from "../support/fake-agent.js";
 import { catalogOptions, connectSimNode, paperRequest, templateIdByKey, waitJob } from "../support/panel.js";
 
 /**
- * Runs against the MariaDB 11.4 and MySQL 8.4 services of infra/compose (`pnpm infra:up`). Every database
- * and user the tests create matches `s<8 hex>_…` / `u<8 hex>_…` and is dropped after each test.
+ * Runs against the MariaDB 11.4 service of infra/compose (`pnpm infra:up`; required) and, when it answers, the
+ * opt-in MySQL 8.4 service (`--profile mysql`; its tests are skipped otherwise). Every database and user the
+ * tests create matches `s<8 hex>_…` / `u<8 hex>_…` and is dropped after each test.
  */
 interface Target {
   name: string;
@@ -71,7 +72,23 @@ async function serverCertificatePem(target: Target): Promise<string> {
   }
 }
 
+const answers = (target: Target) =>
+  root(target).then(
+    async (c) => {
+      await c.end();
+      return true;
+    },
+    () => false,
+  );
+/** MySQL 8.4 is opt-in in the dev stack: its tests run only when it answers. MariaDB is required (no skip). */
+const MYSQL_UP = await answers(MYSQL);
+const UP = new Map<Target, boolean>([
+  [MARIADB, await answers(MARIADB)],
+  [MYSQL, MYSQL_UP],
+]);
+
 async function cleanTarget(target: Target): Promise<void> {
+  if (!UP.get(target)) return;
   const c = await root(target);
   try {
     const [dbs] = await c.query("SELECT schema_name AS n FROM information_schema.schemata WHERE schema_name REGEXP '^s[0-9a-f]{8}_' OR schema_name = ?", [FOREIGN_DB]);
@@ -281,7 +298,7 @@ describe("database hosts (admin)", () => {
 });
 
 describe.each(TARGETS)("server databases on $name", (target) => {
-  it("creates a database whose user reaches only that database, rotates the password and deletes both", async () => {
+  it.skipIf(target === MYSQL && !MYSQL_UP)("creates a database whose user reaches only that database, rotates the password and deletes both", async () => {
     responseLog.length = 0;
     const { t, owner } = await boot();
     await connectSimNode(t, owner, { agents });
@@ -516,7 +533,7 @@ describe("server databases: limits, permissions and validation", () => {
   });
 });
 
-describe("MySQL with partial_revokes = ON", () => {
+describe.skipIf(!MYSQL_UP)("MySQL with partial_revokes = ON", () => {
   it("grants on the literal database name (no escape) and the user still reaches only its own database", async () => {
     const { t, owner } = await boot();
     await connectSimNode(t, owner, { agents });
@@ -546,14 +563,15 @@ describe("server deletion", () => {
   it("drops the server's databases on every host (best effort) and records what could not be dropped", async () => {
     const { t, owner } = await boot();
     await connectSimNode(t, owner, { agents });
+    // Two host entries for the same MariaDB server; the second one becomes unreachable after the creations.
     const maria = await createHost(owner, MARIADB);
-    const my = await createHost(owner, MYSQL);
+    const my = await createHost(owner, MARIADB, { name: "Second entry" });
     const srv = await paperServer(owner, { databaseLimit: 3 });
     const a = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "a", hostId: maria.id })).json());
     const b = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "b", hostId: maria.id })).json());
     const c = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "c", hostId: my.id })).json());
-    // The MySQL host becomes unreachable: its database cannot be dropped, which must not block the deletion.
-    expect((await owner.patch(`/database-hosts/${my.id}`, { port: 1, password: MYSQL.password })).statusCode).toBe(200);
+    // Its database cannot be dropped, which must not block the deletion.
+    expect((await owner.patch(`/database-hosts/${my.id}`, { port: 1, password: MARIADB.password })).statusCode).toBe(200);
 
     const del = await owner.delete(`/servers/${srv.id}`);
     expect(del.statusCode, del.body).toBe(202);
@@ -562,15 +580,11 @@ describe("server deletion", () => {
     expect(job.steps).toEqual(expect.arrayContaining([expect.objectContaining({ key: "databases", status: "succeeded" })]));
 
     const mr = await root(MARIADB);
-    const [left] = await mr.query("SELECT schema_name FROM information_schema.schemata WHERE schema_name IN (?, ?)", [a.database, b.database]);
-    expect(left).toEqual([]);
-    const [accts] = await mr.query("SELECT user FROM mysql.user WHERE user IN (?, ?)", [a.username, b.username]);
-    expect(accts).toEqual([]);
+    const [left] = await mr.query("SELECT schema_name AS n FROM information_schema.schemata WHERE schema_name IN (?, ?, ?)", [a.database, b.database, c.database]);
+    expect(left).toEqual([{ n: c.database }]);
+    const [accts] = await mr.query("SELECT user AS u FROM mysql.user WHERE user IN (?, ?, ?)", [a.username, b.username, c.username]);
+    expect(accts).toEqual([{ u: c.username }]);
     await mr.end();
-    const mm = await root(MYSQL);
-    const [kept] = await mm.query("SELECT schema_name AS n FROM information_schema.schemata WHERE schema_name = ?", [c.database]);
-    expect(kept).toEqual([{ n: c.database }]);
-    await mm.end();
 
     const { rows } = await testPool().query("SELECT outcome, details FROM audit_events WHERE action = 'server.database.delete' ORDER BY id");
     expect(rows.map((x) => `${x.details.database}:${x.outcome}`).sort()).toEqual([`${a.database}:success`, `${b.database}:success`, `${c.database}:failed`].sort());

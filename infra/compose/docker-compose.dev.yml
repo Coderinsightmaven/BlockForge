@@ -63,7 +63,10 @@ services:
   # (dev-only password) and create/drop throwaway databases and users. MariaDB 11.4 serves TLS with an
   # auto-generated certificate; MySQL 8.4 uses caching_sha2_password with its generated certificate.
   # Both are trimmed to a small footprint and memory-capped: dev Docker VMs can be ~2 GB for the whole
-  # stack, and an uncapped MySQL 8.4 (~500 MB) got another service OOM-killed.
+  # stack, and an uncapped MySQL 8.4 (~500 MB) got another service OOM-killed. MariaDB is part of the
+  # default stack; MySQL is opt-in (`docker compose -f infra/compose/docker-compose.dev.yml --profile mysql
+  # up -d --wait mysql`) and its tests run only when it answers on 127.0.0.1:53307. On a small VM run one of
+  # the two at a time and stop them when not testing databases.
   mariadb:
     image: mariadb:11.4.13
     command: ["--innodb-buffer-pool-size=32M", "--max-connections=50"]
@@ -79,6 +82,7 @@ services:
       retries: 60
   mysql:
     image: mysql:8.4.11
+    profiles: ["mysql"]
     command:
       - --performance-schema=OFF
       - --innodb-buffer-pool-size=32M
