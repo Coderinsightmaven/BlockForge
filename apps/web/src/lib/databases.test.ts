@@ -95,6 +95,12 @@ describe("database error reasons", () => {
     expect(databaseErrorMessage(err("CONFLICT", { reason: "not_ready" }))).toBe(
       "This database is still being created or awaits cleanup.",
     );
+    expect(databaseErrorMessage(err("CONFLICT", { reason: "not_ready", retryAfterMs: 44_200 }))).toBe(
+      "Cleanup is scheduled; you can retry deleting in about 45 seconds (BlockForge will also remove it on its own).",
+    );
+    expect(databaseErrorMessage(err("CONFLICT", { reason: "not_ready", retryAfterMs: 0 }))).toMatch(
+      /in about 1 second \(/,
+    );
     expect(databaseErrorMessage(err("CONFLICT", { reason: "password_unknown" }))).toBe(
       "The last password rotation could not be confirmed — rotate the password again.",
     );

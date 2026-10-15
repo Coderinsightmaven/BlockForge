@@ -23,11 +23,13 @@ import {
   CA_REQUIRED_MESSAGE,
   DatabaseHostsPage,
   PASSWORD_REQUIRED_MESSAGE,
+  PROXY_WARNING,
   TLS_MODES,
   VERIFY_CA_PIN_WARNING,
   connectionChanged,
   formFromHost,
   hostRequest,
+  missingPrivilegesWarning,
   testRequest,
   testTlsFact,
   tlsBadge,
@@ -268,7 +270,15 @@ describe("database host form model", () => {
     expect(VERIFY_CA_PIN_WARNING).toBe(
       "Pin a private CA or the database server's own certificate — not a public CA: the host name is not checked, so any certificate that CA issued would be accepted.",
     );
-    const r = { ok: true, error: null, serverVersion: null, tls: true, latencyMs: 1 };
+    const r = {
+      ok: true,
+      error: null,
+      serverVersion: null,
+      tls: true,
+      latencyMs: 1,
+      proxyDetected: false,
+      missingPrivileges: [],
+    };
     expect(testTlsFact(r, "required")).toBe("Encrypted (host not verified)");
     expect(testTlsFact(r, "preferred")).toBe("Encrypted (host not verified)");
     expect(testTlsFact(r, "verify_ca")).toBe("Encrypted, certificate verified");
@@ -494,7 +504,15 @@ describe("Database hosts page", () => {
       [
         "POST",
         /\/database-hosts\/test$/,
-        ok({ ok: true, error: null, serverVersion: "8.0.36", tls: true, latencyMs: 4 }),
+        ok({
+          ok: true,
+          error: null,
+          serverVersion: "8.0.36",
+          tls: true,
+          latencyMs: 4,
+          proxyDetected: false,
+          missingPrivileges: [],
+        }),
       ],
     ]);
     const user = userEvent.setup();
@@ -524,7 +542,15 @@ describe("Database hosts page", () => {
       [
         "POST",
         /\/database-hosts\/[^/]+\/test$/,
-        ok({ ok: false, error: "Access denied for user", serverVersion: null, tls: false, latencyMs: 12 }),
+        ok({
+          ok: false,
+          error: "Access denied for user",
+          serverVersion: null,
+          tls: false,
+          latencyMs: 12,
+          proxyDetected: null,
+          missingPrivileges: [],
+        }),
       ],
     ]);
     const user = userEvent.setup();
@@ -539,6 +565,65 @@ describe("Database hosts page", () => {
     );
     await user.click(screen.getByRole("button", { name: "Dismiss test result" }));
     expect(screen.queryByText("Connection failed")).toBeNull();
+    // No proxy or privilege warnings without findings.
+    expect(screen.queryByText("Proxy or load balancer detected")).toBeNull();
+    expect(screen.queryByText("Missing privileges")).toBeNull();
+  });
+
+  it("warns about a proxy in front of the host and missing privileges; the test still counts as connected", async () => {
+    routeFetch([
+      ["GET", HOSTS, ok([saved])],
+      ["GET", /\/nodes$/, ok([makeNode()])],
+      [
+        "POST",
+        /\/database-hosts\/[^/]+\/test$/,
+        ok({
+          ok: true,
+          error: null,
+          serverVersion: "8.0.36",
+          tls: true,
+          latencyMs: 5,
+          proxyDetected: true,
+          missingPrivileges: ["CREATE USER", "<b>GRANT OPTION</b>"],
+        }),
+      ],
+      [
+        "POST",
+        /\/database-hosts\/test$/,
+        ok({
+          ok: true,
+          error: null,
+          serverVersion: "8.0.36",
+          tls: true,
+          latencyMs: 5,
+          proxyDetected: false,
+          missingPrivileges: ["SELECT on mysql.user"],
+        }),
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabaseHostsPage me={admin} />);
+    // Per row.
+    await user.click(await screen.findByRole("button", { name: "Test mysql-fra" }));
+    expect((await screen.findByRole("status")).textContent).toContain("Connection works");
+    expect(screen.getByText("Proxy or load balancer detected")).toBeTruthy();
+    expect(screen.getByText(PROXY_WARNING)).toBeTruthy();
+    expect(screen.getByText("Missing privileges")).toBeTruthy();
+    const missing = screen.getByText(
+      "The admin account seems to lack: CREATE USER, <b>GRANT OPTION</b>. (Privileges granted only through roles or on specific databases are not detected.)",
+    );
+    // Host-supplied names render as text.
+    expect(missing.querySelector("b")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Dismiss test result" }));
+    expect(screen.queryByText("Proxy or load balancer detected")).toBeNull();
+
+    // In the edit dialog.
+    await user.click(screen.getByRole("button", { name: "Edit mysql-fra" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Test connection" }));
+    expect((await within(dialog).findByRole("status")).textContent).toContain("Connection works");
+    expect(within(dialog).getByText(missingPrivilegesWarning(["SELECT on mysql.user"]))).toBeTruthy();
+    expect(within(dialog).queryByText("Proxy or load balancer detected")).toBeNull();
   });
 
   it("Verify CA shows and requires the CA field; other modes hide it, keep it in the form and never send it", async () => {
@@ -548,7 +633,15 @@ describe("Database hosts page", () => {
       [
         "POST",
         /\/database-hosts\/test$/,
-        ok({ ok: true, error: null, serverVersion: "8.4.0", tls: true, latencyMs: 2 }),
+        ok({
+          ok: true,
+          error: null,
+          serverVersion: "8.4.0",
+          tls: true,
+          latencyMs: 2,
+          proxyDetected: false,
+          missingPrivileges: [],
+        }),
       ],
       ["POST", HOSTS, ok(makeDatabaseHost(), 201)],
     ]);
@@ -607,7 +700,15 @@ describe("Database hosts page", () => {
       [
         "POST",
         /\/database-hosts\/test$/,
-        ok({ ok: true, error: null, serverVersion: "11.4.2-MariaDB", tls: true, latencyMs: 3 }),
+        ok({
+          ok: true,
+          error: null,
+          serverVersion: "11.4.2-MariaDB",
+          tls: true,
+          latencyMs: 3,
+          proxyDetected: false,
+          missingPrivileges: [],
+        }),
       ],
       ["PATCH", /\/database-hosts\/[^/]+$/, ok(makeDatabaseHost({ tlsMode: "required" }))],
     ]);

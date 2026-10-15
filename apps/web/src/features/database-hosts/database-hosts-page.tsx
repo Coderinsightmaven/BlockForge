@@ -271,6 +271,14 @@ export function testTlsFact(result: DatabaseHostTestResult, mode: DatabaseTlsMod
     : "Encrypted (host not verified)";
 }
 
+export const PROXY_WARNING =
+  "A proxy or load balancer seems to sit in front of this database server. BlockForge cannot safely stop a statement the host stops answering, so such operations end with an unknown outcome until they are reconciled. Connect BlockForge directly to the database server where possible.";
+
+/** The admin account's missing global privileges (names come from the host test; rendered as text). */
+export function missingPrivilegesWarning(privileges: readonly string[]): string {
+  return `The admin account seems to lack: ${privileges.join(", ")}. (Privileges granted only through roles or on specific databases are not detected.)`;
+}
+
 export function TestResultView({
   result,
   mode,
@@ -291,17 +299,31 @@ export function TestResultView({
     testTlsFact(result, mode),
     result.latencyMs === null ? null : `${result.latencyMs} ms`,
   ].filter(Boolean);
-  return result.ok ? (
-    <Callout tone="success" title="Connection works" role="status" action={dismiss}>
-      {facts.length ? facts.join(" · ") : null}
-    </Callout>
-  ) : (
-    <Callout tone="danger" title="Connection failed" role="alert" action={dismiss}>
-      <span className="break-words">
-        {result.error ?? "The database host did not accept the connection."}
-      </span>
-      {facts.length ? <span className="mt-0.5 block text-xs">{facts.join(" · ")}</span> : null}
-    </Callout>
+  return (
+    <div className="flex flex-col gap-2">
+      {result.ok ? (
+        <Callout tone="success" title="Connection works" role="status" action={dismiss}>
+          {facts.length ? facts.join(" · ") : null}
+        </Callout>
+      ) : (
+        <Callout tone="danger" title="Connection failed" role="alert" action={dismiss}>
+          <span className="break-words">
+            {result.error ?? "The database host did not accept the connection."}
+          </span>
+          {facts.length ? <span className="mt-0.5 block text-xs">{facts.join(" · ")}</span> : null}
+        </Callout>
+      )}
+      {result.proxyDetected ? (
+        <Callout tone="warning" title="Proxy or load balancer detected">
+          {PROXY_WARNING}
+        </Callout>
+      ) : null}
+      {result.missingPrivileges.length ? (
+        <Callout tone="warning" title="Missing privileges">
+          <span className="break-words">{missingPrivilegesWarning(result.missingPrivileges)}</span>
+        </Callout>
+      ) : null}
+    </div>
   );
 }
 

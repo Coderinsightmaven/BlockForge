@@ -86,7 +86,7 @@ export function rotateBlockedReason(status: ServerDatabaseStatus): string | null
     case "deleting":
       return "The database is being deleted.";
     case "cleanup_pending":
-      return "The database awaits cleanup; delete it to retry the cleanup now.";
+      return "The database awaits cleanup; BlockForge removes it automatically shortly.";
     default:
       return null;
   }
@@ -133,7 +133,10 @@ export function databaseErrorMessage(err: unknown): string {
     case "busy":
       return "Another operation on this database is still in progress — try again in a moment.";
     case "not_ready":
-      return "This database is still being created or awaits cleanup.";
+      // Deleting a `cleanup_pending` database inside its safety window says when to retry.
+      return d.retryAfterMs !== undefined
+        ? `Cleanup is scheduled; you can retry deleting in about ${plural(Math.max(1, Math.ceil(d.retryAfterMs / 1000)), "second")} (BlockForge will also remove it on its own).`
+        : "This database is still being created or awaits cleanup.";
     case "password_unknown":
       return "The last password rotation could not be confirmed — rotate the password again.";
     case "has_databases":

@@ -23,7 +23,13 @@ import { qk } from "@/lib/query-keys";
 import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UNKNOWN_OUTCOME_MESSAGE } from "@/lib/databases";
-import DatabasesTab, { CLEANUP_PENDING_HINT, DATABASE_STATUS_META, remoteHint } from "./databases-tab";
+import DatabasesTab, {
+  CLEANUP_PENDING_HINT,
+  DATABASE_STATUS_META,
+  FORGET_DESCRIPTION,
+  databasesRefetchInterval,
+  remoteHint,
+} from "./databases-tab";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -569,7 +575,10 @@ describe("Databases tab: status", () => {
     expect(unknown.className).toContain("tone-warning");
     const cleanup = await tr("cleanup_pending");
     expect(within(cleanup).getByText("Cleanup pending").className).toContain("tone-warning");
-    expect(within(cleanup).getByText(CLEANUP_PENDING_HINT)).toBeTruthy();
+    expect(within(cleanup).getByText("BlockForge removes it automatically shortly.")).toBeTruthy();
+    expect(within(cleanup).getByText("Cleanup pending").getAttribute("title")).toBe(
+      "Cleanup pending — BlockForge removes it automatically shortly.",
+    );
 
     const deleteDisabled = (status: ServerDatabaseStatus) =>
       (screen.getByRole("button", { name: `Delete s55555555_${status}` }) as HTMLButtonElement).disabled;
@@ -611,7 +620,9 @@ describe("Databases tab: status", () => {
     expect(within(dialog).getByText(/awaits cleanup after a failed operation/)).toBeTruthy();
     expect(within(dialog).getByText(CLEANUP_PENDING_HINT)).toBeTruthy();
     expect(rotateButton(dialog).disabled).toBe(true);
-    expect(within(dialog).getByText(/delete it to retry the cleanup now/)).toBeTruthy();
+    expect(
+      within(dialog).getByText("The database awaits cleanup; BlockForge removes it automatically shortly."),
+    ).toBeTruthy();
   });
 
   it("creating: no reveal and no rotation", async () => {
@@ -731,6 +742,176 @@ describe("Databases tab: status", () => {
       }),
     );
     await waitFor(() => expect(calls.filter((c) => c.method === "GET" && LIST.test(c.url)).length).toBe(2));
+  });
+});
+
+describe("Databases tab: forget (leave on host)", () => {
+  const hostAdmin = makeMe({ permissions: ["database_hosts.manage"] });
+
+  it("is offered only to global database_hosts.manage holders", async () => {
+    routeFetch([["GET", LIST, ok([makeServerDatabase()])]]);
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await screen.findByText("s55555555_luckperms");
+    expect(screen.getByRole("button", { name: "Delete s55555555_luckperms" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Forget/ })).toBeNull();
+  });
+
+  it("needs the database name typed, explains what stays on the host and sends forget=true", async () => {
+    let rows = [makeServerDatabase()];
+    const calls = routeFetch([
+      ["GET", LIST, () => jsonResponse(rows)],
+      [
+        "DELETE",
+        /\/databases\/[^/]+$/,
+        () => {
+          rows = [];
+          return new Response(null, { status: 204 });
+        },
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={hostAdmin} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Forget s55555555_luckperms (leave on host)" }),
+    );
+    const confirm = await screen.findByRole("alertdialog");
+    expect(within(confirm).getByText("Forget database?")).toBeTruthy();
+    expect(within(confirm).getByText(FORGET_DESCRIPTION)).toBeTruthy();
+    expect(FORGET_DESCRIPTION).toBe(
+      "BlockForge forgets this database without contacting the host. The database and its account stay on the host and must be removed there by hand if it still exists.",
+    );
+    const button = within(confirm).getByRole("button", { name: "Forget database" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    await user.type(within(confirm).getByLabelText(/to confirm/), "s55555555_luckperms");
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    await user.click(button);
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.url)).toEqual([
+      `/api/v1/servers/${SERVER_ID}/databases/${DATABASE_ID}?forget=true`,
+    ]);
+    await waitFor(() => expect(screen.queryByText("s55555555_luckperms")).toBeNull());
+  });
+
+  it("a plain delete never sends forget", async () => {
+    const calls = routeFetch([
+      ["GET", LIST, ok([makeServerDatabase()])],
+      ["DELETE", /\/databases\/[^/]+$/, () => new Response(null, { status: 204 })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={hostAdmin} />);
+    await user.click(await screen.findByRole("button", { name: "Delete s55555555_luckperms" }));
+    const confirm = await screen.findByRole("alertdialog");
+    expect(within(confirm).getByText("Delete database?")).toBeTruthy();
+    await user.type(within(confirm).getByLabelText(/to confirm/), "s55555555_luckperms");
+    await user.click(within(confirm).getByRole("button", { name: "Delete database" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+    expect(calls.find((c) => c.method === "DELETE")!.url).toBe(
+      `/api/v1/servers/${SERVER_ID}/databases/${DATABASE_ID}`,
+    );
+  });
+
+  it("is unavailable while an operation runs", async () => {
+    const statuses: ServerDatabaseStatus[] = [
+      "ready",
+      "creating",
+      "rotating",
+      "deleting",
+      "password_unknown",
+      "cleanup_pending",
+    ];
+    routeFetch([
+      [
+        "GET",
+        LIST,
+        ok(
+          statuses.map((status, n) =>
+            makeServerDatabase({
+              id: `aaaaaaaa-aaaa-4aaa-8aaa-00000000000${n}`,
+              database: `s55555555_${status}`,
+              status,
+            }),
+          ),
+        ),
+      ],
+    ]);
+    wrap(<DatabasesTab server={makeServer({ databaseLimit: 10 })} me={hostAdmin} />);
+    await screen.findByText("s55555555_ready");
+    const forgetEnabled = (status: ServerDatabaseStatus) =>
+      !(
+        screen.getByRole("button", {
+          name: `Forget s55555555_${status} (leave on host)`,
+        }) as HTMLButtonElement
+      ).disabled;
+    expect(statuses.filter(forgetEnabled)).toEqual(["ready", "password_unknown", "cleanup_pending"]);
+  });
+});
+
+describe("Databases tab: cleanup_pending delete", () => {
+  it("inside the safety window, says when deleting can be retried", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    routeFetch([
+      ["GET", LIST, ok([makeServerDatabase({ status: "cleanup_pending" })])],
+      ["DELETE", /\/databases\/[^/]+$/, fail(409, "CONFLICT", { reason: "not_ready", retryAfterMs: 44_200 })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    const del = (await screen.findByRole("button", {
+      name: "Delete s55555555_luckperms",
+    })) as HTMLButtonElement;
+    expect(del.disabled).toBe(false);
+    await user.click(del);
+    const confirm = await screen.findByRole("alertdialog");
+    await user.type(within(confirm).getByLabelText(/to confirm/), "s55555555_luckperms");
+    await user.click(within(confirm).getByRole("button", { name: "Delete database" }));
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(errorToast).toHaveBeenCalledWith(
+      "Could not delete the database",
+      expect.objectContaining({
+        description: expect.stringContaining(
+          "Cleanup is scheduled; you can retry deleting in about 45 seconds (BlockForge will also remove it on its own).",
+        ),
+      }),
+    );
+  });
+});
+
+describe("Databases tab: polling", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("re-reads while an operation runs or a cleanup is pending, and never after a failed read", () => {
+    const db = (status: ServerDatabaseStatus) => ({ status });
+    expect(databasesRefetchInterval({ status: "success", data: [db("ready")] })).toBe(false);
+    expect(databasesRefetchInterval({ status: "success", data: [db("ready"), db("creating")] })).toBe(5_000);
+    expect(databasesRefetchInterval({ status: "success", data: [db("rotating")] })).toBe(5_000);
+    expect(databasesRefetchInterval({ status: "success", data: [db("cleanup_pending")] })).toBe(30_000);
+    expect(databasesRefetchInterval({ status: "pending", data: undefined })).toBe(false);
+    // A failed refetch keeps the previous data: still no polling.
+    expect(databasesRefetchInterval({ status: "error", data: [db("deleting")] })).toBe(false);
+  });
+
+  it("stops polling once a read fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let reads = 0;
+    routeFetch([
+      [
+        "GET",
+        LIST,
+        () => {
+          reads++;
+          return reads === 1
+            ? jsonResponse([makeServerDatabase({ status: "creating" })])
+            : jsonResponse(apiErrorBody("NOT_FOUND"), { status: 404 });
+        },
+      ],
+    ]);
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    expect(await screen.findByText("Creating…")).toBeTruthy();
+    expect(reads).toBe(1);
+    await act(() => vi.advanceTimersByTimeAsync(5_100));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(await screen.findByText("Could not load databases")).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(reads).toBe(2);
   });
 });
 

@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Trash2,
   TriangleAlert,
+  Unlink,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ComponentProps, FormEvent } from "react";
@@ -77,7 +78,25 @@ export function remoteHint(input: string): string {
   return `Saved as ${normalized}. ${REMOTE_HELP}`;
 }
 
-export const CLEANUP_PENDING_HINT = "The host is being cleaned up; you can delete it to retry now.";
+export const CLEANUP_PENDING_HINT = "BlockForge removes it automatically shortly.";
+
+export const FORGET_DESCRIPTION =
+  "BlockForge forgets this database without contacting the host. The database and its account stay on the host and must be removed there by hand if it still exists.";
+
+/**
+ * How often the list is re-read (there are no realtime events for databases): every 5 s while an
+ * operation talks to the host, every 30 s while a cleanup is pending, never after a failed read
+ * (403/404/5xx — the error is shown with Retry instead).
+ */
+export function databasesRefetchInterval(state: {
+  status: "pending" | "error" | "success";
+  data?: readonly Pick<ServerDatabase, "status">[] | undefined;
+}): number | false {
+  if (state.status === "error") return false;
+  if (state.data?.some((d) => statusInProgress(d.status))) return 5_000;
+  if (state.data?.some((d) => d.status === "cleanup_pending")) return 30_000;
+  return false;
+}
 
 /** `ServerDatabase.status` badges. `ready` shows none in the list. */
 export const DATABASE_STATUS_META: Record<ServerDatabaseStatus, StatusMeta> = {
@@ -116,7 +135,7 @@ export const DATABASE_STATUS_META: Record<ServerDatabaseStatus, StatusMeta> = {
     label: "Cleanup pending",
     tone: "warning",
     icon: TriangleAlert,
-    description: "Cleanup pending — the host is being cleaned up; you can delete it to retry now.",
+    description: "Cleanup pending — BlockForge removes it automatically shortly.",
   },
 };
 
@@ -516,18 +535,14 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
   const queryClient = useQueryClient();
   const [creating, setCreating] = useState(false);
   const [detailsId, setDetailsId] = useState<string | null>(null);
-  const [removing, setRemoving] = useState<ServerDatabase | null>(null);
+  /** Delete (drop on the host), or forget (BlockForge's record only). */
+  const [removing, setRemoving] = useState<{ db: ServerDatabase; forget: boolean } | null>(null);
   const list = useQuery({
     queryKey: qk.server(server.id).databases,
     // No realtime events: every mutation here updates and re-reads the list. While an operation is
     // talking to the host (or a cleanup is pending) the list is re-read until it settles.
     queryFn: ({ signal }) => serverDatabasesApi.list(server.id, signal),
-    refetchInterval: (q) =>
-      q.state.data?.some((d) => statusInProgress(d.status))
-        ? 5_000
-        : q.state.data?.some((d) => d.status === "cleanup_pending")
-          ? 30_000
-          : false,
+    refetchInterval: (q) => databasesRefetchInterval(q.state),
   });
   const databases = list.data ?? [];
   const details = databases.find((d) => d.id === detailsId) ?? null;
@@ -535,6 +550,8 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
   const isAdmin = serverCan(server, "servers.admin");
   const canCreate = serverActionable(server, "servers.databases.create");
   const canDelete = serverActionable(server, "servers.databases.delete");
+  // Forgetting leaves the database on the host: database host administrators only (the API enforces it).
+  const canForget = canDelete && hasGlobal(me, "database_hosts.manage");
   const limit = server.databaseLimit;
   const disabled = limit === 0;
   const atLimit = list.data !== undefined && list.data.length >= limit;
@@ -554,14 +571,16 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
     : blocked;
 
   const remove = useApiMutation({
-    mutationFn: (db: ServerDatabase) => serverDatabasesApi.remove(server.id, db.id),
-    success: (_r, db) => `Database ${db.database} deleted`,
+    mutationFn: ({ db, forget }: { db: ServerDatabase; forget: boolean }) =>
+      serverDatabasesApi.remove(server.id, db.id, { forget }),
+    success: (_r, { db, forget }) =>
+      forget ? `${db.database} forgotten (left on the host)` : `Database ${db.database} deleted`,
     silentError: true,
-    onError: (err) => {
-      toastDatabaseError(err, "Could not delete the database");
+    onError: (err, { forget }) => {
+      toastDatabaseError(err, forget ? "Could not forget the database" : "Could not delete the database");
       void queryClient.invalidateQueries({ queryKey: qk.server(server.id).databases });
     },
-    onSuccess: async (_r, db) => {
+    onSuccess: async (_r, { db }) => {
       setRemoving(null);
       if (detailsId === db.id) setDetailsId(null);
       queryClient.setQueryData<ServerDatabase[]>(qk.server(server.id).databases, (l) =>
@@ -690,9 +709,24 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
                               aria-label={`Delete ${db.database}`}
                               title={deleteBlockedReason(db.status) ? undefined : "Delete"}
                               disabled={deleteBlockedReason(db.status) !== null}
-                              onClick={() => setRemoving(db)}
+                              onClick={() => setRemoving({ db, forget: false })}
                             >
                               <Trash2 aria-hidden />
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      ) : null}
+                      {canForget ? (
+                        <Tooltip content={deleteBlockedReason(db.status) ?? "Forget (leave on host)"}>
+                          <span>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              aria-label={`Forget ${db.database} (leave on host)`}
+                              disabled={deleteBlockedReason(db.status) !== null}
+                              onClick={() => setRemoving({ db, forget: true })}
+                            >
+                              <Unlink aria-hidden />
                             </Button>
                           </span>
                         </Tooltip>
@@ -728,14 +762,18 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
       </Dialog>
       <ConfirmDialog
         // A fresh dialog per database: the typed confirmation never carries over.
-        key={removing?.id ?? "none"}
+        key={removing ? `${removing.db.id}:${removing.forget}` : "none"}
         open={removing !== null}
         onOpenChange={(o) => !o && setRemoving(null)}
-        title="Delete database?"
-        description={`${removing?.database ?? ""} and everything stored in it are deleted permanently, together with its user ${removing?.username ?? ""}. This cannot be undone.`}
-        confirmLabel="Delete database"
+        title={removing?.forget ? "Forget database?" : "Delete database?"}
+        description={
+          removing?.forget
+            ? FORGET_DESCRIPTION
+            : `${removing?.db.database ?? ""} and everything stored in it are deleted permanently, together with its user ${removing?.db.username ?? ""}. This cannot be undone.`
+        }
+        confirmLabel={removing?.forget ? "Forget database" : "Delete database"}
         destructive
-        confirmText={removing?.database}
+        confirmText={removing?.db.database}
         pending={remove.isPending}
         onConfirm={() => removing && remove.mutate(removing)}
       />

@@ -40,8 +40,14 @@ export const serverDatabasesApi = {
     apiClient.post(`/servers/${enc(serverId)}/databases/${enc(databaseId)}/rotate-password`, {
       schema: ServerDatabase,
     }),
-  remove: (serverId: string, databaseId: string) =>
-    apiClient.delete<void>(`/servers/${enc(serverId)}/databases/${enc(databaseId)}`),
+  /**
+   * Drops the database and its account on the host. `forget` (global `database_hosts.manage`) only removes
+   * BlockForge's record and leaves both on the host — for a host that is permanently gone.
+   */
+  remove: (serverId: string, databaseId: string, opts: { forget?: boolean } = {}) =>
+    apiClient.delete<void>(`/servers/${enc(serverId)}/databases/${enc(databaseId)}`, {
+      query: opts.forget ? { forget: "true" } : undefined,
+    }),
 };
 
 export const databaseHostsApi = {
