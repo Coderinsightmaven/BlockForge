@@ -1156,18 +1156,23 @@ describe("database status and the maintenance sweep", () => {
   it("shutdown does not wait for an abort procedure in progress (KILL sent to a host that stopped answering)", async () => {
     const { t: app, owner } = await boot({ queryTimeoutMs: 3000, sessionLimits: false, abortStatementTimeoutMs: 30_000 });
     await connectSimNode(app, owner, { agents });
-    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("DROP DATABASE") || sql.startsWith("KILL QUERY"));
+    const proxy = await freezingProxy(MARIADB, (sql) => sql.startsWith("KILL QUERY"));
     await createHost(owner, MARIADB, { host: "127.0.0.1", port: proxy.port, tlsMode: "disabled" });
     const srv = await paperServer(owner, { databaseLimit: 1 });
     const db = ServerDatabase.parse((await owner.post(`/servers/${srv.id}/databases`, { name: "killing" })).json());
+    // DROP DATABASE runs on the host and waits for a metadata lock: after 3 s the abort procedure finds it in the
+    // process list and sends KILL QUERY, which gets no answer (30 s timeout).
+    const release = await tableLock(MARIADB, db.database);
     const deleting = owner.delete(`/servers/${srv.id}/databases/${db.id}`);
-    // The DROP got no answer within 3 s and the KILL QUERY (30 s timeout) is waiting too.
-    await poll(async () => proxy.frozen() === 2, 20_000, 50);
+    await poll(async () => proxy.frozen() === 1, 20_000, 50);
+    // Both the shutdown and the request waiting on the abort procedure end promptly (inject requests are not
+    // awaited by close(), so the request is timed as well — a real listener waits for it).
     const t0 = Date.now();
-    await app.close();
+    const [, res] = await Promise.all([app.close(), deleting]);
     t = null;
-    expect(Date.now() - t0).toBeLessThan(10_000);
-    const res = await deleting;
+    const elapsed = Date.now() - t0;
+    await release();
+    expect(elapsed).toBeLessThan(10_000);
     expect(res.statusCode, res.body).toBe(503);
     expect(res.json().error.details).toMatchObject({ reason: "host_error", code: "SHUTDOWN", unknownOutcome: true });
     const { rows } = await testPool().query("SELECT state, operation FROM server_databases WHERE id = $1", [db.id]);
