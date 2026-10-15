@@ -428,7 +428,11 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   CA ⇔ `verify_ca`). `DatabaseHostTestResult.tls` only says the session was encrypted. The UI labels the modes
   "host not verified" / "certificate verified" accordingly. `required` stays available because many self-hosted
   servers present auto-generated certificates no CA vouches for; use `verify_ca` with the server's CA (or its
-  self-signed certificate) wherever the network between control plane and host is not trusted.
+  self-signed certificate) wherever the network between control plane and host is not trusted. **Pin a private CA or
+  the server's own certificate, never a public CA**: the host name is not checked, so any certificate the pinned CA
+  issued (for any name) would be accepted. A `verify_identity` mode (host name check) is not offered: `mysql2` skips
+  the name check for IP-literal hosts and hosts are commonly addressed by IP; pinning the server's own certificate
+  gives the stronger guarantee.
 * **Names.** Database `s<shortId>_<name>` (`name` = 1–48 of `[a-z0-9_]`, ≤ 58 chars in total), username
   `u<shortId>_<10 random [a-z0-9]>` (20 chars), password 32 random chars of `[A-Za-z0-9-_.~]` (at least one of each
   class, so `validate_password` MEDIUM accepts it). `remote` ("connections from", default `%`) is normalised by
@@ -449,31 +453,60 @@ to the hosts itself with the host's admin account (`mysql2`, one short-lived con
   `servers.admin` are not limited (as for backups). Concurrent creations are serialised per server. Lowering the
   limit below the usage keeps the existing databases.
 * **No transaction across host I/O.** Every create/rotate/delete claims the row in a short transaction
-  (`server_databases.operation` = `creating`/`rotating`/`deleting` + a token), talks to the host with no Postgres
-  transaction, lock or pooled connection held, then records the outcome in a second short transaction that is
-  conditional on still holding the claim. A second create/rotate/delete of the same database meanwhile → 409
-  `{reason: "busy"}` (reading the password is not blocked). A claim older than 5 minutes (a crashed process; the
-  longest host operation is about 72 s with the default timeouts) is taken over.
-* **Create** reserves the row (limits, host capacity, names; claimed `creating`) in one short transaction, then
-  creates database, user and grant on the host. On failure it removes only what this request created — a
-  pre-existing database (409 `{reason: "name_taken"}`) or account (502 `ER_CANNOT_USER`) of the same name is never
-  dropped or altered — and the row; host failures → 502 `UPSTREAM_ERROR` `{reason: "host_error", code}`. Refused
-  while the server is being deleted (409 `INVALID_STATE`); if the server is deleted while the host is contacted,
-  the created objects are dropped again.
-* **Rotate**: claim → `ALTER USER` → store the new (encrypted) password and release. A host failure releases the
-  claim and keeps the old password everywhere (502). Failure window: if the host applied `ALTER USER` but its answer
-  was lost (timeout) or the new password could not be stored, the stored password is stale until the next
-  successful rotation; **rotating again fixes it** (every rotation sets the password from scratch). If the database
-  was deleted while rotating → 409 `busy`.
-* **Delete**: claim → `DROP DATABASE IF EXISTS` + `DROP USER IF EXISTS` → delete the row. A host failure releases
-  the claim and keeps the row (502; retry). If the row cannot be deleted afterwards the claim is released and a retry
-  drops again (idempotent) and deletes it.
+  (`server_databases.operation` = `creating`/`rotating`/`deleting` + a token, timestamps from the database clock),
+  talks to the host with no Postgres transaction, lock or pooled connection held, then records the outcome in a
+  second short transaction that is conditional on still holding the claim. A second create/rotate/delete of the same
+  database meanwhile → 409 `{reason: "busy"}`. A claim older than the stale limit (default 5 minutes; checked at
+  startup to exceed the longest host operation, ≈ 4 minutes with the default timeouts including the create clean-up)
+  belongs to a crashed process: the maintenance sweep (every minute and at start) resolves it, and claim takeovers are
+  audited (`server.database.claim_takeover`).
+* **Statements the host does not answer.** mysql2's statement timeout only reports an error: the statement keeps
+  running on the host (e.g. waiting behind `FLUSH TABLES WITH READ LOCK` or a metadata lock) and may take effect
+  later. Therefore (1) every admin session sets `lock_wait_timeout` (and `max_statement_time` on MariaDB; MySQL's
+  `max_execution_time` covers SELECTs only) to a few seconds below the client timeout, so the host aborts such a
+  statement itself with an error — nothing is changed; (2) if no answer arrives anyway (client timeout, connection
+  lost, cancellation), the control plane sends `KILL QUERY <thread>` from a fresh connection, confirms in
+  `information_schema.PROCESSLIST` that the statement is gone, kills the thread, destroys the socket and never reuses
+  that session; (3) the outcome is then decided by looking at the host (database / account existence, the account's
+  authentication string). Only if the statement cannot be confirmed stopped is the outcome unknown (502 with
+  `unknownOutcome: true`) and the database's `status` says what happens next. The admin account therefore needs
+  `SELECT` on `mysql.user` (and may kill its own threads, which needs no privilege).
+* **Status** (`ServerDatabase.status`): `creating` / `rotating` / `deleting` while that operation runs; `ready`;
+  `password_unknown` (a rotation's outcome could not be determined — the password route answers 409
+  `{reason: "password_unknown"}`; rotating again fixes it); `cleanup_pending` (a failed create or delete whose host
+  side may (partly) exist: the sweep drops it by name with `IF EXISTS` once a late statement can no longer land —
+  host statement limit + 60 s — and removes the entry; deleting it retries at once). Password and rotation answer 409
+  `{reason: "not_ready"}` while a database is `creating` or `cleanup_pending`.
+* **Create** reserves the row (limits, host capacity, names; state `reserved`, claimed `creating`) in one short
+  transaction, then on the host checks that neither the database nor an account with the generated name exists
+  (pre-existing database → 409 `{reason: "name_taken"}`, pre-existing account → 502 `ER_CANNOT_USER`; neither is ever
+  touched) and marks the row `provisioning` — from then on whatever exists under those names is ours — and creates
+  database, account and grant. On failure everything that may have been created is dropped by name and the row
+  removed; if that clean-up fails or a statement could not be confirmed stopped, the row stays `cleanup_pending`
+  (audited) for the sweep. Host failures → 502 `UPSTREAM_ERROR` `{reason: "host_error", code}`. Refused while the
+  server is being deleted (409 `INVALID_STATE`); if the server is deleted while the host is contacted, the created
+  objects are dropped again. A creation abandoned by a crash is removed by the sweep (`reserved`: row only;
+  `provisioning`: drop by name first).
+* **Rotate** (`ready` or `password_unknown`): claim → read the account's authentication string → `ALTER USER` →
+  store the new (encrypted) password, `ready`, release. Refused by the host → the old password stays valid (502). No
+  answer → the statement is stopped and the authentication string compared: changed → applied, the new password is
+  stored (200); unchanged → nothing happened (502); undeterminable → `password_unknown` (502 `unknownOutcome`). If the
+  database was deleted meanwhile → 404; taken over → 409 `busy`.
+* **Delete**: claim → `DROP DATABASE IF EXISTS` + `DROP USER IF EXISTS` → delete the row (conditional on the claim;
+  if the entry vanished meanwhile → 404 and no success is recorded). Refused by the host → the row stays (502; retry,
+  the drops are idempotent). No answer → stopped and inspected: both gone → deleted; otherwise 502 (retry); not
+  confirmed stopped → `cleanup_pending` (the sweep finishes it).
 * **Server deletion** gets a `databases` step after the container is removed: every database of the server is
-  dropped on its host (one connection per host); what cannot be dropped is written to the job log as a warning and
-  audited (`server.database.delete`, `outcome: failed`, with host, database and username to drop by hand). The step
-  never fails the job; the rows go with the server.
+  dropped on its host, each row deleted (and audited) as soon as its database is gone. One session per host; after an
+  unanswered statement (stopped and inspected as above) the next database gets a fresh session, a host that cannot be
+  reached marks its remaining databases failed. The step honours job cancellation (the running statement is killed,
+  the job ends cancelled, the server stays) and its own deadline (5 minutes; databases not reached are recorded as
+  failed with code `DEADLINE`). What cannot be dropped is written to the job log as a warning and audited
+  (`server.database.delete`, `outcome: failed`, with host, database and username to drop by hand); the step never
+  fails the job and the remaining rows go with the server.
 * **Audit**: `database_host.create|update|delete`, `server.database.create|rotate_password|delete` (also failed
-  attempts), `server.database.password.view` (every reveal). No password, hash or SQL statement is ever recorded.
+  attempts, with `cleanupPending` / `passwordUnknown` where relevant), `server.database.claim_takeover`,
+  `server.database.password.view` (every reveal). No password, hash or SQL statement is ever recorded.
 * **Rate limits**: 60 requests/minute per client IP and route on the routes that reach a host or reveal a password.
 * No realtime events: all mutations are synchronous; clients refetch the list after their own changes.
 

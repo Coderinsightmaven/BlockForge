@@ -107,6 +107,8 @@ focus moved to Phase 5. Not blocking and still open: the live-only gaps in 1.3 a
   - the web Databases tab and Database hosts page against the real control plane (component tests only so far);
   - MySQL 8.4 is an opt-in compose profile (memory on small dev VMs), so CI runs the database tests against MariaDB
     only; the MySQL tests (caching_sha2_password, `partial_revokes`) pass locally with `--profile mysql`;
+  - no `verify_identity` TLS mode (host name check): mysql2 skips it for IP-literal hosts; `verify_ca` with a private CA
+    or the server's own certificate is documented instead;
   - Pterodactyl's per-database `max_connections` (`MAX_USER_CONNECTIONS`) is not implemented;
   - admin view of all databases on a host (only the count is shown).
 - **Phase 6 — Velocity & networks:**
