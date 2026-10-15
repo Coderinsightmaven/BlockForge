@@ -1,7 +1,7 @@
 import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { pino } from "pino";
-import { describeMysqlError, MysqlConnector, scrub } from "../../src/databases/mysql.js";
+import { abortPlan, describeMysqlError, MysqlConnector, nonceComment, scrub, type ServerIdentity } from "../../src/databases/mysql.js";
 import { ServerDatabasesService, type ServerDatabasesDeps } from "../../src/databases/service.js";
 import {
   alterUserPasswordSql,
@@ -122,12 +122,63 @@ describe("operation claims", () => {
     expect(new ServerDatabasesService(deps(c, 20 * 60_000)).staleMs).toBe(20 * 60_000);
     // The host-side statement limit stays below the client timeout; cleanup waits until a late statement cannot land.
     expect(c.sessionLimitS).toBe(12);
-    // Abort procedure: connect 10 s + identity ≤ 2 × 5 s + KILL QUERY 5 s + confirmation 5 s (+ last poll 5 s) + KILL 5 s.
-    expect(c.abortBudgetMs).toBe(40_000);
+    // Abort procedure: connect 10 s + identity ≤ 2 × 5 s + process-list check 5 s + KILL QUERY 5 s + confirmation
+    // 5 s (+ last poll 5 s) + KILL 5 s.
+    expect(c.abortBudgetMs).toBe(45_000);
     // A session: connect + (setup 4 + statements) × statement timeout + abort + close.
-    expect(c.maxSessionMs(2)).toBe(10_000 + 6 * 15_000 + 40_000 + 2000);
+    expect(c.maxSessionMs(2)).toBe(10_000 + 6 * 15_000 + 45_000 + 2000);
     expect(s.cleanupDelayMs).toBe(72_000);
     expect(new MysqlConnector({ logger: pino({ level: "silent" }), sessionLimits: false }).sessionLimitS).toBeNull();
+  });
+});
+
+describe("abortPlan (the KILL decision)", () => {
+  const server = (over: Partial<ServerIdentity> = {}): ServerIdentity => ({
+    connectionId: 41,
+    serverId: "1",
+    hostname: "db-a",
+    port: "3306",
+    version: "11.4.13-MariaDB",
+    uid: "uid-a",
+    ...over,
+  });
+  const NONCE = "00112233aabbccdd";
+  const origin = { handshakeId: 41, identity: server() };
+  const fresh = { handshakeId: 42, identity: server({ connectionId: 42 }) };
+  const ourRow = { user: "admin", info: `/* bf:${NONCE} */ DROP DATABASE IF EXISTS \`s0123abcd_x\`` };
+  const plan = (over: Partial<Parameters<typeof abortPlan>[0]>) => abortPlan({ origin, fresh, row: ourRow, adminUser: "admin", nonce: NONCE, ...over });
+
+  it("kills only a thread that runs our nonce-tagged statement as the admin user, on the same server, both direct", () => {
+    expect(plan({})).toBe("kill");
+    // Same greeting id but another server behind a load balancer: its thread 41 runs something else.
+    expect(plan({ fresh: { handshakeId: 42, identity: server({ connectionId: 42, hostname: "db-b", uid: "uid-b" }) }, row: { user: "customer", info: "SELECT 1" } })).toBe("unknown");
+    expect(plan({ fresh: { handshakeId: 42, identity: server({ connectionId: 42, uid: "uid-b" }) } })).toBe("unknown");
+    // A proxy rewrote a greeting id.
+    expect(plan({ origin: { handshakeId: 900041, identity: server() } })).toBe("unknown");
+    expect(plan({ fresh: { handshakeId: 900042, identity: server({ connectionId: 42 }) } })).toBe("unknown");
+    // Identity unreadable on either side.
+    expect(plan({ origin: { handshakeId: 41, identity: null } })).toBe("unknown");
+    expect(plan({ fresh: { handshakeId: 42, identity: null } })).toBe("unknown");
+    // Another user's thread, or our user without our nonce: no KILL.
+    expect(plan({ row: { user: "customer", info: ourRow.info } })).toBe("unknown");
+    expect(plan({ row: { user: "admin", info: "/* bf:ffffffffffffffff */ SELECT 1" } })).toBe("stopped");
+    expect(plan({ nonce: null })).toBe("stopped");
+  });
+
+  it("counts a statement as stopped without KILL only on a server proven by its unique id", () => {
+    expect(plan({ row: null })).toBe("stopped");
+    expect(plan({ row: { user: "admin", info: null } })).toBe("stopped");
+    // Older MariaDB without @@server_uid: an absent thread proves nothing (it may be another server).
+    const weak = { handshakeId: 41, identity: server({ uid: null }) };
+    const weakFresh = { handshakeId: 42, identity: server({ connectionId: 42, uid: null }) };
+    expect(plan({ origin: weak, fresh: weakFresh, row: null })).toBe("unknown");
+    expect(plan({ origin: weak, fresh: weakFresh, row: { user: "admin", info: null } })).toBe("unknown");
+    // … but the nonce still identifies our running statement.
+    expect(plan({ origin: weak, fresh: weakFresh })).toBe("kill");
+  });
+
+  it("tags every statement with a nonce comment", () => {
+    expect(nonceComment("abc")).toBe("/* bf:abc */ ");
   });
 });
 
