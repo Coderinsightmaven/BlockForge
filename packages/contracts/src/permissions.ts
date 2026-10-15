@@ -25,6 +25,11 @@ export const PERMISSIONS = {
   "nodes.enroll": ["global"],
   /** Create/delete/alias the IP:port allocation pools of nodes. */
   "allocations.manage": ["global", "node"],
+  /**
+   * MySQL/MariaDB database hosts: connection settings incl. the write-only admin password, test connection,
+   * and picking a host when creating a server database. The admin account reaches every database on the host.
+   */
+  "database_hosts.manage": ["global"],
 
   /** Server templates (built-in Minecraft templates and imported eggs). */
   "templates.view": ["global"],
@@ -57,6 +62,14 @@ export const PERMISSIONS = {
   "servers.backups.restore": ["global", "node", "network", "server"],
   "servers.backups.delete": ["global", "node", "network", "server"],
   "servers.backups.download": ["global", "node", "network", "server"],
+  /** List the server's MySQL databases (names, users, hosts — never passwords). Pterodactyl `database.read`. */
+  "servers.databases.view": ["global", "node", "network", "server"],
+  "servers.databases.create": ["global", "node", "network", "server"],
+  /** Rotate a database password (Pterodactyl `database.update`). */
+  "servers.databases.update": ["global", "node", "network", "server"],
+  "servers.databases.delete": ["global", "node", "network", "server"],
+  /** Reveal database passwords (Pterodactyl `database.view_password`); deliberately not a `.view` permission. */
+  "servers.databases.view_password": ["global", "node", "network", "server"],
   /** Log in to the server's files over SFTP (read access additionally needs files.read, writes files.write). */
   "servers.files.sftp": ["global", "node", "network", "server"],
   "servers.startup.view": ["global", "node", "network", "server"],
@@ -102,6 +115,7 @@ export const BUILTIN_ROLES = {
       "nodes.manage",
       "nodes.enroll",
       "allocations.manage",
+      "database_hosts.manage",
       "alerts.manage",
       "servers.control",
       "servers.console.view",
@@ -127,6 +141,10 @@ export const BUILTIN_ROLES = {
       "servers.backups.restore",
       "servers.backups.delete",
       "servers.backups.download",
+      "servers.databases.create",
+      "servers.databases.update",
+      "servers.databases.delete",
+      "servers.databases.view_password",
       "servers.files.sftp",
       "servers.startup.edit",
       "servers.startup.image",
@@ -163,6 +181,11 @@ export const BUILTIN_ROLES = {
       "servers.backups.restore",
       "servers.backups.delete",
       "servers.backups.download",
+      "servers.databases.view",
+      "servers.databases.create",
+      "servers.databases.update",
+      "servers.databases.delete",
+      "servers.databases.view_password",
       "servers.files.sftp",
       "servers.startup.view",
       "servers.startup.edit",
