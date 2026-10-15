@@ -149,5 +149,5 @@ sessions, Velocity sessions, Zip64 via the real agent, upload replace/allow-inco
 `docs/OPEN_WORK.md` §1.3. **Phase 5 databases implemented** (database hosts + per-server databases, tested against
 MariaDB 11.4 and MySQL 8.4; review and live run pending, `docs/OPEN_WORK.md` §3); next the remaining Phase 3–4
 features (`docs/OPEN_WORK.md` §2). Web route budget enforced in CI (`bundle:check`, routes + lazy-tab variants
-≤ 300 KiB); tightest variant `/settings#api-keys` 296.6 KiB (`/servers/$serverId#databases` 287.2 KiB,
-`/admin/database-hosts` 273.8 KiB).
+≤ 300 KiB); tightest variant `/settings#api-keys` 296.6 KiB (`/servers/$serverId#databases` 287.4 KiB,
+`/admin/database-hosts` 274.4 KiB).
