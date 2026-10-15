@@ -152,6 +152,7 @@ describe("database host contracts", () => {
       remote: "%",
       createdAt: 1,
       passwordRotatedAt: null,
+      status: "ready",
     };
     expect(ServerDatabase.safeParse(db).success).toBe(true);
     expect(ServerDatabase.safeParse({ ...db, password: "x" }).success).toBe(false);

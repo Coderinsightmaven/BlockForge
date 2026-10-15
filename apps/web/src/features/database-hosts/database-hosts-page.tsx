@@ -64,6 +64,10 @@ export interface HostForm {
 export const TLS_NOT_VERIFIED_HELP =
   "This protects only against passive sniffing: an active attacker on the network path can impersonate the host (and receive the admin password). Use Verify CA to rule that out.";
 
+/** Verify CA checks the chain, not the host name: a public CA would let any of its certificates pass. */
+export const VERIFY_CA_PIN_WARNING =
+  "Pin a private CA or the database server's own certificate — not a public CA: the host name is not checked, so any certificate that CA issued would be accepted.";
+
 export const TLS_MODES: { value: DatabaseTlsMode; label: string; help: string }[] = [
   {
     value: "disabled",
@@ -83,7 +87,7 @@ export const TLS_MODES: { value: DatabaseTlsMode; label: string; help: string }[
   {
     value: "verify_ca",
     label: "Verify CA (encrypted, certificate verified against your CA)",
-    help: "Always encrypted, and the server's certificate must chain to the CA certificate below. The host name in the certificate is not checked.",
+    help: `Always encrypted, and the server's certificate must chain to the CA certificate below. ${VERIFY_CA_PIN_WARNING}`,
   },
 ];
 
@@ -253,7 +257,7 @@ export function tlsBadge(mode: DatabaseTlsMode): { label: string; tone: Tone; ti
       return {
         label: "Verify CA",
         tone: "success",
-        title: "Encrypted; the host's certificate is verified against the configured CA.",
+        title: `Encrypted; certificate verified against your CA; host name not checked. ${VERIFY_CA_PIN_WARNING}`,
       };
   }
 }
@@ -323,12 +327,9 @@ function HostDialog({
   const canListNodes = canAny(me, "nodes.view");
   const nodes = useQuery({ ...nodesQuery, enabled: canListNodes, refetchInterval: false });
   const set = <K extends keyof HostForm>(k: K, v: HostForm[K]) => {
-    // Leaving Verify CA drops the CA: it is never sent with another mode.
-    setForm((f) =>
-      k === "tlsMode" && !tlsModeVerifies(v as DatabaseTlsMode)
-        ? { ...f, tlsMode: v as DatabaseTlsMode, tlsCaCertificate: "" }
-        : { ...f, [k]: v },
-    );
+    // The CA stays in the form across TLS mode changes (hidden outside Verify CA, restored when switching
+    // back); `effectiveCa` keeps it out of every request made with another mode.
+    setForm((f) => ({ ...f, [k]: v }));
     setResult(null);
     setErrors((e) => {
       if (!(k in e) && !("form" in e)) return e;
@@ -514,7 +515,7 @@ function HostDialog({
               label="CA certificate"
               required
               error={errors.tlsCaCertificate}
-              hint="PEM of the CA (or CA chain) that issued the database server's certificate."
+              hint="PEM of the private CA that issued the database server's certificate, or of that certificate itself."
             >
               <Textarea
                 value={form.tlsCaCertificate}

@@ -218,6 +218,7 @@ export function makeServerDatabase(overrides: Partial<ServerDatabaseT> = {}): Se
     database: "s55555555_luckperms",
     username: "u55555555_k3j9x0q2ab",
     remote: "%",
+    status: "ready",
     createdAt: 1_760_000_000_000,
     passwordRotatedAt: null,
     ...overrides,

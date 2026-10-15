@@ -1,5 +1,16 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Database, Eye, EyeOff, KeyRound, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  CircleCheck,
+  Database,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Trash2,
+  TriangleAlert,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ComponentProps, FormEvent } from "react";
 import {
@@ -9,15 +20,20 @@ import {
   normalizeDatabaseRemote,
   serverDatabaseFullName,
 } from "@blockforge/contracts";
-import type { DatabaseHost, Me, Server, ServerDatabase } from "@blockforge/contracts";
+import type { DatabaseHost, Me, Server, ServerDatabase, ServerDatabaseStatus } from "@blockforge/contracts";
 import { databaseHostsApi, serverDatabasesApi } from "@/lib/api/databases-api";
 import { fieldErrorsFrom, isApiError } from "@/lib/api/errors";
 import {
   connectionString,
   databaseErrorDetails,
   databaseErrorMessage,
+  deleteBlockedReason,
   hostPort,
   jdbcUrl,
+  passwordBlockedReason,
+  rotateBlockedReason,
+  statusAllowsPassword,
+  statusInProgress,
   toastDatabaseError,
 } from "@/lib/databases";
 import { useApiMutation } from "@/lib/mutations";
@@ -43,6 +59,8 @@ import {
 import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { StatusBadge } from "@/components/ui/status";
+import type { StatusMeta } from "@/components/ui/status";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip } from "@/components/ui/tooltip";
 
@@ -58,6 +76,49 @@ export function remoteHint(input: string): string {
   if (normalized === null || normalized === input.trim()) return REMOTE_HELP;
   return `Saved as ${normalized}. ${REMOTE_HELP}`;
 }
+
+export const CLEANUP_PENDING_HINT = "The host is being cleaned up; you can delete it to retry now.";
+
+/** `ServerDatabase.status` badges. `ready` shows none in the list. */
+export const DATABASE_STATUS_META: Record<ServerDatabaseStatus, StatusMeta> = {
+  creating: {
+    label: "Creating…",
+    tone: "info",
+    icon: Loader2,
+    description: "The database and its user are being created on the host.",
+  },
+  ready: {
+    label: "Ready",
+    tone: "success",
+    icon: CircleCheck,
+    description: "Usable; the stored password is the account's password.",
+  },
+  rotating: {
+    label: "Rotating password…",
+    tone: "info",
+    icon: RefreshCw,
+    description: "A new password is being set on the host. The current password works until it finishes.",
+  },
+  deleting: {
+    label: "Deleting…",
+    tone: "info",
+    icon: Loader2,
+    description: "The database and its user are being dropped on the host.",
+  },
+  password_unknown: {
+    label: "Password unknown — rotate again",
+    tone: "warning",
+    icon: TriangleAlert,
+    description:
+      "The last password rotation could not be confirmed, so the stored password may be wrong. Rotate the password again.",
+  },
+  cleanup_pending: {
+    label: "Cleanup pending",
+    tone: "warning",
+    icon: TriangleAlert,
+    description: "Cleanup pending — the host is being cleaned up; you can delete it to retry now.",
+  },
+};
 
 function hostFull(h: Pick<DatabaseHost, "maxDatabases" | "databaseCount">): boolean {
   return h.maxDatabases !== null && h.databaseCount >= h.maxDatabases;
@@ -129,6 +190,8 @@ function CreateDatabaseDialog({
     success: (db) => `Database ${db.database} created`,
     silentError: true,
     onError: (err) => {
+      // The failure may have left a database behind (e.g. `cleanup_pending`): show the current list.
+      void queryClient.invalidateQueries({ queryKey: qk.server(server.id).databases });
       if (databaseErrorDetails(err)?.reason === "name_taken") {
         setErrors({ name: databaseErrorMessage(err) });
         return;
@@ -280,7 +343,7 @@ function CreateDatabaseDialog({
  * never in the query or mutation cache, never in storage. `hide` (and unmounting) drops it and
  * abandons a request still in flight.
  */
-function usePasswordReveal(serverId: string, databaseId: string) {
+function usePasswordReveal(serverId: string, databaseId: string, onFailed: () => void) {
   const [password, setPassword] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const inFlight = useRef<AbortController | null>(null);
@@ -300,7 +363,10 @@ function usePasswordReveal(serverId: string, databaseId: string) {
       const r = await serverDatabasesApi.password(serverId, databaseId, ctrl.signal);
       if (!ctrl.signal.aborted) setPassword(r.password);
     } catch (err) {
-      if (!ctrl.signal.aborted) toastDatabaseError(err, "Could not show the password");
+      if (!ctrl.signal.aborted) {
+        toastDatabaseError(err, "Could not show the password");
+        onFailed();
+      }
     } finally {
       if (inFlight.current === ctrl) {
         inFlight.current = null;
@@ -327,15 +393,22 @@ function DetailRow({ label, value, copy = true }: { label: string; value: string
 
 function DetailsBody({ server, database }: { server: Server; database: ServerDatabase }) {
   const queryClient = useQueryClient();
-  const secret = usePasswordReveal(server.id, database.id);
+  // The database's status may have changed (e.g. `password_unknown`): re-read the list.
+  const refetchList = () => void queryClient.invalidateQueries({ queryKey: qk.server(server.id).databases });
+  const secret = usePasswordReveal(server.id, database.id, refetchList);
   const [rotating, setRotating] = useState(false);
   const canViewPassword = serverCan(server, "servers.databases.view_password");
   const canRotate = serverActionable(server, "servers.databases.update");
+  const passwordBlocked = passwordBlockedReason(database.status);
+  const rotateBlocked = rotateBlockedReason(database.status);
   const rotate = useApiMutation({
     mutationFn: () => serverDatabasesApi.rotatePassword(server.id, database.id),
     success: "Password rotated",
     silentError: true,
-    onError: (err) => toastDatabaseError(err, "Could not rotate the password"),
+    onError: (err) => {
+      toastDatabaseError(err, "Could not rotate the password");
+      refetchList();
+    },
     onSuccess: async (updated) => {
       // A revealed password no longer works: drop it.
       secret.hide();
@@ -354,6 +427,17 @@ function DetailsBody({ server, database }: { server: Server; database: ServerDat
           <span className="font-mono">{database.database}</span> on {database.hostName}
         </DialogDescription>
       </DialogHeader>
+      {database.status === "password_unknown" ? (
+        <Callout tone="warning" title="Password unknown — rotate again">
+          {DATABASE_STATUS_META.password_unknown.description}
+        </Callout>
+      ) : database.status === "cleanup_pending" ? (
+        <Callout tone="warning" title="Cleanup pending">
+          {CLEANUP_PENDING_HINT}
+        </Callout>
+      ) : database.status !== "ready" ? (
+        <StatusBadge meta={DATABASE_STATUS_META[database.status]} className="self-start" />
+      ) : null}
       <dl className="flex flex-col gap-2 text-sm">
         <DetailRow label="Endpoint" value={hostPort(database.host, database.port)} />
         <DetailRow label="Database" value={database.database} />
@@ -366,6 +450,8 @@ function DetailsBody({ server, database }: { server: Server; database: ServerDat
               <span className="text-xs text-muted-foreground">
                 Hidden — showing passwords needs the “View passwords” permission.
               </span>
+            ) : passwordBlocked !== null ? (
+              <span className="text-xs text-muted-foreground">{passwordBlocked}</span>
             ) : secret.password !== null ? (
               <>
                 <code className="min-w-0 font-mono text-xs break-all" aria-label="Password">
@@ -401,11 +487,12 @@ function DetailsBody({ server, database }: { server: Server; database: ServerDat
         </p>
       ) : null}
       {canRotate ? (
-        <DialogFooter className="sm:justify-start">
-          <Button variant="outline" onClick={() => setRotating(true)}>
+        <DialogFooter className="items-center sm:justify-start">
+          <Button variant="outline" onClick={() => setRotating(true)} disabled={rotateBlocked !== null}>
             <RefreshCw aria-hidden />
             Rotate password
           </Button>
+          {rotateBlocked ? <span className="text-xs text-muted-foreground">{rotateBlocked}</span> : null}
         </DialogFooter>
       ) : null}
       <ConfirmDialog
@@ -432,8 +519,15 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
   const [removing, setRemoving] = useState<ServerDatabase | null>(null);
   const list = useQuery({
     queryKey: qk.server(server.id).databases,
-    // No realtime events: every mutation here updates and re-reads the list.
+    // No realtime events: every mutation here updates and re-reads the list. While an operation is
+    // talking to the host (or a cleanup is pending) the list is re-read until it settles.
     queryFn: ({ signal }) => serverDatabasesApi.list(server.id, signal),
+    refetchInterval: (q) =>
+      q.state.data?.some((d) => statusInProgress(d.status))
+        ? 5_000
+        : q.state.data?.some((d) => d.status === "cleanup_pending")
+          ? 30_000
+          : false,
   });
   const databases = list.data ?? [];
   const details = databases.find((d) => d.id === detailsId) ?? null;
@@ -463,7 +557,10 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
     mutationFn: (db: ServerDatabase) => serverDatabasesApi.remove(server.id, db.id),
     success: (_r, db) => `Database ${db.database} deleted`,
     silentError: true,
-    onError: (err) => toastDatabaseError(err, "Could not delete the database"),
+    onError: (err) => {
+      toastDatabaseError(err, "Could not delete the database");
+      void queryClient.invalidateQueries({ queryKey: qk.server(server.id).databases });
+    },
     onSuccess: async (_r, db) => {
       setRemoving(null);
       if (detailsId === db.id) setDetailsId(null);
@@ -548,6 +645,14 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
                     <div className="truncate text-xs text-muted-foreground" title={db.hostName}>
                       on {db.hostName}
                     </div>
+                    {db.status !== "ready" ? (
+                      <StatusBadge meta={DATABASE_STATUS_META[db.status]} className="mt-1" />
+                    ) : null}
+                    {db.status === "cleanup_pending" ? (
+                      <p className="mt-0.5 text-xs whitespace-normal text-muted-foreground">
+                        {CLEANUP_PENDING_HINT}
+                      </p>
+                    ) : null}
                   </TableCell>
                   <TableCell className="font-mono text-xs break-all">{hostPort(db.host, db.port)}</TableCell>
                   <TableCell className="font-mono text-xs">{db.username}</TableCell>
@@ -577,15 +682,20 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
                         <KeyRound aria-hidden />
                       </Button>
                       {canDelete ? (
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          aria-label={`Delete ${db.database}`}
-                          title="Delete"
-                          onClick={() => setRemoving(db)}
-                        >
-                          <Trash2 aria-hidden />
-                        </Button>
+                        <Tooltip content={deleteBlockedReason(db.status)}>
+                          <span>
+                            <Button
+                              size="icon-sm"
+                              variant="ghost"
+                              aria-label={`Delete ${db.database}`}
+                              title={deleteBlockedReason(db.status) ? undefined : "Delete"}
+                              disabled={deleteBlockedReason(db.status) !== null}
+                              onClick={() => setRemoving(db)}
+                            >
+                              <Trash2 aria-hidden />
+                            </Button>
+                          </span>
+                        </Tooltip>
                       ) : null}
                     </div>
                   </TableCell>
@@ -606,9 +716,10 @@ export default function DatabasesTab({ server, me }: { server: Server; me: Me })
       <Dialog open={details !== null} onOpenChange={(o) => !o && setDetailsId(null)}>
         <DialogContent className="max-w-2xl">
           {details ? (
-            // Remounted when the password is rotated (here or elsewhere): a revealed password is dropped.
+            // Remounted when the password is rotated (here or elsewhere) or stops being revealable
+            // (`password_unknown`, cleanup): a revealed password is dropped.
             <DetailsBody
-              key={`${details.id}:${details.passwordRotatedAt ?? 0}`}
+              key={`${details.id}:${details.passwordRotatedAt ?? 0}:${statusAllowsPassword(details.status)}`}
               server={server}
               database={details}
             />

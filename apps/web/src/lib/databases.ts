@@ -1,5 +1,5 @@
 import { DatabaseErrorDetails } from "@blockforge/contracts";
-import type { ServerDatabase } from "@blockforge/contracts";
+import type { ServerDatabase, ServerDatabaseStatus } from "@blockforge/contracts";
 import { toast } from "sonner";
 import { describeError, isApiError } from "./api/errors";
 import { toastError } from "./mutations";
@@ -35,6 +35,77 @@ export function databaseErrorDetails(err: unknown): DatabaseErrorDetails | null 
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
+/** Appended to `host_error` when the host stopped answering before the change could be confirmed. */
+export const UNKNOWN_OUTCOME_MESSAGE =
+  "The host stopped answering mid-change; BlockForge will reconcile it (see the database's status).";
+
+// ---------------------------------------------------------------------------------------------
+// Database status (`ServerDatabase.status`): what each state allows
+
+/** Only these reveal the password: while rotating/deleting the stored password is still the current one. */
+export function statusAllowsPassword(status: ServerDatabaseStatus): boolean {
+  return status === "ready" || status === "rotating" || status === "deleting";
+}
+
+/** Rotating fixes `password_unknown`; nothing else may run while an operation talks to the host. */
+export function statusAllowsRotate(status: ServerDatabaseStatus): boolean {
+  return status === "ready" || status === "password_unknown";
+}
+
+/** Deleting retries a pending cleanup too; only an operation in progress blocks it. */
+export function statusAllowsDelete(status: ServerDatabaseStatus): boolean {
+  return status !== "creating" && status !== "deleting" && status !== "rotating";
+}
+
+/** An operation is talking to the host right now. */
+export function statusInProgress(status: ServerDatabaseStatus): boolean {
+  return status === "creating" || status === "rotating" || status === "deleting";
+}
+
+/** Why the password cannot be shown in this status (null when it can). */
+export function passwordBlockedReason(status: ServerDatabaseStatus): string | null {
+  switch (status) {
+    case "creating":
+      return "The database is still being created; its password is available once it is ready.";
+    case "cleanup_pending":
+      return "This database awaits cleanup after a failed operation and has no usable password.";
+    case "password_unknown":
+      return "The last password rotation could not be confirmed, so the stored password may be wrong. Rotate the password again.";
+    default:
+      return null;
+  }
+}
+
+/** Why rotating is not possible in this status (null when it is). */
+export function rotateBlockedReason(status: ServerDatabaseStatus): string | null {
+  switch (status) {
+    case "creating":
+      return "Wait until the database has been created.";
+    case "rotating":
+      return "A password rotation is already in progress.";
+    case "deleting":
+      return "The database is being deleted.";
+    case "cleanup_pending":
+      return "The database awaits cleanup; delete it to retry the cleanup now.";
+    default:
+      return null;
+  }
+}
+
+/** Why deleting is not possible in this status (null when it is). */
+export function deleteBlockedReason(status: ServerDatabaseStatus): string | null {
+  switch (status) {
+    case "creating":
+      return "Wait until the database has been created.";
+    case "rotating":
+      return "Wait for the password rotation to finish.";
+    case "deleting":
+      return "The database is already being deleted.";
+    default:
+      return null;
+  }
+}
+
 /**
  * A clear message for a database error reason; falls back to the API's own message (with its code
  * and request id) for anything else.
@@ -55,9 +126,16 @@ export function databaseErrorMessage(err: unknown): string {
     case "no_host":
       return "No database host has room for another database. Ask an administrator to add a database host or raise a host's limit.";
     case "host_error":
-      return `The database host refused the request or could not be reached${d.code ? ` (error ${d.code})` : ""}. Try again later, or ask an administrator to check the host.`;
+      return (
+        `The database host refused the request or could not be reached${d.code ? ` (error ${d.code})` : ""}. Try again later, or ask an administrator to check the host.` +
+        (d.unknownOutcome ? ` ${UNKNOWN_OUTCOME_MESSAGE}` : "")
+      );
     case "busy":
       return "Another operation on this database is still in progress — try again in a moment.";
+    case "not_ready":
+      return "This database is still being created or awaits cleanup.";
+    case "password_unknown":
+      return "The last password rotation could not be confirmed — rotate the password again.";
     case "has_databases":
       return d.count !== undefined
         ? `This host still holds ${plural(d.count, "database")}. Delete them from their servers before deleting the host.`

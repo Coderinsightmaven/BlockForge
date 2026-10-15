@@ -258,6 +258,20 @@ export const DatabaseRemote = z
   .refine((v) => normalizeDatabaseRemote(v) !== null, "Use %, an IPv4 address, a wildcard like 10.0.%, a CIDR like 10.0.0.0/8, or a host name")
   .transform((v) => normalizeDatabaseRemote(v) as string);
 
+/**
+ * Lifecycle of a server database:
+ * - `creating` / `rotating` / `deleting`: that operation is talking to the host right now.
+ * - `ready`: usable; the stored password is the account's password.
+ * - `password_unknown`: the last rotation's outcome could not be determined (the host stopped answering and
+ *   the statement could not be confirmed stopped) — the stored password may be wrong; rotate again.
+ * - `cleanup_pending`: the database/account may (partly) exist on the host after a failed create or delete
+ *   whose outcome is unknown; the control plane drops them by name and removes the entry automatically, or
+ *   delete it to retry now.
+ * Only `ready` (and `rotating`/`deleting`, while the stored password is still current) reveal the password.
+ */
+export const ServerDatabaseStatus = z.enum(["creating", "ready", "rotating", "deleting", "password_unknown", "cleanup_pending"]);
+export type ServerDatabaseStatus = z.infer<typeof ServerDatabaseStatus>;
+
 export const ServerDatabase = z
   .object({
     id: Id,
@@ -272,6 +286,7 @@ export const ServerDatabase = z
     username: z.string(),
     /** MySQL account host pattern ("connections from"). */
     remote: z.string(),
+    status: ServerDatabaseStatus,
     createdAt: EpochMs,
     passwordRotatedAt: EpochMs.nullable(),
   })
@@ -297,13 +312,29 @@ export type ServerDatabasePassword = z.infer<typeof ServerDatabasePassword>;
  * `name_taken` (409), `host_full` (409, an explicitly picked host is at `maxDatabases`), `no_host` (422 —
  * no host with capacity), `has_databases` (409, deleting a host that still has databases),
  * `host_error` (502, the database host refused or could not be reached; `code` = driver/MySQL error code),
- * `busy` (409, another create/rotate/delete of the same database is still talking to the host).
+ * `busy` (409, another create/rotate/delete of the same database is still talking to the host),
+ * `not_ready` (409, the database is being created or awaits cleanup: no password, no rotation),
+ * `password_unknown` (409 on the password route: the last rotation's outcome is unknown — rotate again).
+ * `unknownOutcome: true` on a 502 means the host stopped answering mid-statement and the statement could not
+ * be confirmed stopped: see `ServerDatabase.status` (`password_unknown` / `cleanup_pending`) for what happens next.
  */
-export const DatabaseErrorReason = z.enum(["disabled", "limit_reached", "name_taken", "host_full", "no_host", "has_databases", "host_error", "busy"]);
+export const DatabaseErrorReason = z.enum([
+  "disabled",
+  "limit_reached",
+  "name_taken",
+  "host_full",
+  "no_host",
+  "has_databases",
+  "host_error",
+  "busy",
+  "not_ready",
+  "password_unknown",
+]);
 export const DatabaseErrorDetails = z.object({
   reason: DatabaseErrorReason,
   limit: z.number().int().nonnegative().optional(),
   count: z.number().int().nonnegative().optional(),
   code: z.string().nullable().optional(),
+  unknownOutcome: z.boolean().optional(),
 });
 export type DatabaseErrorDetails = z.infer<typeof DatabaseErrorDetails>;

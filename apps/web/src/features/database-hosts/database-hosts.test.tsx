@@ -24,6 +24,7 @@ import {
   DatabaseHostsPage,
   PASSWORD_REQUIRED_MESSAGE,
   TLS_MODES,
+  VERIFY_CA_PIN_WARNING,
   connectionChanged,
   formFromHost,
   hostRequest,
@@ -259,6 +260,14 @@ describe("database host form model", () => {
     expect(tlsBadge("preferred")).toMatchObject({ label: "Preferred · not verified", tone: "warning" });
     expect(tlsBadge("required")).toMatchObject({ label: "Required · not verified", tone: "warning" });
     expect(tlsBadge("verify_ca")).toMatchObject({ label: "Verify CA", tone: "success" });
+    expect(tlsBadge("verify_ca").title).toMatch(
+      /certificate verified against your CA; host name not checked/,
+    );
+    expect(tlsBadge("verify_ca").title).toContain(VERIFY_CA_PIN_WARNING);
+    expect(TLS_MODES.find((m) => m.value === "verify_ca")!.help).toContain(VERIFY_CA_PIN_WARNING);
+    expect(VERIFY_CA_PIN_WARNING).toBe(
+      "Pin a private CA or the database server's own certificate — not a public CA: the host name is not checked, so any certificate that CA issued would be accepted.",
+    );
     const r = { ok: true, error: null, serverVersion: null, tls: true, latencyMs: 1 };
     expect(testTlsFact(r, "required")).toBe("Encrypted (host not verified)");
     expect(testTlsFact(r, "preferred")).toBe("Encrypted (host not verified)");
@@ -532,10 +541,15 @@ describe("Database hosts page", () => {
     expect(screen.queryByText("Connection failed")).toBeNull();
   });
 
-  it("Verify CA shows and requires the CA field; switching away hides and clears it", async () => {
+  it("Verify CA shows and requires the CA field; other modes hide it, keep it in the form and never send it", async () => {
     const calls = routeFetch([
       ["GET", HOSTS, ok([])],
       ["GET", /\/nodes$/, ok([makeNode()])],
+      [
+        "POST",
+        /\/database-hosts\/test$/,
+        ok({ ok: true, error: null, serverVersion: "8.4.0", tls: true, latencyMs: 2 }),
+      ],
       ["POST", HOSTS, ok(makeDatabaseHost(), 201)],
     ]);
     const user = userEvent.setup();
@@ -549,7 +563,9 @@ describe("Database hosts page", () => {
     expect(within(dialog).queryByLabelText(/^CA certificate/)).toBeNull();
 
     await pick(user, dialog, "TLS", /^Verify CA/);
-    expect(within(dialog).getByText(/must chain to the CA certificate below/)).toBeTruthy();
+    expect(within(dialog).getByText(/must chain to the CA certificate below/).textContent).toContain(
+      VERIFY_CA_PIN_WARNING,
+    );
     const ca = within(dialog).getByLabelText(/^CA certificate/);
     await user.click(within(dialog).getByRole("button", { name: "Add host" }));
     expect(within(dialog).getByText(CA_REQUIRED_MESSAGE)).toBeTruthy();
@@ -562,17 +578,26 @@ describe("Database hosts page", () => {
     await user.paste(PEM);
     await pick(user, dialog, "TLS", /^Required/);
     expect(within(dialog).queryByLabelText(/^CA certificate/)).toBeNull();
-    await pick(user, dialog, "TLS", /^Verify CA/);
-    expect((within(dialog).getByLabelText(/^CA certificate/) as HTMLTextAreaElement).value).toBe("");
-
-    // The pasted CA is gone: Required sends none.
-    await pick(user, dialog, "TLS", /^Required/);
-    await user.click(within(dialog).getByRole("button", { name: "Add host" }));
-    await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
-    expect(calls.find((c) => c.method === "POST")!.body).toMatchObject({
+    // Testing with Required: the CA kept in the form is not sent.
+    await user.click(within(dialog).getByRole("button", { name: "Test connection" }));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/database-hosts/test"))).toBe(true));
+    expect(calls.find((c) => c.url.endsWith("/database-hosts/test"))!.body).toMatchObject({
       tlsMode: "required",
       tlsCaCertificate: null,
     });
+    // Back to Verify CA: what was pasted is still there.
+    await pick(user, dialog, "TLS", /^Verify CA/);
+    expect((within(dialog).getByLabelText(/^CA certificate/) as HTMLTextAreaElement).value).toBe(PEM);
+
+    // Saving with Required sends no CA either.
+    await pick(user, dialog, "TLS", /^Required/);
+    await user.click(within(dialog).getByRole("button", { name: "Add host" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && HOSTS.test(c.url))).toBe(true));
+    expect(calls.find((c) => c.method === "POST" && HOSTS.test(c.url))!.body).toMatchObject({
+      tlsMode: "required",
+      tlsCaCertificate: null,
+    });
+    expect(JSON.stringify(calls.map((c) => c.body))).not.toContain("MIIBCA");
   });
 
   it("edits a Verify CA host: the CA is shown; leaving Verify CA needs the password and drops the CA", async () => {

@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SERVER_OWNER_PERMISSIONS } from "@blockforge/contracts";
-import type { Permission } from "@blockforge/contracts";
+import type { Permission, ServerDatabaseStatus } from "@blockforge/contracts";
 import {
   DATABASE_HOST_ID,
   DATABASE_ID,
@@ -22,7 +22,8 @@ import { createQueryClient } from "@/lib/queries";
 import { qk } from "@/lib/query-keys";
 import { ThemeProvider } from "@/lib/theme";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import DatabasesTab, { remoteHint } from "./databases-tab";
+import { UNKNOWN_OUTCOME_MESSAGE } from "@/lib/databases";
+import DatabasesTab, { CLEANUP_PENDING_HINT, DATABASE_STATUS_META, remoteHint } from "./databases-tab";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -537,6 +538,199 @@ describe("Databases tab: busy (409)", () => {
     );
     // The rotation did not happen: the shown password is still the valid one.
     expect(within(dialog).getByLabelText("Password").textContent).toBe(PASSWORD);
+  });
+});
+
+describe("Databases tab: status", () => {
+  const ID2 = "aaaaaaaa-aaaa-4aaa-8aaa-00000000000";
+  const row = (status: ServerDatabaseStatus, n: number) =>
+    makeServerDatabase({ id: `${ID2}${n}`, database: `s55555555_${status}`, status });
+  const STATUSES: ServerDatabaseStatus[] = [
+    "ready",
+    "creating",
+    "rotating",
+    "deleting",
+    "password_unknown",
+    "cleanup_pending",
+  ];
+
+  it("shows a badge for every status but ready, and gates delete by status", async () => {
+    routeFetch([["GET", LIST, ok(STATUSES.map(row))]]);
+    wrap(<DatabasesTab server={makeServer({ databaseLimit: 10 })} me={makeMe()} />);
+    const tr = async (status: ServerDatabaseStatus) =>
+      (await screen.findByText(`s55555555_${status}`)).closest("tr")!;
+    const ready = await tr("ready");
+    for (const label of Object.values(DATABASE_STATUS_META).map((m) => m.label))
+      expect(within(ready).queryByText(label)).toBeNull();
+    expect(within(await tr("creating")).getByText("Creating…")).toBeTruthy();
+    expect(within(await tr("rotating")).getByText("Rotating password…")).toBeTruthy();
+    expect(within(await tr("deleting")).getByText("Deleting…")).toBeTruthy();
+    const unknown = within(await tr("password_unknown")).getByText("Password unknown — rotate again");
+    expect(unknown.className).toContain("tone-warning");
+    const cleanup = await tr("cleanup_pending");
+    expect(within(cleanup).getByText("Cleanup pending").className).toContain("tone-warning");
+    expect(within(cleanup).getByText(CLEANUP_PENDING_HINT)).toBeTruthy();
+
+    const deleteDisabled = (status: ServerDatabaseStatus) =>
+      (screen.getByRole("button", { name: `Delete s55555555_${status}` }) as HTMLButtonElement).disabled;
+    expect(STATUSES.filter((s) => !deleteDisabled(s))).toEqual([
+      "ready",
+      "password_unknown",
+      "cleanup_pending",
+    ]);
+  });
+
+  async function openDetails(status: ServerDatabaseStatus) {
+    const calls = routeFetch([
+      ["GET", LIST, ok([makeServerDatabase({ status })])],
+      ["GET", /\/password$/, ok({ password: PASSWORD })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Connection details for s55555555_luckperms" }),
+    );
+    return { calls, user, dialog: await screen.findByRole("dialog") };
+  }
+  const rotateButton = (dialog: HTMLElement) =>
+    within(dialog).getByRole("button", { name: "Rotate password" }) as HTMLButtonElement;
+
+  it("password_unknown: no reveal, a warning, and rotation stays available", async () => {
+    const { calls, dialog } = await openDetails("password_unknown");
+    expect(within(dialog).queryByRole("button", { name: "Show password" })).toBeNull();
+    expect(within(dialog).getAllByText(/stored password may be wrong/).length).toBeGreaterThan(0);
+    expect(within(dialog).getByText("Password unknown — rotate again")).toBeTruthy();
+    expect(within(dialog).queryByLabelText("Connection string")).toBeNull();
+    expect(rotateButton(dialog).disabled).toBe(false);
+    expect(calls.some((c) => c.url.includes("/password"))).toBe(false);
+  });
+
+  it("cleanup_pending: no reveal and no rotation, with the reason", async () => {
+    const { dialog } = await openDetails("cleanup_pending");
+    expect(within(dialog).queryByRole("button", { name: "Show password" })).toBeNull();
+    expect(within(dialog).getByText(/awaits cleanup after a failed operation/)).toBeTruthy();
+    expect(within(dialog).getByText(CLEANUP_PENDING_HINT)).toBeTruthy();
+    expect(rotateButton(dialog).disabled).toBe(true);
+    expect(within(dialog).getByText(/delete it to retry the cleanup now/)).toBeTruthy();
+  });
+
+  it("creating: no reveal and no rotation", async () => {
+    const { dialog } = await openDetails("creating");
+    expect(within(dialog).queryByRole("button", { name: "Show password" })).toBeNull();
+    expect(within(dialog).getByText(/still being created/)).toBeTruthy();
+    expect(rotateButton(dialog).disabled).toBe(true);
+  });
+
+  it.each(["rotating", "deleting"] as const)(
+    "%s: the current password can still be revealed, but not rotated",
+    async (status) => {
+      const { dialog, user } = await openDetails(status);
+      await user.click(within(dialog).getByRole("button", { name: "Show password" }));
+      expect((await within(dialog).findByLabelText("Password")).textContent).toBe(PASSWORD);
+      expect(within(dialog).getByLabelText("Connection string")).toBeTruthy();
+      expect(rotateButton(dialog).disabled).toBe(true);
+    },
+  );
+
+  it("a password_unknown answer to the reveal says why and re-reads the list (the status changed)", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    let rows = [makeServerDatabase()];
+    const calls = routeFetch([
+      ["GET", LIST, () => jsonResponse(rows)],
+      [
+        "GET",
+        /\/password$/,
+        () => {
+          rows = [makeServerDatabase({ status: "password_unknown" })];
+          return jsonResponse(apiErrorBody("CONFLICT", "nope", "req-p", { reason: "password_unknown" }), {
+            status: 409,
+          });
+        },
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Connection details for s55555555_luckperms" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    const listReads = () => calls.filter((c) => c.method === "GET" && LIST.test(c.url)).length;
+    const before = listReads();
+    await user.click(within(dialog).getByRole("button", { name: "Show password" }));
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(errorToast).toHaveBeenCalledWith(
+      "Could not show the password",
+      expect.objectContaining({
+        description: expect.stringContaining(
+          "The last password rotation could not be confirmed — rotate the password again.",
+        ),
+      }),
+    );
+    await waitFor(() => expect(listReads()).toBeGreaterThan(before));
+    expect(
+      await within(screen.getByRole("dialog")).findByText("Password unknown — rotate again"),
+    ).toBeTruthy();
+    expect(within(screen.getByRole("dialog")).queryByRole("button", { name: "Show password" })).toBeNull();
+  });
+
+  it("a create whose outcome is unknown says so and re-reads the list", async () => {
+    let rows: unknown[] = [];
+    const calls = routeFetch([
+      ["GET", LIST, () => jsonResponse(rows)],
+      [
+        "POST",
+        LIST,
+        () => {
+          rows = [makeServerDatabase({ status: "cleanup_pending" })];
+          return jsonResponse(
+            apiErrorBody("UPSTREAM_ERROR", "host", "req-u", {
+              reason: "host_error",
+              code: "ETIMEDOUT",
+              unknownOutcome: true,
+            }),
+            { status: 502 },
+          );
+        },
+      ],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await screen.findByText("No databases yet");
+    await user.click(screen.getByRole("button", { name: "Create database" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.type(within(dialog).getByLabelText(/^Database name/), "luckperms");
+    await user.click(within(dialog).getByRole("button", { name: "Create database" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert.textContent).toContain("(error ETIMEDOUT)");
+    expect(alert.textContent).toContain(UNKNOWN_OUTCOME_MESSAGE);
+    // The list behind the dialog now shows the entry awaiting cleanup.
+    await waitFor(() => expect(calls.filter((c) => c.method === "GET" && LIST.test(c.url)).length).toBe(2));
+    expect(await screen.findByText("Cleanup pending")).toBeTruthy();
+  });
+
+  it("a rejected rotation (not_ready) says why and re-reads the list", async () => {
+    const errorToast = vi.spyOn(toast, "error");
+    const calls = routeFetch([
+      ["GET", LIST, ok([makeServerDatabase()])],
+      ["POST", /\/rotate-password$/, fail(409, "CONFLICT", { reason: "not_ready" })],
+    ]);
+    const user = userEvent.setup();
+    wrap(<DatabasesTab server={makeServer()} me={makeMe()} />);
+    await user.click(
+      await screen.findByRole("button", { name: "Connection details for s55555555_luckperms" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await user.click(rotateButton(dialog));
+    const confirm = await screen.findByRole("alertdialog");
+    await user.click(within(confirm).getByRole("button", { name: "Rotate password" }));
+    await waitFor(() => expect(errorToast).toHaveBeenCalled());
+    expect(errorToast).toHaveBeenCalledWith(
+      "Could not rotate the password",
+      expect.objectContaining({
+        description: expect.stringContaining("This database is still being created or awaits cleanup."),
+      }),
+    );
+    await waitFor(() => expect(calls.filter((c) => c.method === "GET" && LIST.test(c.url)).length).toBe(2));
   });
 });
 
