@@ -949,6 +949,19 @@ function ResourcesStep({
             onChange={(e) => set({ backupLimit: e.target.value })}
           />
         </Field>
+        <Field
+          label="Database limit"
+          error={errors.databaseLimit}
+          hint="MySQL databases its users may create; 0 = none."
+        >
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            value={s.databaseLimit}
+            onChange={(e) => set({ databaseLimit: e.target.value })}
+          />
+        </Field>
         <Field label="Start">
           <Select
             value={s.startup}
@@ -1159,7 +1172,8 @@ function ReviewStep({
               {s.diskGiB ? `${s.diskGiB} GiB disk` : "no disk quota"}
             </ReviewRow>
             <ReviewRow label="Limits">
-              {s.allocationLimit} extra allocation(s) · {s.backupLimit} backup(s)
+              {s.allocationLimit} extra allocation(s) · {s.backupLimit} backup(s) · {s.databaseLimit}{" "}
+              database(s)
             </ReviewRow>
           </dl>
         </CardContent>

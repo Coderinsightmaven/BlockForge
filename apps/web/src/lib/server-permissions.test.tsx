@@ -30,6 +30,7 @@ describe("server tab gating (myPermissions)", () => {
       "extensions",
       "players",
       "backups",
+      "databases",
       "schedules",
       "startup",
       "network",
@@ -48,6 +49,25 @@ describe("server tab gating (myPermissions)", () => {
       myPermissions: [...SERVER_OWNER_PERMISSIONS, "servers.admin"],
     });
     expect(visibleServerTabs(admin).map((t) => t.id)).toContain("backups");
+  });
+
+  it("hides Databases when the limit is 0, except for administrators, and without view permission", () => {
+    const off = makeServer({ databaseLimit: 0 });
+    expect(visibleServerTabs(off).map((t) => t.id)).not.toContain("databases");
+    expect(resolveServerTab(off, "databases")).toBe("console");
+    const admin = makeServer({
+      databaseLimit: 0,
+      myPermissions: [...SERVER_OWNER_PERMISSIONS, "servers.admin"],
+    });
+    expect(visibleServerTabs(admin).map((t) => t.id)).toContain("databases");
+    expect(resolveServerTab(admin, "databases")).toBe("databases");
+    const noView = makeServer({
+      databaseLimit: 5,
+      myPermissions: SERVER_OWNER_PERMISSIONS.filter((p) => p !== "servers.databases.view"),
+    });
+    expect(visibleServerTabs(noView).map((t) => t.id)).not.toContain("databases");
+    const viewOnly = makeServer({ myPermissions: ["servers.view", "servers.databases.view"] });
+    expect(visibleServerTabs(viewOnly).map((t) => t.id)).toEqual(["databases"]);
   });
 
   it("a console-only subuser sees just the console", () => {
@@ -153,8 +173,18 @@ describe("subuser grants are a subset of the granter's permissions", () => {
         "schedules",
         "settings",
         "activity",
+        "databases",
       ]),
     );
+    expect(
+      SUBUSER_PERMISSION_GROUPS.find((g) => g.id === "databases")!.permissions.map((p) => p.permission),
+    ).toEqual([
+      "servers.databases.view",
+      "servers.databases.create",
+      "servers.databases.update",
+      "servers.databases.delete",
+      "servers.databases.view_password",
+    ]);
   });
 
   it("only offers what the granter holds", () => {

@@ -31,6 +31,7 @@ export type ServerTab =
   | "extensions"
   | "players"
   | "backups"
+  | "databases"
   | "schedules"
   | "startup"
   | "network"
@@ -40,7 +41,7 @@ export type ServerTab =
 
 /** What tab gating reads from a server (the optional fields may be absent in partial fixtures). */
 export type TabServer = Pick<Server, "myPermissions"> &
-  Partial<Pick<Server, "backupLimit" | "software" | "game">>;
+  Partial<Pick<Server, "backupLimit" | "databaseLimit" | "software" | "game">>;
 
 /** Where the server software loads plugins/mods from: none for vanilla and non-Minecraft servers. */
 export function extensionInstallDir(software: ServerSoftware | null | undefined): "plugins" | "mods" | null {
@@ -71,6 +72,14 @@ export function backupsTabVisible(server: TabServer): boolean {
   return server.backupLimit !== 0 || serverCan(server, "servers.admin");
 }
 
+/**
+ * Databases switched off (limit 0) are hidden except for administrators, who are not bound by the
+ * limit and can raise it.
+ */
+export function databasesTabVisible(server: TabServer): boolean {
+  return server.databaseLimit !== 0 || serverCan(server, "servers.admin");
+}
+
 export const SERVER_TABS: ServerTabDef[] = [
   { id: "console", label: "Console", anyOf: ["servers.console.view"] },
   { id: "stats", label: "Stats", anyOf: ["monitoring.view"] },
@@ -83,6 +92,12 @@ export const SERVER_TABS: ServerTabDef[] = [
   },
   { id: "players", label: "Players", anyOf: ["servers.players.view"], visible: playersTabVisible },
   { id: "backups", label: "Backups", anyOf: ["servers.backups.view"], visible: backupsTabVisible },
+  {
+    id: "databases",
+    label: "Databases",
+    anyOf: ["servers.databases.view"],
+    visible: databasesTabVisible,
+  },
   { id: "schedules", label: "Schedules", anyOf: ["schedules.view"] },
   { id: "startup", label: "Startup", anyOf: ["servers.startup.view"] },
   { id: "network", label: "Network", anyOf: ["servers.allocations.view"] },
@@ -186,6 +201,29 @@ export const SUBUSER_PERMISSION_GROUPS: PermissionGroup[] = [
       P("servers.backups.restore", "Restore", "Restore a backup over the current files."),
       P("servers.backups.download", "Download", "Download backup archives."),
       P("servers.backups.delete", "Delete", "Delete backups."),
+    ],
+  },
+  {
+    id: "databases",
+    label: "Databases",
+    permissions: [
+      P(
+        "servers.databases.view",
+        "View",
+        "See the server's MySQL databases, users and hosts (not passwords).",
+      ),
+      P("servers.databases.create", "Create", "Create databases, up to the server's database limit."),
+      P(
+        "servers.databases.update",
+        "Rotate passwords",
+        "Generate a new password; applications using the old one lose access.",
+      ),
+      P("servers.databases.delete", "Delete", "Delete databases and everything stored in them."),
+      P(
+        "servers.databases.view_password",
+        "View passwords",
+        "Reveal database passwords — full access to the data in this server's databases.",
+      ),
     ],
   },
   {

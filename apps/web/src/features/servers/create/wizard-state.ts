@@ -64,6 +64,8 @@ export interface WizardState {
   diskGiB: string;
   allocationLimit: string;
   backupLimit: string;
+  /** MySQL databases the server's users may create (0 = none; administrators are not limited). */
+  databaseLimit: string;
   startup: "auto" | "manual";
   /** null = the current user. */
   ownerId: string | null;
@@ -111,6 +113,8 @@ export function initialWizardState(): WizardState {
     diskGiB: "",
     allocationLimit: "0",
     backupLimit: "3",
+    // Same default as the contract (`CreateServerBase.databaseLimit`): databases off until raised.
+    databaseLimit: "0",
     startup: "auto",
     ownerId: null,
   };
@@ -240,6 +244,8 @@ export function validateStep(
     if (!Number.isInteger(al) || al < 0 || al > 50) e.allocationLimit = "0–50.";
     const bl = num(s.backupLimit);
     if (!Number.isInteger(bl) || bl < 0 || bl > 100) e.backupLimit = "0–100.";
+    const dl = num(s.databaseLimit);
+    if (!Number.isInteger(dl) || dl < 0 || dl > 100) e.databaseLimit = "0–100.";
     if (template && isBuiltinTemplate(template) && s.heapMiB.trim() !== "" && Number.isFinite(mem)) {
       const h = num(s.heapMiB);
       if (!Number.isFinite(h) || h < 128) e.heapMiB = "At least 128 MiB, or empty for automatic.";
@@ -277,6 +283,7 @@ export function buildCreateBody(
     storageQuotaBytes: s.diskGiB.trim() === "" ? null : Math.round(num(s.diskGiB) * GiB),
     allocationLimit: num(s.allocationLimit),
     backupLimit: num(s.backupLimit),
+    databaseLimit: num(s.databaseLimit),
     startup: s.startup,
   };
   if (s.ownerId) body.ownerId = s.ownerId;

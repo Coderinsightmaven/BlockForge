@@ -223,6 +223,7 @@ type BuildForm = {
   diskGiB: string;
   allocationLimit: string;
   backupLimit: string;
+  databaseLimit: string;
   startup: "manual" | "auto";
   restartMode: Server["restartPolicy"]["mode"];
   maxRetries: string;
@@ -235,6 +236,7 @@ function formFromServer(s: Server): BuildForm {
     diskGiB: s.storageQuotaBytes ? String(Math.round((s.storageQuotaBytes / GiB) * 100) / 100) : "",
     allocationLimit: String(s.allocationLimit),
     backupLimit: String(s.backupLimit),
+    databaseLimit: String(s.databaseLimit),
     startup: s.startup,
     restartMode: s.restartPolicy.mode,
     maxRetries: String(s.restartPolicy.maxRetries),
@@ -271,6 +273,10 @@ export function buildPatch(
   const bl = Number(f.backupLimit);
   if (!Number.isInteger(bl) || bl < 0 || bl > 100) errors.backupLimit = "0–100.";
   else if (bl !== s.backupLimit) patch.backupLimit = bl;
+  const dl = Number(f.databaseLimit);
+  if (f.databaseLimit.trim() === "" || !Number.isInteger(dl) || dl < 0 || dl > 100)
+    errors.databaseLimit = "0–100.";
+  else if (dl !== s.databaseLimit) patch.databaseLimit = dl;
   if (f.startup !== s.startup) patch.startup = f.startup;
   const retries = Number(f.maxRetries);
   if (!Number.isInteger(retries) || retries < 0 || retries > 100) errors.maxRetries = "0–100.";
@@ -399,6 +405,19 @@ function AdminCard({ me, server }: { me: Me; server: Server }) {
                 max={100}
                 value={form.backupLimit}
                 onChange={(e) => set("backupLimit")(e.target.value)}
+              />
+            </Field>
+            <Field
+              label="Database limit"
+              error={errors.databaseLimit}
+              hint="MySQL databases its users may create; 0 = none (administrators are not limited)."
+            >
+              <Input
+                type="number"
+                min={0}
+                max={100}
+                value={form.databaseLimit}
+                onChange={(e) => set("databaseLimit")(e.target.value)}
               />
             </Field>
             <Field label="Start with the node" error={errors.startup}>

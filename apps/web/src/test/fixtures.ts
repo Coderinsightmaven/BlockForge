@@ -1,14 +1,25 @@
 /**
  * Contract-valid objects for unit tests only. Never imported by application code.
  */
-import { Backup, Me, Node, SERVER_OWNER_PERMISSIONS, Schedule, Server } from "@blockforge/contracts";
+import {
+  Backup,
+  DatabaseHost,
+  Me,
+  Node,
+  SERVER_OWNER_PERMISSIONS,
+  Schedule,
+  Server,
+  ServerDatabase,
+} from "@blockforge/contracts";
 import type {
   Backup as BackupT,
+  DatabaseHost as DatabaseHostT,
   Me as MeT,
   Node as NodeT,
   Permission,
   Schedule as ScheduleT,
   Server as ServerT,
+  ServerDatabase as ServerDatabaseT,
 } from "@blockforge/contracts";
 
 export const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -119,6 +130,7 @@ export function makeServer(overrides: Partial<ServerT> = {}): ServerT {
     storageQuotaBytes: null,
     allocationLimit: 2,
     backupLimit: 3,
+    databaseLimit: 2,
     allocations: [],
     address: "play.example.test:25565",
     startup: "auto",
@@ -188,6 +200,47 @@ export function makeSchedule(overrides: Partial<ScheduleT> = {}): ScheduleT {
     lastRunStatus: null,
     running: false,
     createdAt: 1_760_000_000_000,
+    ...overrides,
+  });
+}
+
+export const DATABASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+export const DATABASE_HOST_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+export function makeServerDatabase(overrides: Partial<ServerDatabaseT> = {}): ServerDatabaseT {
+  return ServerDatabase.parse({
+    id: DATABASE_ID,
+    serverId: SERVER_ID,
+    hostId: DATABASE_HOST_ID,
+    hostName: "mysql-fra",
+    host: "db.example.test",
+    port: 3306,
+    database: "s55555555_luckperms",
+    username: "u55555555_k3j9x0q2ab",
+    remote: "%",
+    createdAt: 1_760_000_000_000,
+    passwordRotatedAt: null,
+    ...overrides,
+  });
+}
+
+export function makeDatabaseHost(overrides: Partial<DatabaseHostT> = {}): DatabaseHostT {
+  return DatabaseHost.parse({
+    id: DATABASE_HOST_ID,
+    name: "mysql-fra",
+    host: "10.0.0.5",
+    port: 3306,
+    publicHost: "db.example.test",
+    username: "blockforge",
+    nodeId: NODE_ID,
+    nodeName: "fra-1",
+    maxDatabases: 50,
+    databaseCount: 3,
+    tlsMode: "preferred",
+    tlsCaCertificate: null,
+    notes: "",
+    createdAt: 1_760_000_000_000,
+    updatedAt: 1_760_000_000_000,
     ...overrides,
   });
 }

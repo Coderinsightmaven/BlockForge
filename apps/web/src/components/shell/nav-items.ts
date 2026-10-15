@@ -4,6 +4,7 @@ import {
   Archive,
   Bell,
   CalendarClock,
+  Database,
   FolderOpen,
   Gamepad2,
   LayoutDashboard,
@@ -29,7 +30,8 @@ export type AppPath =
   | "/users"
   | "/audit"
   | "/settings"
-  | "/admin/templates";
+  | "/admin/templates"
+  | "/admin/database-hosts";
 
 export interface NavItem {
   label: string;
@@ -129,6 +131,14 @@ export const ADMIN_NAV_ITEMS: NavItem[] = [
     permission: "templates.view",
     globalOnly: true,
     keywords: ["eggs", "nests", "import", "games"],
+  },
+  {
+    label: "Database hosts",
+    icon: Database,
+    to: "/admin/database-hosts",
+    permission: "database_hosts.manage",
+    globalOnly: true,
+    keywords: ["mysql", "mariadb", "databases"],
   },
 ];
 

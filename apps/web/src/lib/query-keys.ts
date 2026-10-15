@@ -40,6 +40,8 @@ export const qk = {
     search: (path: string, q: string) => ["server", id, "files-search", path, q] as const,
     file: (path: string) => ["server", id, "file", path] as const,
     backups: ["server", id, "backups"] as const,
+    /** Never holds passwords (those are fetched on demand into component state). */
+    databases: ["server", id, "databases"] as const,
     schedules: ["server", id, "schedules"] as const,
     scheduleRunsAll: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId] as const,
     scheduleRuns: (scheduleId: string) => ["server", id, "schedule-runs", scheduleId, "history"] as const,
@@ -63,6 +65,10 @@ export const qk = {
     all: ["templates"] as const,
     list: ["templates", "list"] as const,
     detail: (id: string) => ["templates", "detail", id] as const,
+  },
+  databaseHosts: {
+    all: ["database-hosts"] as const,
+    list: ["database-hosts", "list"] as const,
   },
   catalog: {
     software: ["catalog", "software"] as const,

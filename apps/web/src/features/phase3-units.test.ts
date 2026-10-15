@@ -157,6 +157,7 @@ describe("server build patch (admin)", () => {
     storageQuotaBytes: null,
     allocationLimit: 2,
     backupLimit: 3,
+    databaseLimit: 2,
   });
   const form = {
     memoryMiB: "4096",
@@ -164,6 +165,7 @@ describe("server build patch (admin)", () => {
     diskGiB: "",
     allocationLimit: "2",
     backupLimit: "3",
+    databaseLimit: "2",
     startup: "auto" as const,
     restartMode: "on-failure" as const,
     maxRetries: "3",
@@ -179,6 +181,18 @@ describe("server build patch (admin)", () => {
   it("validates limits", () => {
     const { errors } = buildPatch(s, { ...form, memoryMiB: "128", cpuCores: "0.1", allocationLimit: "99" });
     expect(Object.keys(errors).sort()).toEqual(["allocationLimit", "cpuCores", "memoryMiB"]);
+  });
+  it("patches the database limit (0–100) only when it changed", () => {
+    expect(buildPatch(s, { ...form, databaseLimit: "5" })).toEqual({
+      patch: { databaseLimit: 5 },
+      errors: {},
+    });
+    expect(buildPatch(s, { ...form, databaseLimit: "0" }).patch).toEqual({ databaseLimit: 0 });
+    for (const bad of ["101", "-1", "1.5", "", "x"])
+      expect(buildPatch(s, { ...form, databaseLimit: bad })).toMatchObject({
+        patch: {},
+        errors: { databaseLimit: "0–100." },
+      });
   });
 });
 

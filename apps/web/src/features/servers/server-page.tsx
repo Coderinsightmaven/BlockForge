@@ -37,6 +37,7 @@ const TABS = {
   extensions: retryableLazy(() => import("./extensions/extensions-tab")),
   players: retryableLazy(() => import("./players/players-tab")),
   backups: retryableLazy(() => import("./tabs/backups-tab")),
+  databases: retryableLazy(() => import("./databases/databases-tab")),
   schedules: retryableLazy(() => import("./tabs/schedules-tab")),
   startup: retryableLazy(() => import("./tabs/startup-tab")),
   network: retryableLazy(() => import("./tabs/network-tab")),
@@ -282,6 +283,7 @@ export function ServerPage({
               {tab === "extensions" ? <TABS.extensions server={server} me={me} /> : null}
               {tab === "players" ? <TABS.players server={server} /> : null}
               {tab === "backups" ? <TABS.backups server={server} me={me} /> : null}
+              {tab === "databases" ? <TABS.databases server={server} me={me} /> : null}
               {tab === "schedules" ? <TABS.schedules server={server} /> : null}
               {tab === "startup" ? <TABS.startup server={server} /> : null}
               {tab === "network" ? <TABS.network server={server} /> : null}

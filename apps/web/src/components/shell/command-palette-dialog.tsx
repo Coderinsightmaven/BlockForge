@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { NODE_CONNECTION_META, SERVER_STATE_META, StatusDot, statusMeta } from "@/components/ui/status";
-import { NAV_ITEMS, navAvailability } from "./nav-items";
+import { ADMIN_NAV_ITEMS, NAV_ITEMS, navAvailability } from "./nav-items";
 import { useQuickActions } from "./quick-actions";
 
 /** The palette itself (cmdk list + searches), loaded the first time it is opened. */
@@ -47,7 +47,10 @@ export default function CommandPaletteDialog({
     fn();
   };
 
-  const pages = NAV_ITEMS.filter((i) => i.to && navAvailability(i, me).kind === "available");
+  // Main sections and the administration pages (Templates, Database hosts) the session may open.
+  const pages = [...NAV_ITEMS, ...ADMIN_NAV_ITEMS].filter(
+    (i) => i.to && navAvailability(i, me).kind === "available",
+  );
   const userItems = users.data?.pages.flatMap((p) => p.items) ?? [];
   const serverItems = servers.data?.pages.flatMap((p) => p.items) ?? [];
 

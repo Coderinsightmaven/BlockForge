@@ -19,6 +19,7 @@ import { Route as AppAuditRouteImport } from "./routes/_app/audit";
 import { Route as AppMonitoringRouteImport } from "./routes/_app/monitoring";
 import { Route as AppSettingsRouteImport } from "./routes/_app/settings";
 import { Route as AppUsersRouteImport } from "./routes/_app/users";
+import { Route as AppAdminDatabaseHostsRouteImport } from "./routes/_app/admin/database-hosts";
 import { Route as AppAdminTemplatesRouteImport } from "./routes/_app/admin/templates";
 import { Route as AppNodesIndexRouteImport } from "./routes/_app/nodes/index";
 import { Route as AppNodesNodeIdRouteImport } from "./routes/_app/nodes/$nodeId";
@@ -75,6 +76,11 @@ const AppUsersRoute = AppUsersRouteImport.update({
   path: "/users",
   getParentRoute: () => AppRoute,
 } as any);
+const AppAdminDatabaseHostsRoute = AppAdminDatabaseHostsRouteImport.update({
+  id: "/admin/database-hosts",
+  path: "/admin/database-hosts",
+  getParentRoute: () => AppRoute,
+} as any);
 const AppAdminTemplatesRoute = AppAdminTemplatesRouteImport.update({
   id: "/admin/templates",
   path: "/admin/templates",
@@ -116,6 +122,7 @@ export interface FileRoutesByFullPath {
   "/monitoring": typeof AppMonitoringRoute;
   "/settings": typeof AppSettingsRoute;
   "/users": typeof AppUsersRoute;
+  "/admin/database-hosts": typeof AppAdminDatabaseHostsRoute;
   "/admin/templates": typeof AppAdminTemplatesRoute;
   "/nodes/$nodeId": typeof AppNodesNodeIdRoute;
   "/servers/$serverId": typeof AppServersServerIdRoute;
@@ -133,6 +140,7 @@ export interface FileRoutesByTo {
   "/settings": typeof AppSettingsRoute;
   "/users": typeof AppUsersRoute;
   "/": typeof AppIndexRoute;
+  "/admin/database-hosts": typeof AppAdminDatabaseHostsRoute;
   "/admin/templates": typeof AppAdminTemplatesRoute;
   "/nodes/$nodeId": typeof AppNodesNodeIdRoute;
   "/servers/$serverId": typeof AppServersServerIdRoute;
@@ -152,6 +160,7 @@ export interface FileRoutesById {
   "/_app/settings": typeof AppSettingsRoute;
   "/_app/users": typeof AppUsersRoute;
   "/_app/": typeof AppIndexRoute;
+  "/_app/admin/database-hosts": typeof AppAdminDatabaseHostsRoute;
   "/_app/admin/templates": typeof AppAdminTemplatesRoute;
   "/_app/nodes/$nodeId": typeof AppNodesNodeIdRoute;
   "/_app/servers/$serverId": typeof AppServersServerIdRoute;
@@ -171,6 +180,7 @@ export interface FileRouteTypes {
     | "/monitoring"
     | "/settings"
     | "/users"
+    | "/admin/database-hosts"
     | "/admin/templates"
     | "/nodes/$nodeId"
     | "/servers/$serverId"
@@ -188,6 +198,7 @@ export interface FileRouteTypes {
     | "/settings"
     | "/users"
     | "/"
+    | "/admin/database-hosts"
     | "/admin/templates"
     | "/nodes/$nodeId"
     | "/servers/$serverId"
@@ -206,6 +217,7 @@ export interface FileRouteTypes {
     | "/_app/settings"
     | "/_app/users"
     | "/_app/"
+    | "/_app/admin/database-hosts"
     | "/_app/admin/templates"
     | "/_app/nodes/$nodeId"
     | "/_app/servers/$serverId"
@@ -293,6 +305,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof AppUsersRouteImport;
       parentRoute: typeof AppRoute;
     };
+    "/_app/admin/database-hosts": {
+      id: "/_app/admin/database-hosts";
+      path: "/admin/database-hosts";
+      fullPath: "/admin/database-hosts";
+      preLoaderRoute: typeof AppAdminDatabaseHostsRouteImport;
+      parentRoute: typeof AppRoute;
+    };
     "/_app/admin/templates": {
       id: "/_app/admin/templates";
       path: "/admin/templates";
@@ -345,6 +364,7 @@ interface AppRouteChildren {
   AppSettingsRoute: typeof AppSettingsRoute;
   AppUsersRoute: typeof AppUsersRoute;
   AppIndexRoute: typeof AppIndexRoute;
+  AppAdminDatabaseHostsRoute: typeof AppAdminDatabaseHostsRoute;
   AppAdminTemplatesRoute: typeof AppAdminTemplatesRoute;
   AppNodesNodeIdRoute: typeof AppNodesNodeIdRoute;
   AppServersServerIdRoute: typeof AppServersServerIdRoute;
@@ -360,6 +380,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppSettingsRoute: AppSettingsRoute,
   AppUsersRoute: AppUsersRoute,
   AppIndexRoute: AppIndexRoute,
+  AppAdminDatabaseHostsRoute: AppAdminDatabaseHostsRoute,
   AppAdminTemplatesRoute: AppAdminTemplatesRoute,
   AppNodesNodeIdRoute: AppNodesNodeIdRoute,
   AppServersServerIdRoute: AppServersServerIdRoute,
