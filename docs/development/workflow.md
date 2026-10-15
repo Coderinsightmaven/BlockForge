@@ -41,6 +41,15 @@ with TypeScript 6 — `pnpm exec tsc -p tsconfig.json --noEmit`, or `pnpm exec t
 for the emit — and record the difference; never silence a TS 7 diagnostic with `any` or `@ts-ignore`.
 A fix must be valid for both compilers. Upgrades: `docs/OPEN_WORK.md` §5.3.
 
+turbo runs tasks in strict env mode: a script only sees the environment variables that `turbo.json`
+lists for its task. The `test` task lists the variables the tests read (`TEST_DATABASE_URL`,
+`TEST_VICTORIA_METRICS_URL`, `TEST_S3_*`, `TEST_LOG_LEVEL`, `EGG_CORPUS_DIR`, `BLOCKFORGE_LIVE_TESTS` in
+`env`, so they are part of the cache key; `NODE_EXTRA_CA_CERTS` in `passThroughEnv`). A test that reads a
+new variable must add it there, or `pnpm test` silently uses the default (for `TEST_DATABASE_URL` the
+shared `blockforge_test`, whose schema the control-plane global setup drops). Isolated run from a
+worktree: `TEST_DATABASE_URL=postgres://…/blockforge_test_<name> NODE_EXTRA_CA_CERTS=<main
+checkout>/infra/compose/.minio-certs/public.crt pnpm test` (or vitest directly in `apps/control-plane`).
+
 Integration tests that need Postgres/VictoriaMetrics/Docker use `infra/compose/docker-compose.dev.yml`
 (`pnpm infra:up`). Tests that need real Minecraft containers are tagged and run with
 `pnpm test:integration`.
