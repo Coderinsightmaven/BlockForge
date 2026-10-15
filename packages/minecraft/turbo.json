@@ -2,6 +2,9 @@
   "$schema": "https://turbo.build/schema.json",
   "extends": ["//"],
   "tasks": {
-    "test": { "env": ["BLOCKFORGE_LIVE_TESTS"] }
+    "test": {
+      "env": ["BLOCKFORGE_LIVE_TESTS"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/packages/velocity/test/fixtures/**"]
+    }
   }
 }
