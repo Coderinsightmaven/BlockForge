@@ -61,6 +61,9 @@ type JobLog = (level: "info" | "warn" | "error", message: string) => Promise<voi
 const SYSTEM_JOB: AuditActor = { actorType: "system", actorId: null, actorName: "job" };
 const SYSTEM_SWEEP: AuditActor = { actorType: "system", actorId: null, actorName: "database-sweep" };
 
+/** What a failed drop left on the host (see `dropOutcome`). */
+type DropOutcome = "gone" | "unchanged" | "partial" | "unknown" | "unchecked";
+
 const busy = () => conflict("Another operation on this database is still in progress; try again in a moment", { reason: "busy" });
 const notReady = () => conflict("The database is being created or awaits cleanup", { reason: "not_ready" });
 const fresh = (state: State) => ({ state, stateChangedAt: sql`now()` });
@@ -595,7 +598,9 @@ export class ServerDatabasesService {
    *   for its locks — once dropping it is not interruptible);
    * - no answer and not confirmed stopped → `unknown` (it may still land);
    * - otherwise (no answer but stopped, or `DROP USER` failed after the database was dropped) the host is inspected:
-   *   both gone → `gone`, both present → `unchanged`, anything else (or not inspectable) → `partial`.
+   *   both gone → `gone`, both present → `unchanged`, anything else → `partial`; not inspectable → `partial` when
+   *   the database is known to be dropped, else `unchecked` (stopped, so it cannot land later, but the result is
+   *   not known).
    */
   private async dropOutcome(
     h: HostRow,
@@ -603,13 +608,13 @@ export class ServerDatabasesService {
     progress: { sent: boolean; databaseDropped: boolean },
     e: DatabaseHostError | null,
     signal?: AbortSignal,
-  ): Promise<"gone" | "unchanged" | "partial" | "unknown"> {
+  ): Promise<DropOutcome> {
     if (!progress.sent) return "unchanged";
     if (!e) return "unknown";
     if (e.kind === "interrupted" && !e.stopped) return "unknown";
     if (!progress.databaseDropped && e.kind === "rejected") return "unchanged";
     const now = await this.inspect(h, r, signal);
-    if (!now) return progress.databaseDropped ? "partial" : "unknown";
+    if (!now) return progress.databaseDropped ? "partial" : "unchecked";
     if (!now.database && !now.account) return "gone";
     if (now.database && now.account) return "unchanged";
     return "partial";
@@ -651,7 +656,9 @@ export class ServerDatabasesService {
             ? "the database was not deleted"
             : outcome === "partial"
               ? "the database was partly deleted; BlockForge finishes the deletion automatically"
-              : "the deletion may or may not have taken effect; BlockForge finishes it automatically";
+              : outcome === "unchecked"
+                ? "the deletion was stopped but its result could not be checked; BlockForge finishes it automatically"
+                : "the deletion may or may not have taken effect; BlockForge finishes it automatically";
         await this.d.audit.record({
           ...actor,
           action: "server.database.delete",
@@ -757,24 +764,30 @@ export class ServerDatabasesService {
         if (done) resolved++;
       }
 
+      // The oldest SWEEP_ROWS_PER_HOST eligible rows of every host (no global cap that one host could fill).
+      const eligible = sql`${serverDatabases.state} = 'cleanup_pending' AND ${serverDatabases.operation} IS NULL AND ${this.cleanupWaitMs()} = 0`;
       const pending = await this.d.db
         .select({ r: serverDatabases, h: databaseHosts })
         .from(serverDatabases)
         .innerJoin(databaseHosts, eq(databaseHosts.id, serverDatabases.hostId))
-        .where(and(eq(serverDatabases.state, "cleanup_pending"), isNull(serverDatabases.operation), sql`${this.cleanupWaitMs()} = 0`))
-        .orderBy(asc(serverDatabases.stateChangedAt), asc(serverDatabases.id))
-        .limit(SWEEP_ROWS_PER_HOST * 50);
+        .where(
+          sql`${serverDatabases.id} IN (SELECT ranked.id FROM (SELECT ${serverDatabases.id} AS id, row_number() OVER (PARTITION BY ${serverDatabases.hostId} ORDER BY ${serverDatabases.stateChangedAt}, ${serverDatabases.id}) AS rn FROM ${serverDatabases} WHERE ${eligible}) ranked WHERE ranked.rn <= ${SWEEP_ROWS_PER_HOST})`,
+        )
+        .orderBy(asc(serverDatabases.stateChangedAt), asc(serverDatabases.id));
       const byHost = new Map<string, { h: HostRow; rows: Row[] }>();
       for (const { r, h } of pending) {
         const g = byHost.get(h.id) ?? { h, rows: [] };
-        if (g.rows.length < SWEEP_ROWS_PER_HOST) g.rows.push(r);
+        g.rows.push(r);
         byHost.set(h.id, g);
       }
       const queue = [...byHost.values()];
-      const worker = async () => {
-        for (let next = queue.shift(); next && !cancel.aborted; next = queue.shift()) cleaned += await this.sweepHost(next.h, next.rows, cancel);
+      const worker = async (): Promise<number> => {
+        let n = 0;
+        for (let next = queue.shift(); next && !cancel.aborted; next = queue.shift()) n += await this.sweepHost(next.h, next.rows, cancel);
+        return n;
       };
-      await Promise.all(Array.from({ length: Math.min(SWEEP_HOST_CONCURRENCY, queue.length) }, worker));
+      const counts = await Promise.all(Array.from({ length: Math.min(SWEEP_HOST_CONCURRENCY, queue.length) }, worker));
+      cleaned = counts.reduce((a, b) => a + b, 0);
     } catch (err) {
       this.d.logger.warn({ code: pgErrorCode(err) }, "database sweep failed");
     }
@@ -792,7 +805,8 @@ export class ServerDatabasesService {
         const [claimed] = await this.d.db
           .update(serverDatabases)
           .set({ operation: "deleting", operationToken: token, operationStartedAt: sql`now()` })
-          .where(and(eq(serverDatabases.id, r.id), isNull(serverDatabases.operation), eq(serverDatabases.state, "cleanup_pending")))
+          // Re-checked at claim time: the row may have been set `cleanup_pending` again (a new window) meanwhile.
+          .where(and(eq(serverDatabases.id, r.id), isNull(serverDatabases.operation), eq(serverDatabases.state, "cleanup_pending"), sql`${this.cleanupWaitMs()} = 0`))
           .returning({ id: serverDatabases.id });
         if (!claimed) continue;
         try {
@@ -854,7 +868,7 @@ export class ServerDatabasesService {
     }
     let dropped = 0;
     let failed = 0;
-    type Problem = { message: string; code: string | null; result?: "unchanged" | "partial" | "unknown" | "not_attempted" };
+    type Problem = { message: string; code: string | null; result?: Exclude<DropOutcome, "gone"> | "not_attempted" };
     const audit = async (r: Row, h: HostRow, problem: Problem | null) => {
       await this.d.audit.record({
         ...SYSTEM_JOB,
@@ -889,7 +903,11 @@ export class ServerDatabasesService {
           ? `Database ${where}: outcome unknown (${problem.message}) — the drop may still complete on the host. Check whether it and user ${r.username} remain, and drop them by hand if so.`
           : problem.result === "partial"
             ? `Database ${where} was partly dropped (${problem.message}). Drop what remains of it and user ${r.username} by hand.`
-            : `Database ${where} could not be dropped: ${problem.message}. Drop it and user ${r.username} by hand.`;
+            : problem.result === "unchecked"
+              ? `Database ${where}: the drop was stopped before it finished (${problem.message}), but the host could not be checked afterwards. Check whether it and user ${r.username} remain, and drop them by hand if so.`
+              : problem.result === "not_attempted"
+                ? `Database ${where} was not attempted (${problem.message}). Drop it and user ${r.username} by hand.`
+                : `Database ${where} could not be dropped: ${problem.message}. Drop it and user ${r.username} by hand.`;
       await ctx.log("warn", line);
       failed++;
     };
@@ -943,6 +961,8 @@ export class ServerDatabasesService {
             }
             const outcome = await this.dropOutcome(h, r, progress, e, signal);
             stopIfCancelled();
+            // Shutdown during the inspection: retry the whole step after the restart instead of recording it.
+            if (this.d.connector.shuttingDown) stopIfShutdown(new DatabaseHostError("SHUTDOWN", "shutting down", "interrupted", false));
             if (outcome === "gone") await succeed(r, h);
             else await fail(r, h, { message: e?.message ?? "database host error", code: e?.code ?? null, result: outcome });
           }

@@ -160,6 +160,7 @@ export interface BuildAppOptions {
     operationStaleMs?: number;
     /** Host-side statement limits (default on; tests turn them off to exercise KILL QUERY). */
     sessionLimits?: boolean;
+    abortStatementTimeoutMs?: number;
     deleteDeadlineMs?: number;
     cleanupDelayMs?: number;
   };
@@ -340,6 +341,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     ...(dbOpts.connectTimeoutMs !== undefined ? { connectTimeoutMs: dbOpts.connectTimeoutMs } : {}),
     ...(dbOpts.queryTimeoutMs !== undefined ? { queryTimeoutMs: dbOpts.queryTimeoutMs } : {}),
     ...(dbOpts.sessionLimits !== undefined ? { sessionLimits: dbOpts.sessionLimits } : {}),
+    ...(dbOpts.abortStatementTimeoutMs !== undefined ? { abortStatementTimeoutMs: dbOpts.abortStatementTimeoutMs } : {}),
   });
   const databaseHosts = new DatabaseHostsService({ db, clock, box, audit, connector: mysqlConnector });
   const serverDatabases = new ServerDatabasesService({
@@ -563,8 +565,9 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     for (const t of Object.values(tasks)) await t.stop();
     overviewPublisher.stop();
     await scheduler.stop();
-    // Running jobs are aborted first (their database statements are stopped on the host); then every
-    // remaining admin connection is torn down.
+    // Database-host work was already abandoned in preClose (connector shut down, sweep cancelled); jobs are
+    // stopped (a server deletion that met SHUTDOWN is retried after the restart), then every remaining admin
+    // connection is torn down.
     if (startBackground) await jobs.stop();
     mysqlConnector.closeAll();
     await vmWriter.flush(true);

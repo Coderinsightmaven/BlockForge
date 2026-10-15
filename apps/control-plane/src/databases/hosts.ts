@@ -229,5 +229,7 @@ export class DatabaseHostsService {
 
 /** 502 for host failures (contracts `DatabaseErrorDetails` `host_error`). */
 export function hostError(message: string, code: string | null, unknownOutcome = false): AppError {
-  return new AppError(502, "UPSTREAM_ERROR", `Database host error: ${message}`, { reason: "host_error", code, ...(unknownOutcome ? { unknownOutcome: true } : {}) });
+  // The control plane shutting down is not the host's fault: 503 (retry later), not 502.
+  const status = code === "SHUTDOWN" ? 503 : 502;
+  return new AppError(status, "UPSTREAM_ERROR", `Database host error: ${message}`, { reason: "host_error", code, ...(unknownOutcome ? { unknownOutcome: true } : {}) });
 }
