@@ -1,24 +1,12 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": ["tsconfig.base.json"],
   "tasks": {
+    "transit": { "dependsOn": ["^transit"] },
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
-    "typecheck": { "dependsOn": [] },
-    "lint": {},
-    "test": {
-      "dependsOn": [],
-      "outputs": [],
-      "env": [
-        "TEST_DATABASE_URL",
-        "TEST_VICTORIA_METRICS_URL",
-        "TEST_S3_ENDPOINT",
-        "TEST_S3_ACCESS_KEY",
-        "TEST_S3_SECRET_KEY",
-        "TEST_LOG_LEVEL",
-        "EGG_CORPUS_DIR",
-        "BLOCKFORGE_LIVE_TESTS"
-      ],
-      "passThroughEnv": ["NODE_EXTRA_CA_CERTS"]
-    },
+    "typecheck": { "dependsOn": ["transit"] },
+    "lint": { "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/eslint.config.js"] },
+    "test": { "dependsOn": ["transit"], "outputs": [] },
     "dev": { "cache": false, "persistent": true }
   }
 }

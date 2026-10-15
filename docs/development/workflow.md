@@ -53,14 +53,27 @@ If tsc-rs reports something TypeScript 6 does not (or crashes), check the packag
 record the difference; never silence a TS 7 diagnostic with `any` or `@ts-ignore`. A fix must be valid
 for both compilers. Upgrades: `docs/OPEN_WORK.md` §5.3.
 
-turbo runs tasks in strict env mode: a script only sees the environment variables that `turbo.json`
-lists for its task. The `test` task lists the variables the tests read (`TEST_DATABASE_URL`,
-`TEST_VICTORIA_METRICS_URL`, `TEST_S3_*`, `TEST_LOG_LEVEL`, `EGG_CORPUS_DIR`, `BLOCKFORGE_LIVE_TESTS` in
-`env`, so they are part of the cache key; `NODE_EXTRA_CA_CERTS` in `passThroughEnv`). A test that reads a
-new variable must add it there, or `pnpm test` silently uses the default (for `TEST_DATABASE_URL` the
-shared `blockforge_test`, whose schema the control-plane global setup drops). Isolated run from a
-worktree: `TEST_DATABASE_URL=postgres://…/blockforge_test_<name> NODE_EXTRA_CA_CERTS=<main
-checkout>/infra/compose/.minio-certs/public.crt pnpm test` (or vitest directly in `apps/control-plane`).
+turbo caching: `typecheck` and `test` depend on the no-op `transit` task (`"dependsOn": ["^transit"]`),
+so a change in a workspace dependency (for example `packages/contracts/src`) invalidates its dependents'
+cached type checks and tests; `tsconfig.base.json` is a global dependency and the root
+`eslint.config.js` an input of `lint`.
+
+turbo runs tasks in strict env mode: a script only sees turbo's built-in pass-through variables (`PATH`,
+`HOME`, `SHELL`, `PWD` and similar OS variables) and those `turbo.json` declares for its task. The tests'
+variables are declared per package: `apps/control-plane/turbo.json` (`TEST_DATABASE_URL`,
+`TEST_VICTORIA_METRICS_URL`, `TEST_S3_ENDPOINT`, `TEST_LOG_LEVEL` in `env`, which is part of the cache
+key; `TEST_S3_ACCESS_KEY`, `TEST_S3_SECRET_KEY` and `NODE_EXTRA_CA_CERTS` in `passThroughEnv`),
+`packages/eggs/turbo.json` (`EGG_CORPUS_DIR`) and `packages/minecraft/turbo.json`
+(`BLOCKFORGE_LIVE_TESTS`). A test that reads a new variable must be declared there, or `pnpm test`
+silently uses the default — for `TEST_DATABASE_URL` that is the shared `blockforge_test`, whose schema the
+control-plane global setup drops. Isolated run from a worktree (create the database first; the MinIO
+certificate is generated in the main checkout only):
+```
+docker exec blockforge-dev-postgres-1 psql -U blockforge -d postgres -c 'CREATE DATABASE blockforge_test_<name> OWNER blockforge'
+TEST_DATABASE_URL=postgres://blockforge:blockforge-dev-only@127.0.0.1:55432/blockforge_test_<name> \
+  NODE_EXTRA_CA_CERTS=<main checkout>/infra/compose/.minio-certs/public.crt pnpm test
+docker exec blockforge-dev-postgres-1 psql -U blockforge -d postgres -c 'DROP DATABASE blockforge_test_<name>'
+```
 
 Integration tests that need Postgres/VictoriaMetrics/Docker use `infra/compose/docker-compose.dev.yml`
 (`pnpm infra:up`). Tests that need real Minecraft containers are tagged and run with
