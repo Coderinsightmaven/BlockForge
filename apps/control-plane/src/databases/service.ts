@@ -6,6 +6,7 @@ import { actorUserId, type AuditActor, type AuditService } from "../audit/servic
 import type { Db, Tx } from "../db/client.js";
 import { databaseHosts, serverDatabases, servers } from "../db/schema/index.js";
 import { pgErrorCode } from "../http/errors.js";
+import { JobError } from "../jobs/types.js";
 import type { Clock } from "../lib/clock.js";
 import { AppError, conflict, forbidden, invalidState, notFound, unprocessable } from "../lib/errors.js";
 import type { SecretBox } from "../secrets/secret-box.js";
@@ -154,16 +155,31 @@ export class ServerDatabasesService {
     return sql`now() - make_interval(secs => ${this.staleMs / 1000})`;
   }
 
+  /** Milliseconds until a `cleanup_pending` row's safety window ends (0 = passed), on the database clock. */
+  private cleanupWaitMs() {
+    return sql<number>`greatest(0, ceil(extract(epoch from (${serverDatabases.stateChangedAt} + make_interval(secs => ${this.cleanupDelayMs / 1000}) - now())) * 1000))::int`;
+  }
+
+  /** State left by an abandoned operation: what may exist on the host decides. */
+  private static afterAbandoned(previous: Operation, state: State): State {
+    // Names never verified free on the host: nothing of ours is there, whatever the operation was.
+    if (state === "reserved") return "reserved";
+    if (previous === "rotating") return state === "ready" ? "password_unknown" : state;
+    return "cleanup_pending";
+  }
+
   /**
    * Short transaction: lock the row, refuse a live claim of another operation, take over an abandoned one
-   * (audited; a taken-over rotation leaves `password_unknown`, a taken-over delete `cleanup_pending`), record ours.
-   * Rotation needs a database that exists on the host (`not_ready` otherwise).
+   * (audited; a taken-over rotation leaves `password_unknown`, a taken-over delete or create `cleanup_pending`,
+   * a `reserved` row stays `reserved`), record ours. Rotation needs a database that exists on the host
+   * (`not_ready` otherwise); deleting a `cleanup_pending` row waits for its safety window (`not_ready` with
+   * `retryAfterMs`) so a statement that may still be running cannot land after the drop.
    */
   private async claim(serverId: string, databaseId: string, op: "rotating" | "deleting", actor: AuditActor): Promise<{ r: Row; h: HostRow; token: string }> {
     const token = randomUUID();
     return this.d.db.transaction(async (tx) => {
       const [row] = await tx
-        .select({ r: serverDatabases, h: databaseHosts, stale: sql<boolean>`${serverDatabases.operationStartedAt} < ${this.staleCutoff()}` })
+        .select({ r: serverDatabases, h: databaseHosts, stale: sql<boolean>`${serverDatabases.operationStartedAt} < ${this.staleCutoff()}`, waitMs: this.cleanupWaitMs() })
         .from(serverDatabases)
         .innerJoin(databaseHosts, eq(databaseHosts.id, serverDatabases.hostId))
         .where(and(eq(serverDatabases.id, databaseId), eq(serverDatabases.serverId, serverId)))
@@ -171,12 +187,14 @@ export class ServerDatabasesService {
         .limit(1);
       if (!row) throw notFound("Database");
       let state = row.r.state as State;
+      if (row.r.operation === null && op === "deleting" && state === "cleanup_pending" && Number(row.waitMs) > 0) {
+        const retryAfterMs = Number(row.waitMs);
+        throw conflict(`The database awaits cleanup; BlockForge removes it automatically, or delete it again in ${Math.ceil(retryAfterMs / 1000)} s`, { reason: "not_ready", retryAfterMs });
+      }
       if (row.r.operation !== null) {
         if (!row.stale) throw busy();
         const previous = row.r.operation as Operation;
-        if (previous === "rotating" && state === "ready") state = "password_unknown";
-        if (previous === "deleting") state = "cleanup_pending";
-        if (previous === "creating" && state === "provisioning") state = "cleanup_pending";
+        state = ServerDatabasesService.afterAbandoned(previous, state);
         await this.d.audit.record(
           { ...actor, action: "server.database.claim_takeover", targetType: "server", targetId: serverId, outcome: "success", details: { databaseId, previousOperation: previous, takenOverBy: op, state } },
           tx,
@@ -479,9 +497,10 @@ export class ServerDatabasesService {
   }
 
   /**
-   * New password: claim → `ALTER USER` (no transaction open) → store it and release. If the host refuses, the
-   * old password stays valid everywhere (502). If it does not answer, the statement is stopped on the host and
-   * the account's authentication string (read before) is compared afterwards: changed → the new password is
+   * New password: claim → `ALTER USER` (no transaction open) → store it and release. A failure before
+   * `ALTER USER` was sent changes nothing (the state stays as it was). If the host refuses `ALTER USER` (atomic),
+   * the old password stays valid everywhere (502). If it does not answer, the statement is stopped on the host
+   * and the account's authentication string (read before) is compared afterwards: changed → the new password is
    * stored (success); unchanged → nothing happened (502). If that cannot be determined, the database becomes
    * `password_unknown` (502 `unknownOutcome`) — rotating again always fixes it.
    */
@@ -489,6 +508,7 @@ export class ServerDatabasesService {
     const password = generatePassword();
     const { r, h, token } = await this.claim(access.server.id, databaseId, "rotating", actor);
     let before: string | null | undefined;
+    let alterSent = false;
     let failure: unknown = null;
     try {
       await this.d.connector.withConnection(
@@ -501,6 +521,7 @@ export class ServerDatabasesService {
             // Without SELECT on mysql.user the outcome of an unanswered ALTER cannot be decided (→ unknown).
             if (!(err instanceof DatabaseHostError && err.kind === "rejected")) throw err;
           }
+          alterSent = true;
           await run(alterUserPasswordSql(r.username, r.remote, password));
         },
         [password],
@@ -510,7 +531,7 @@ export class ServerDatabasesService {
     }
     if (failure !== null) {
       const e = failure instanceof DatabaseHostError ? failure : null;
-      let decided: Effect = effectOf(failure);
+      let decided: Effect = alterSent ? effectOf(failure) : "none";
       if (decided === "unknown" && e?.stopped && typeof before === "string") {
         const now = await this.inspect(h, r);
         if (now?.auth != null) decided = now.auth !== before ? "applied" : "none";
@@ -518,6 +539,7 @@ export class ServerDatabasesService {
       if (decided === "applied") {
         this.d.logger.warn({ databaseId: r.id }, "the host applied the new password although its answer was lost");
       } else {
+        // Unchanged: the state the row had (`ready` or `password_unknown`) stays.
         await this.release(r.id, token, decided === "unknown" ? "password_unknown" : undefined);
         await this.d.audit.record({
           ...actor,
@@ -525,9 +547,9 @@ export class ServerDatabasesService {
           targetType: "server",
           targetId: access.server.id,
           outcome: "failed",
-          details: { databaseId: r.id, error: e?.message ?? "failed", code: e?.code ?? null, passwordUnknown: decided === "unknown" },
+          details: { databaseId: r.id, error: e?.message ?? "failed", code: e?.code ?? null, alterSent, passwordUnknown: decided === "unknown" },
         });
-        if (e) throw hostError(e.message, e.code, decided === "unknown");
+        if (e) throw hostError(decided === "unknown" ? `${e.message}; the new password may or may not have been applied` : `${e.message}; the password was not changed`, e.code, decided === "unknown");
         throw failure;
       }
     }
@@ -567,34 +589,78 @@ export class ServerDatabasesService {
   }
 
   /**
-   * Claim → drop the database and its account on the host (no transaction open) → delete the row. A refusal
-   * keeps the row (502; retry — the drops are idempotent). An unanswered statement is stopped and the host
-   * inspected: both gone → deleted; otherwise 502 and retry. If it cannot be confirmed stopped, the row
-   * becomes `cleanup_pending` and the sweep finishes the deletion once a late statement can no longer land.
+   * What a failed `DROP DATABASE` + `DROP USER` sequence left on the host, decided per statement:
+   * - failure before `DROP DATABASE` was sent → `unchanged`;
+   * - `DROP DATABASE` refused by the host → `unchanged` (atomic on MySQL 8; MariaDB aborts only while still waiting
+   *   for its locks — once dropping it is not interruptible);
+   * - no answer and not confirmed stopped → `unknown` (it may still land);
+   * - otherwise (no answer but stopped, or `DROP USER` failed after the database was dropped) the host is inspected:
+   *   both gone → `gone`, both present → `unchanged`, anything else (or not inspectable) → `partial`.
+   */
+  private async dropOutcome(
+    h: HostRow,
+    r: Pick<Row, "databaseName" | "username" | "remote">,
+    progress: { sent: boolean; databaseDropped: boolean },
+    e: DatabaseHostError | null,
+    signal?: AbortSignal,
+  ): Promise<"gone" | "unchanged" | "partial" | "unknown"> {
+    if (!progress.sent) return "unchanged";
+    if (!e) return "unknown";
+    if (e.kind === "interrupted" && !e.stopped) return "unknown";
+    if (!progress.databaseDropped && e.kind === "rejected") return "unchanged";
+    const now = await this.inspect(h, r, signal);
+    if (!now) return progress.databaseDropped ? "partial" : "unknown";
+    if (!now.database && !now.account) return "gone";
+    if (now.database && now.account) return "unchanged";
+    return "partial";
+  }
+
+  /** Runs the two drops on `run`, recording how far they got. */
+  private async dropTracked(run: Run, r: Pick<Row, "databaseName" | "username" | "remote">, progress: { sent: boolean; databaseDropped: boolean }): Promise<void> {
+    progress.sent = true;
+    await run(dropDatabaseSql(r.databaseName));
+    progress.databaseDropped = true;
+    await run(dropUserSql(r.username, r.remote));
+  }
+
+  /**
+   * Claim → drop the database and its account on the host (no transaction open) → delete the row. A `reserved`
+   * row (names never verified on the host) is just removed. On failure the outcome is decided per statement
+   * ({@link dropOutcome}): `unchanged` keeps the row as it was (502; retry), `gone` deletes it, `partial` and
+   * `unknown` leave it `cleanup_pending` so the sweep finishes the requested deletion once a statement that may
+   * still be running can no longer land (502, `unknownOutcome` for `unknown`).
    */
   async remove(access: ServerAccess, databaseId: string, actor: AuditActor): Promise<void> {
     const { r, h, token } = await this.claim(access.server.id, databaseId, "deleting", actor);
-    // A row whose names were never verified on the host holds nothing of ours there.
+    const progress = { sent: false, databaseDropped: false };
     let failure: unknown = null;
     if (r.state !== "reserved") {
       try {
-        await this.d.connector.withConnection(this.d.hosts.connectionOf(h), (run) => this.drop(run, r));
+        await this.d.connector.withConnection(this.d.hosts.connectionOf(h), (run) => this.dropTracked(run, r, progress));
       } catch (err) {
         failure = err;
       }
     }
     if (failure !== null) {
       const e = failure instanceof DatabaseHostError ? failure : null;
-      let gone = false;
-      if (e?.kind === "interrupted" && e.stopped) {
-        const now = await this.inspect(h, r);
-        gone = now !== null && !now.database && !now.account;
-      }
-      if (!gone) {
-        const uncertain = e?.kind === "interrupted" && !e.stopped;
-        await this.release(r.id, token, uncertain ? "cleanup_pending" : undefined);
-        await this.d.audit.record({ ...actor, action: "server.database.delete", targetType: "server", targetId: access.server.id, outcome: "failed", details: { databaseId: r.id, error: e?.message ?? "failed", code: e?.code ?? null, cleanupPending: uncertain } });
-        if (e) throw hostError(e.message, e.code, uncertain);
+      const outcome = await this.dropOutcome(h, r, progress, e);
+      if (outcome !== "gone") {
+        await this.release(r.id, token, outcome === "unchanged" ? undefined : "cleanup_pending");
+        const what =
+          outcome === "unchanged"
+            ? "the database was not deleted"
+            : outcome === "partial"
+              ? "the database was partly deleted; BlockForge finishes the deletion automatically"
+              : "the deletion may or may not have taken effect; BlockForge finishes it automatically";
+        await this.d.audit.record({
+          ...actor,
+          action: "server.database.delete",
+          targetType: "server",
+          targetId: access.server.id,
+          outcome: "failed",
+          details: { databaseId: r.id, error: e?.message ?? "failed", code: e?.code ?? null, result: outcome, cleanupPending: outcome !== "unchanged" },
+        });
+        if (e) throw hostError(`${e.message}; ${what}`, e.code, outcome === "unknown");
         throw failure;
       }
     }
@@ -616,18 +682,47 @@ export class ServerDatabasesService {
     if (!deleted) await this.lostClaim(r.id);
   }
 
-  private async drop(run: Run, r: Pick<Row, "databaseName" | "username" | "remote">): Promise<void> {
-    await run(dropDatabaseSql(r.databaseName));
-    await run(dropUserSql(r.username, r.remote));
+  /**
+   * Forget (`DELETE …?forget=true`, administrators): removes BlockForge's record without contacting the host —
+   * the database and its account stay there. For hosts that are permanently gone. Refused (409 `busy`) while an
+   * operation that is not abandoned runs on the database.
+   */
+  async forget(access: ServerAccess, databaseId: string, actor: AuditActor): Promise<void> {
+    await this.d.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select({ r: serverDatabases, h: databaseHosts, stale: sql<boolean>`${serverDatabases.operationStartedAt} < ${this.staleCutoff()}` })
+        .from(serverDatabases)
+        .innerJoin(databaseHosts, eq(databaseHosts.id, serverDatabases.hostId))
+        .where(and(eq(serverDatabases.id, databaseId), eq(serverDatabases.serverId, access.server.id)))
+        .for("update", { of: serverDatabases })
+        .limit(1);
+      if (!row) throw notFound("Database");
+      if (row.r.operation !== null && !row.stale) throw busy();
+      await tx.delete(serverDatabases).where(eq(serverDatabases.id, row.r.id));
+      await this.d.audit.record(
+        {
+          ...actor,
+          action: "server.database.forget",
+          targetType: "server",
+          targetId: access.server.id,
+          outcome: "success",
+          details: { databaseId: row.r.id, database: row.r.databaseName, username: row.r.username, remote: row.r.remote, hostId: row.h.id, hostName: row.h.name, host: `${row.h.host}:${row.h.port}`, state: row.r.state, leftOnHost: true },
+        },
+        tx,
+      );
+    });
   }
 
   /**
-   * Maintenance sweep (every minute and at start): resolves abandoned claims (a crashed process) — `creating`
-   * without host work → row removed, with possible host work → `cleanup_pending`; `rotating` →
-   * `password_unknown`; `deleting` → `cleanup_pending` — and finishes `cleanup_pending` rows once a late
-   * statement can no longer land: drop by name (`IF EXISTS`) and remove the row. Never throws.
+   * Maintenance sweep (every minute and at start), cancelled by `signal` (app shutdown). First it resolves
+   * abandoned claims (a crashed process) on the database alone: `reserved` rows (names never verified on the
+   * host) are removed, `rotating` → `password_unknown`, `creating`/`deleting` → `cleanup_pending`. Then it finishes
+   * `cleanup_pending` rows whose safety window has passed — drop by name (`IF EXISTS`), remove the row — oldest
+   * first, at most {@link SWEEP_ROWS_PER_HOST} per host and run (fair share), {@link SWEEP_HOST_CONCURRENCY} hosts
+   * at a time, one session per host; after any failure the host is skipped for the rest of the run. Never throws.
    */
-  async sweep(): Promise<{ resolved: number; cleaned: number }> {
+  async sweep(signal?: AbortSignal): Promise<{ resolved: number; cleaned: number }> {
+    const cancel = signal ?? new AbortController().signal;
     let resolved = 0;
     let cleaned = 0;
     try {
@@ -635,18 +730,20 @@ export class ServerDatabasesService {
         .select()
         .from(serverDatabases)
         .where(and(isNotNull(serverDatabases.operation), lt(serverDatabases.operationStartedAt, this.staleCutoff())))
+        .orderBy(asc(serverDatabases.operationStartedAt))
         .limit(500);
       for (const r of stale) {
+        if (cancel.aborted) return { resolved, cleaned };
         const previous = r.operation as Operation;
         const done = await this.d.db.transaction(async (tx) => {
           const cond = and(eq(serverDatabases.id, r.id), eq(serverDatabases.operationToken, r.operationToken!));
+          const state = ServerDatabasesService.afterAbandoned(previous, r.state as State);
           let outcome: string;
-          if (previous === "creating" && r.state === "reserved") {
+          if (state === "reserved") {
             const rows = await tx.delete(serverDatabases).where(cond).returning({ id: serverDatabases.id });
             if (!rows.length) return false;
-            outcome = "removed (nothing was created on the host)";
+            outcome = "removed (nothing of it was on the host)";
           } else {
-            const state: State = previous === "rotating" ? (r.state === "ready" ? "password_unknown" : (r.state as State)) : "cleanup_pending";
             const rows = await tx.update(serverDatabases).set({ ...released, ...fresh(state) }).where(cond).returning({ id: serverDatabases.id });
             if (!rows.length) return false;
             outcome = state;
@@ -664,17 +761,33 @@ export class ServerDatabasesService {
         .select({ r: serverDatabases, h: databaseHosts })
         .from(serverDatabases)
         .innerJoin(databaseHosts, eq(databaseHosts.id, serverDatabases.hostId))
-        .where(
-          and(
-            eq(serverDatabases.state, "cleanup_pending"),
-            isNull(serverDatabases.operation),
-            lt(serverDatabases.stateChangedAt, sql`now() - make_interval(secs => ${this.cleanupDelayMs / 1000})`),
-          ),
-        )
-        .limit(200);
-      const unreachable = new Set<string>();
+        .where(and(eq(serverDatabases.state, "cleanup_pending"), isNull(serverDatabases.operation), sql`${this.cleanupWaitMs()} = 0`))
+        .orderBy(asc(serverDatabases.stateChangedAt), asc(serverDatabases.id))
+        .limit(SWEEP_ROWS_PER_HOST * 50);
+      const byHost = new Map<string, { h: HostRow; rows: Row[] }>();
       for (const { r, h } of pending) {
-        if (unreachable.has(h.id)) continue;
+        const g = byHost.get(h.id) ?? { h, rows: [] };
+        if (g.rows.length < SWEEP_ROWS_PER_HOST) g.rows.push(r);
+        byHost.set(h.id, g);
+      }
+      const queue = [...byHost.values()];
+      const worker = async () => {
+        for (let next = queue.shift(); next && !cancel.aborted; next = queue.shift()) cleaned += await this.sweepHost(next.h, next.rows, cancel);
+      };
+      await Promise.all(Array.from({ length: Math.min(SWEEP_HOST_CONCURRENCY, queue.length) }, worker));
+    } catch (err) {
+      this.d.logger.warn({ code: pgErrorCode(err) }, "database sweep failed");
+    }
+    return { resolved, cleaned };
+  }
+
+  /** Cleanup of one host's `cleanup_pending` rows (one session); stops at the first failure. Returns rows removed. */
+  private async sweepHost(h: HostRow, rows: Row[], signal: AbortSignal): Promise<number> {
+    let cleaned = 0;
+    let session: HostSession | null = null;
+    try {
+      for (const r of rows) {
+        if (signal.aborted) break;
         const token = randomUUID();
         const [claimed] = await this.d.db
           .update(serverDatabases)
@@ -682,24 +795,19 @@ export class ServerDatabasesService {
           .where(and(eq(serverDatabases.id, r.id), isNull(serverDatabases.operation), eq(serverDatabases.state, "cleanup_pending")))
           .returning({ id: serverDatabases.id });
         if (!claimed) continue;
-        let ok = false;
         try {
-          await this.d.connector.withConnection(this.d.hosts.connectionOf(h), (run) => this.drop(run, r));
-          ok = true;
+          session ??= await this.d.connector.session(this.d.hosts.connectionOf(h), [], signal);
+          await this.drop(session.run, r);
         } catch (err) {
           const e = err instanceof DatabaseHostError ? err : null;
-          if (e?.kind === "connect") unreachable.add(h.id);
-          if (e?.kind === "interrupted" && e.stopped) {
-            const now = await this.inspect(h, r);
-            ok = now !== null && !now.database && !now.account;
-          }
-          if (!ok) this.d.logger.warn({ databaseId: r.id, hostId: h.id, code: e?.code ?? null, reason: e?.message ?? "failed" }, "database cleanup failed; retrying later");
-          if (!ok) await this.release(r.id, token, e?.kind === "interrupted" && !e.stopped ? "cleanup_pending" : undefined);
+          // Not confirmed stopped: restart the safety window. Otherwise the row simply stays `cleanup_pending`.
+          await this.release(r.id, token, e?.kind === "interrupted" && !e.stopped ? "cleanup_pending" : undefined);
+          if (!signal.aborted) this.d.logger.warn({ databaseId: r.id, hostId: h.id, code: e?.code ?? null, reason: e?.message ?? "failed" }, "database cleanup failed; skipping this host until the next run");
+          break;
         }
-        if (!ok) continue;
         const removed = await this.d.db.transaction(async (tx) => {
-          const rows = await tx.delete(serverDatabases).where(and(eq(serverDatabases.id, r.id), eq(serverDatabases.operationToken, token))).returning({ id: serverDatabases.id });
-          if (!rows.length) return false;
+          const deleted = await tx.delete(serverDatabases).where(and(eq(serverDatabases.id, r.id), eq(serverDatabases.operationToken, token))).returning({ id: serverDatabases.id });
+          if (!deleted.length) return false;
           await this.d.audit.record(
             { ...SYSTEM_SWEEP, action: "server.database.delete", targetType: "server", targetId: r.serverId, outcome: "success", details: { databaseId: r.id, database: r.databaseName, username: r.username, hostId: h.id, hostName: h.name, reason: "cleanup" } },
             tx,
@@ -708,19 +816,25 @@ export class ServerDatabasesService {
         });
         if (removed) cleaned++;
       }
-    } catch (err) {
-      this.d.logger.warn({ code: pgErrorCode(err) }, "database sweep failed");
+    } finally {
+      await session?.close();
     }
-    return { resolved, cleaned };
+    return cleaned;
+  }
+
+  private async drop(run: Run, r: Pick<Row, "databaseName" | "username" | "remote">): Promise<void> {
+    await run(dropDatabaseSql(r.databaseName));
+    await run(dropUserSql(r.username, r.remote));
   }
 
   /**
    * Server deletion (best effort, recorded): drops every database of the server on its host, deleting each row
-   * as soon as its database is gone. One session per host; an unanswered statement is stopped and the host
-   * inspected, then the next database gets a fresh session (a host that cannot be connected to marks its
-   * remaining databases failed). Bounded by `deleteDeadlineMs` (rows not reached are recorded as failed) and
-   * by the job's cancellation `signal` (the step then stops and rethrows). Failures go to the job log and the
-   * audit log (host, database and username to drop by hand); the remaining rows go with the server.
+   * as soon as its database is gone. One session per host; after an unanswered statement the next database gets
+   * a fresh session (a host that cannot be connected to marks its remaining databases failed). Bounded by
+   * `deleteDeadlineMs` (rows not reached are recorded as failed) and by the job's cancellation `signal` (the step
+   * stops and rethrows); at control-plane shutdown the job is retried after the restart. Outcomes are decided per
+   * statement ({@link dropOutcome}); failures and unknown outcomes go to the job log and the audit log (with host,
+   * database and username, to check and drop by hand); the remaining rows go with the server.
    */
   async dropAllForServer(serverId: string, ctx: { jobId: string; log: JobLog; signal?: AbortSignal }): Promise<{ dropped: number; failed: number }> {
     const cancel = ctx.signal ?? new AbortController().signal;
@@ -740,14 +854,26 @@ export class ServerDatabasesService {
     }
     let dropped = 0;
     let failed = 0;
-    const audit = async (r: Row, h: HostRow, error: { message: string; code: string | null; unknownOutcome?: boolean } | null) => {
+    type Problem = { message: string; code: string | null; result?: "unchanged" | "partial" | "unknown" | "not_attempted" };
+    const audit = async (r: Row, h: HostRow, problem: Problem | null) => {
       await this.d.audit.record({
         ...SYSTEM_JOB,
         action: "server.database.delete",
         targetType: "server",
         targetId: serverId,
-        outcome: error ? "failed" : "success",
-        details: { databaseId: r.id, database: r.databaseName, username: r.username, hostId: h.id, hostName: h.name, host: `${h.host}:${h.port}`, reason: "server_deleted", jobId: ctx.jobId, ...(error ?? {}) },
+        // The audit outcome has no "unknown": an unconfirmed drop is `failed` with `result: "unknown"`.
+        outcome: problem ? "failed" : "success",
+        details: {
+          databaseId: r.id,
+          database: r.databaseName,
+          username: r.username,
+          hostId: h.id,
+          hostName: h.name,
+          host: `${h.host}:${h.port}`,
+          reason: "server_deleted",
+          jobId: ctx.jobId,
+          ...(problem ? { error: problem.message, code: problem.code, result: problem.result ?? "unchanged", unknownOutcome: problem.result === "unknown" } : {}),
+        },
       });
     };
     const succeed = async (r: Row, h: HostRow) => {
@@ -755,15 +881,25 @@ export class ServerDatabasesService {
       await audit(r, h, null);
       dropped++;
     };
-    const fail = async (r: Row, h: HostRow, error: { message: string; code: string | null; unknownOutcome?: boolean }) => {
-      await audit(r, h, error);
-      await ctx.log("warn", `Database ${r.databaseName} on ${h.name} (${h.host}:${h.port}) could not be dropped: ${error.message}. Drop it and user ${r.username} by hand.`);
+    const fail = async (r: Row, h: HostRow, problem: Problem) => {
+      await audit(r, h, problem);
+      const where = `${r.databaseName} on ${h.name} (${h.host}:${h.port})`;
+      const line =
+        problem.result === "unknown"
+          ? `Database ${where}: outcome unknown (${problem.message}) — the drop may still complete on the host. Check whether it and user ${r.username} remain, and drop them by hand if so.`
+          : problem.result === "partial"
+            ? `Database ${where} was partly dropped (${problem.message}). Drop what remains of it and user ${r.username} by hand.`
+            : `Database ${where} could not be dropped: ${problem.message}. Drop it and user ${r.username} by hand.`;
+      await ctx.log("warn", line);
       failed++;
     };
     const stopIfCancelled = () => {
       if (cancel.aborted) throw cancel.reason instanceof Error ? cancel.reason : new Error("cancelled");
     };
-    const deadlineError = { message: "not attempted: the deletion step ran out of time", code: "DEADLINE" };
+    const stopIfShutdown = (e: DatabaseHostError | null) => {
+      if (e?.code === "SHUTDOWN") throw new JobError("SHUTDOWN", "control plane shutting down", true);
+    };
+    const deadlineProblem: Problem = { message: "not attempted: the deletion step ran out of time", code: "DEADLINE", result: "not_attempted" };
 
     for (const { h, rows: list } of byHost.values()) {
       let session: HostSession | null = null;
@@ -772,7 +908,7 @@ export class ServerDatabasesService {
           const r = list[i]!;
           stopIfCancelled();
           if (deadline.aborted) {
-            for (const rest of list.slice(i)) await fail(rest, h, deadlineError);
+            for (const rest of list.slice(i)) await fail(rest, h, deadlineProblem);
             break;
           }
           // Never verified on the host (a creation that had not reached it): nothing of ours exists there.
@@ -786,30 +922,29 @@ export class ServerDatabasesService {
             } catch (err) {
               stopIfCancelled();
               const e = err instanceof DatabaseHostError ? err : null;
-              const why = deadline.aborted ? deadlineError : { message: e?.message ?? "database host error", code: e?.code ?? null };
+              stopIfShutdown(e);
+              const why: Problem = deadline.aborted ? deadlineProblem : { message: e?.message ?? "database host error", code: e?.code ?? null, result: "unchanged" };
               for (const rest of list.slice(i)) await fail(rest, h, why);
               break;
             }
           }
+          const progress = { sent: false, databaseDropped: false };
           try {
-            await this.drop(session.run, r);
+            await this.dropTracked(session.run, r, progress);
             await succeed(r, h);
           } catch (err) {
             stopIfCancelled();
             const e = err instanceof DatabaseHostError ? err : null;
+            stopIfShutdown(e);
             if (e?.kind === "interrupted") {
               // The session is unusable now; the next database gets a fresh one.
               await session.close();
               session = null;
-              const now = e.stopped ? await this.inspect(h, r, deadline.aborted ? undefined : deadline) : null;
-              if (now && !now.database && !now.account) {
-                await succeed(r, h);
-                continue;
-              }
-              await fail(r, h, { message: e.message, code: e.code, unknownOutcome: !e.stopped });
-            } else {
-              await fail(r, h, { message: e?.message ?? "database host error", code: e?.code ?? null });
             }
+            const outcome = await this.dropOutcome(h, r, progress, e, signal);
+            stopIfCancelled();
+            if (outcome === "gone") await succeed(r, h);
+            else await fail(r, h, { message: e?.message ?? "database host error", code: e?.code ?? null, result: outcome });
           }
         }
       } finally {
@@ -820,3 +955,7 @@ export class ServerDatabasesService {
     return { dropped, failed };
   }
 }
+
+/** Sweep fairness: rows of one host handled per run, and hosts handled at a time. */
+export const SWEEP_ROWS_PER_HOST = 20;
+export const SWEEP_HOST_CONCURRENCY = 4;

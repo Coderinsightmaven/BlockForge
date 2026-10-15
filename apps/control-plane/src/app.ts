@@ -333,6 +333,8 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     browser: browserTransfers, transfers,
   });
   const dbOpts = opts.databases ?? {};
+  /** Cancels a running database sweep at shutdown. */
+  const sweepAbort = new AbortController();
   const mysqlConnector = new MysqlConnector({
     logger: logger.child({ module: "database-hosts" }),
     ...(dbOpts.connectTimeoutMs !== undefined ? { connectTimeoutMs: dbOpts.connectTimeoutMs } : {}),
@@ -452,6 +454,11 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
   app.addHook("preClose", async () => {
     gateway.closeAll(CLOSE.serviceRestart, "control plane restarting");
     for (const c of hub.allClients()) hub.unregister(c);
+    // Before in-flight requests and background tasks are awaited: database-host work must not hold shutdown
+    // (a host that stops answering would otherwise cost a statement timeout per operation). Running statements
+    // are abandoned with their outcome recorded as unknown; jobs see SHUTDOWN and are retried after the restart.
+    sweepAbort.abort();
+    mysqlConnector.shutdown();
   });
   await app.register(fastifyHelmet, {
     contentSecurityPolicy: { useDefaults: false, directives: cspDirectives(config.publicUrl) },
@@ -535,7 +542,7 @@ export async function buildApp(opts: BuildAppOptions): Promise<BuiltApp> {
     ),
     // Abandoned database operations and `cleanup_pending` databases (host I/O: its own task, so a slow host
     // never delays the other maintenance).
-    databaseSweep: new PeriodicTask("database-sweep", 60_000, async () => void (await serverDatabases.sweep()), logger),
+    databaseSweep: new PeriodicTask("database-sweep", 60_000, async () => void (await serverDatabases.sweep(sweepAbort.signal)), logger),
   };
 
   await auth.ensureSetupToken(opts.setupTokenSink ?? defaultSetupTokenSink(logger));

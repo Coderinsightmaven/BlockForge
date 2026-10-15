@@ -1,4 +1,4 @@
-import { CreateDatabaseHostRequest, CreateServerDatabaseRequest, TestDatabaseHostRequest, UpdateDatabaseHostRequest } from "@blockforge/contracts";
+import { CreateDatabaseHostRequest, CreateServerDatabaseRequest, DeleteServerDatabaseQuery, TestDatabaseHostRequest, UpdateDatabaseHostRequest } from "@blockforge/contracts";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -93,7 +93,14 @@ export function registerDatabaseRoutes(app: FastifyInstance, ctx: AppContext): v
   app.delete("/servers/:id/databases/:databaseId", { config: HOST_RATE }, async (req, reply) => {
     const p = parse(DatabaseParams, req.params, "Path");
     const a = await access.require(req, p.id, "servers.databases.delete");
-    await dbs.remove(a, p.databaseId, actorOf(req));
+    const { forget } = parse(DeleteServerDatabaseQuery, req.query, "Query");
+    if (forget) {
+      // Leaves the database on the host: an administrator decision (hosts are administrators' infrastructure).
+      await admin(req);
+      await dbs.forget(a, p.databaseId, actorOf(req));
+    } else {
+      await dbs.remove(a, p.databaseId, actorOf(req));
+    }
     return reply.status(204).send();
   });
 }
